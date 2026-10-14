@@ -2,8 +2,6 @@
 
 PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardware and the original firmware are his, and the menu and file features here are added on top. It keeps the GPL v3 licence (see `LICENSE` and `THIRD-PARTY-NOTICES.txt`). The picoFace is an inexpensive device for the ZX Spectrum that uses a Raspberry Pi Pico to provide Multiface style functionality.
 
-![picoFace Pic](./picomenu.jpg)
-
 It can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
 * Load and save snapshots, 48K and 128K, as `.sna`, `.z80` and `.szx`; load `.tap` and `.tzx` tapes.
@@ -41,8 +39,6 @@ It can be used to:
 The NMI button: a short press opens the menu; a **double press** saves the screen as a screen grab (green border: saved, red: not); holding it for one second resets into the Spectrum's own ROM. See `CHANGELOG.md` for what changed and `Docs/Instructions.txt` for the details and test notes. Features have been tested in simulation; check anything important on your own hardware.
 
 For a demonstration of the device in action see this video:
-
-[![picoFace Video](https://img.youtube.com/vi/BUWlcWCz8AM/0.jpg)](https://www.youtube.com/watch?v=BUWlcWCz8AM)
 
 
 ## Related repositories
