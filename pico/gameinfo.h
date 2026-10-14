@@ -1040,16 +1040,20 @@ inline bool screen_is_blank(const uint8_t* screen) {
 // The key row: what can be pressed (out holds 40 letters). In the menu (from_menu) the
 // information is only looked at; from Browse Games ENTER loads the game.
 // can_delete: a screen grab is showing, which D deletes. M edits the game's details and notes.
-inline void key_help(bool from_menu, int pages, char* out, bool can_delete = false) {
+inline void key_help(bool from_menu, int pages, char* out, bool can_delete = false, bool can_full = false) {
+    const bool pg = pages > 1;
     if (from_menu) {
-        snprintf(out, 40, "%s", pages > 1 ? "N/P-Page  M-Edit  X-Exit" : "M-Edit  X-Exit");
+        if (can_full) snprintf(out, 40, "%s", pg ? "N/P-Page F-Full M-Edit X-Exit" : "F-Full  M-Edit  X-Exit");
+        else snprintf(out, 40, "%s", pg ? "N/P-Page  M-Edit  X-Exit" : "M-Edit  X-Exit");
         return;
     }
     if (can_delete) {
-        snprintf(out, 40, "%s", pages > 1 ? "ENT-Load N/P D-Del M-Edit X-Bk" : "ENTER-Load D-Del M-Edit X-Back");
+        if (can_full) snprintf(out, 40, "%s", pg ? "ENT-Ld N/P D-Del F-Full M-Edit" : "ENT-Load D-Del F-Full M-Edit X");
+        else snprintf(out, 40, "%s", pg ? "ENT-Load N/P D-Del M-Edit X-Bk" : "ENTER-Load D-Del M-Edit X-Back");
         return;
     }
-    snprintf(out, 40, "%s", pages > 1 ? "ENTER-Load N/P M-Edit X-Back" : "ENTER-Load  M-Edit  X-Back");
+    if (can_full) snprintf(out, 40, "%s", pg ? "ENT-Load N/P F-Full M-Edit X-Bk" : "ENTER-Load F-Full M-Edit X-Back");
+    else snprintf(out, 40, "%s", pg ? "ENTER-Load N/P M-Edit X-Back" : "ENTER-Load  M-Edit  X-Back");
 }
 
 }   // namespace gameinfo

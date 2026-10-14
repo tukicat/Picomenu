@@ -4804,7 +4804,7 @@ showgameinfo:
     ld a, (.infopic)
     ld (ix + 4), a
     ld a, (.infoop)
-    ld (ix + 5), a          // 0, 1 asking to delete the grab shown, 2 delete it, 3 start the notes editor, 4 a key for it
+    ld (ix + 5), a          // 0, 1 asking to delete the grab shown, 2 delete it, 3 start the notes editor, 4 a key for it, 5 F
     ld a, (.infokeyval)
     ld (ix + 6), a
     ld (ix + 1), ACTION_GAME_INFO
@@ -4863,7 +4863,12 @@ showgameinfo:
     ld a, 3
     ld (.infoop), a
     jp .infoshow
-5:  cp 'n'
+5:  cp 'f'                  // F: the picture on the whole screen, or back (the pico keeps which)
+    jr nz, 6F
+    ld a, 5
+    ld (.infoop), a
+    jp .infoshow
+6:  cp 'n'
     jr z, .infonext
     cp 'p'
     jr z, .infoprev
@@ -4887,13 +4892,13 @@ showgameinfo:
 .infoidle:
     ld a, (.infoop)         // no cycling while it asks
     or a
-    jr nz, .infokey
+    jp nz, .infokey
     ld a, (.infopics)
     cp 2
-    jr c, .infokey
+    jp c, .infokey
     ld a, (.infopage)
     or a
-    jr nz, .infokey
+    jp nz, .infokey
     ld hl, (.infotimer)
     dec hl
     ld (.infotimer), hl

@@ -2,6 +2,15 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 1.8 (2026-10-14)
+Fix: V did not show the pictures the scraper downloads when the Instructions file is in the folder Scraper.
+- The scraper program saves a game's loading screens in a `Screen Grabs` folder beside the Instructions file, so with `Instructions.txt` in `/Scraper` they are in `/Scraper/Screen Grabs`; V only looked in `/Screen Grabs` in the root of the card. It now looks in both: `/Scraper/Screen Grabs` first (the loading screens), then `/Screen Grabs` (the grabs made on the Spectrum). With the Instructions file in the root, nothing changes.
+- A game's own picture (from a snapshot or tape) is still first of all; at most 8 pictures are cycled in all. D deletes the picture shown from whichever folder it is in (the scraper does not fetch a deleted one again: it keeps its own list). A Save Game of the game finds the same pictures.
+- Grabs made on the Spectrum (G, or a double press of the NMI button) still go in `/Screen Grabs`, and names there are chosen from that folder only.
+- No folder, no search: the 40 name lookups for a folder are skipped when it is not there.
+- **F** on the game information (V in Browse Games, or I on the menu) switches between the details screen (small picture, software house, year, controls, instructions) and the picture on the whole screen. The pictures still cycle by themselves in either view; N, P and D do nothing on the full screen, and the key row (which now shows `F-Full` when there is a picture) is not drawn there. The choice stays until the power is off; M-Edit leaves the full view. With no picture F says "No picture to show". New ROM action `.infoop` 5 (about 20 bytes; `spare_size` is still above what the buffers need); key row strings changed (`key_help` has a `can_full` argument).
+- Help: the "Seeing a game: V" page tells about F; the "Instructions file" page says the scraper's pictures are read from `/Scraper/Screen Grabs` too. `FIRMWARE_ID` is `Rev 1.8 (tapeloader v108)`. 
+
 ## Rev 1.7 (2026-10-14)
 Edit a game's details on the Spectrum: software house, year, controls and instructions. Instructions.txt is still read, and still edited on a PC, as before.
 - M on the game's information (V in Browse Games, I on the menu, or from Recently played) now opens a small menu, "Edit: <game>": **H** software house, **Y** year, **C** controls, **I** instructions, **N** your own notes (the old M screen, unchanged), **R** takes back everything typed in (asks Y or N), **X** back. The key row says `M-Edit` where it said `M-Notes`.

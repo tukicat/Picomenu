@@ -713,7 +713,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 1.7 (tapeloader v107)";
+static const char FIRMWARE_ID[] = "Rev 1.8 (tapeloader v108)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -3751,6 +3751,7 @@ static const uint32_t GRAB_SCR_OFFSET = 32768;
 static_assert(INFO_DATA_OFFSET + sizeof(gameinfo::Info) <= GRAB_SCR_OFFSET, "no room for the game information");
 static_assert(GRAB_SCR_OFFSET + screengrab::SCR_SIZE <= SNAP_LOAD_BUFFER_SIZE, "no room for a screen grab");
 static bool info_loaded = false;
+static bool info_full = false;      // View: the picture on the whole screen (F toggles; kept until power off)
 
 __attribute__((noinline)) static bool info_read_file(gameinfo::Info* info, const char* game) {
     // the folder Scraper first (where the scraper program puts it), then the root of the card
@@ -3769,9 +3770,13 @@ __attribute__((noinline)) static bool info_read_file(gameinfo::Info* info, const
 }
 
 // The screen grabs of the game ACTION_SNAP_PREVIEW was asked about: the numbers (0 for the
-// name alone, 1 for name1 ...) of the .scr files in the Screen Grabs folder
+// name alone, 1 for name1 ...) of the .scr files in the Screen Grabs folder of the scraper
+// (/Scraper/Screen Grabs, the loading screens it downloads), then in /Screen Grabs (the grabs
+// made here). grab_from says which folder a picture is in.
 static int grab_count = 0;
 static uint8_t grab_number[screengrab::MAX_PICTURES];
+static uint8_t grab_from[screengrab::MAX_PICTURES];             // 0 /Scraper/Screen Grabs, 1 /Screen Grabs
+static const char* grab_folder(int k) { return grab_from[k] == 0 ? screengrab::SCRAPER_FOLDER : screengrab::FOLDER; }
 
 __attribute__((noinline)) static void grabs_find(const char* game) {
     grab_count = 0;
@@ -3779,10 +3784,17 @@ __attribute__((noinline)) static void grabs_find(const char* game) {
     if (!sd_card_mounted || screengrab::base_name(game, base) == 0) {
         return;
     }
-    for (int i = 0; i < screengrab::MAX_SCAN && grab_count < screengrab::MAX_PICTURES; i++) {
-        screengrab::path_for(base, i, ".scr", grab_path, sizeof(grab_path));
-        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_FILE) {
-            grab_number[grab_count++] = (uint8_t) i;
+    for (int from = 0; from < 2; from++) {
+        const char* folder = from == 0 ? screengrab::SCRAPER_FOLDER : screengrab::FOLDER;
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, folder) != fsops::KIND_DIR) {
+            continue;                   // no folder: no 40 lookups
+        }
+        for (int i = 0; i < screengrab::MAX_SCAN && grab_count < screengrab::MAX_PICTURES; i++) {
+            screengrab::path_in(folder, base, i, ".scr", grab_path, sizeof(grab_path));
+            if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_FILE) {
+                grab_from[grab_count] = (uint8_t) from;
+                grab_number[grab_count++] = (uint8_t) i;
+            }
         }
     }
     LOG("%d screen grabs of %s\n", grab_count, game);
@@ -3793,7 +3805,7 @@ __attribute__((noinline)) static bool grab_load(const char* game, int k, uint8_t
     if (k < 0 || k >= grab_count || screengrab::base_name(game, base) == 0) {
         return false;
     }
-    screengrab::path_for(base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
+    screengrab::path_in(grab_folder(k), base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
     FileHandle f;
     if (!f.open(Drive::EXTERNAL_SD_CARD, grab_path, true)) {
         return false;
@@ -4346,6 +4358,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     notes::Editor* editor = reinterpret_cast<notes::Editor*>(snap_load_buffer + NOTES_EDITOR_OFFSET);
     if (ended) {
         page = 255;                 // the last page
+        info_full = false;
     }
     if (op == 3 || op == 4) {
         op = 0;                     // the notes editor's, done in nmi_action_game_info
@@ -4371,7 +4384,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
         return;
     }
     const bool fresh = !info_loaded || (page == 0 && pic == 0);
-    if (page == 0 || !info_loaded) {
+    if ((page == 0 || !info_loaded) && !(info_full && info_loaded && !fresh)) {
         info_load(info, name, mode);
     }
     if (mode == 0 && fresh) {
@@ -4383,6 +4396,37 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     const bool file_picture = mode == 0 && info_source != nullptr;
     int pictures = mode == 1 ? 0 : (file_picture ? 1 : 0) + grab_count;
     if (pic >= pictures) pic = 0;
+    if (op == 5) {                  // F: the picture on the whole screen, or back
+        op = 0;
+        if (info_full) {
+            info_full = false;
+        } else if (mode == 1 ? screen_stashed : pictures > 0) {
+            info_full = true;
+        } else {
+            notes_message = "No picture to show";
+        }
+    }
+    if (info_full) {
+        const uint8_t* full = nullptr;
+        if (mode == 1) {
+            full = screen_stashed ? screen_stash : nullptr;
+        } else if (pictures > 0) {
+            if (file_picture && pic == 0) {
+                full = info_source;
+            } else if (grab_load(name, pic - (file_picture ? 1 : 0), grab)) {
+                full = grab;
+            }
+        }
+        if (full != nullptr) {
+            memcpy(screen, full, 6912);
+            preview_screen = screen;
+            nmi_rom_data[1] = 0;
+            nmi_rom_data[3] = 0;
+            nmi_rom_data[0] = (uint8_t) (1 | ((pictures > 15 ? 15 : pictures) << 4));
+            return;
+        }
+        info_full = false;
+    }
     // a screen grab is showing (the picture is on the first page): D can delete it
     bool grab_shown = mode == 0 && page == 0 && pictures > 0 && !(file_picture && pic == 0);
     bool asking = false;
@@ -4393,7 +4437,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
         char base[screengrab::NAME_MAX + 1];
         int k = pic - (file_picture ? 1 : 0);
         if (screengrab::base_name(name, base) > 0 && k >= 0 && k < grab_count) {
-            screengrab::path_for(base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
+            screengrab::path_in(grab_folder(k), base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
             LOG("Delete the grab %s\n", grab_path);
             fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
         }
@@ -4442,7 +4486,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     info_paint_text(screen, *info, page);
     char keys[40];
-    gameinfo::key_help(mode == 1, pages, keys, grab_shown);
+    gameinfo::key_help(mode == 1, pages, keys, grab_shown, mode == 1 ? screen_stashed : pictures > 0);
     if (asking) {
         snprintf(keys, sizeof(keys), "Delete this grab?  Y-Yes  N-No");
     }

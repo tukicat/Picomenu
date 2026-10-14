@@ -889,3 +889,9 @@ What you type in is kept in the Game Notes folder as <game>.info.txt and is show
   Instructions
   Hit all the shields ...
 Delete the file (or press R) to go back to what Instructions.txt says.
+
+Rev 1.8
+-------
+The pictures the scraper program downloads are now shown by V wherever it put them: in /Scraper/Screen Grabs (beside Instructions.txt in the folder Scraper) or in /Screen Grabs in the root of the card. Pictures from /Scraper/Screen Grabs come first. You do not need to move the scraper or its files.
+
+F on the game information (V in Browse Games, or I on the menu) shows the picture on the whole screen; F again goes back to the details. The pictures still change by themselves in either view. The full screen has no key row: F goes back, X exits, ENTER loads (Browse Games), M opens the edit menu. The choice is kept until the power is off. The key row shows F-Full when there is a picture to show.

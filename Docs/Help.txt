@@ -158,14 +158,15 @@ the SCREEN$ block of a tape.
 G on the menu or a double
 press of the NMI button while
 in game saves the screen as a
-grab in the /Screen Grabs
-folder on the SD card
-(<game name>.scr).
-N and P turn the pages. ENTER
+grab in /Screen Grabs on the
+SD card (<game name>.scr).
+N and P turn pages. ENTER
 loads, X goes back. D deletes
 the grab shown (Y to confirm).
-You can also add your own notes
-(Edit and notes: M)
+F shows the picture full
+screen, F again goes back (the
+pictures still cycle). Add your
+own notes: Edit and notes: M
 @@ Set up SD card
 # D-Set up SD card
 Place a blank fat32 formatted
@@ -205,6 +206,9 @@ name without .sna, .tap and
 so on.
 Details typed in on the
 Spectrum (M) win over this file.
+The scraper's loading screens
+are read from /Scraper/Screen
+Grabs too (V shows them first).
 
 @@ Edit and notes: M
 In Browse Games (V) or on the

@@ -2,28 +2,24 @@
 
 PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardware and the original firmware are his, and the menu and file features here are added on top. It keeps the GPL v3 licence (see `LICENSE` and `THIRD-PARTY-NOTICES.txt`). The picoFace is an inexpensive device for the ZX Spectrum that uses a Raspberry Pi Pico to provide Multiface style functionality.
 
-Picomenu has been built using Brian Apps original code, an AI (Claude) has then developed on this with my input. My main input to this project was to decide on functionality, layout, feature set and testing.
+![picoFace Pic](./picomenu.jpg)
 
-Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
-
-![The NMI menu](images/1-nmi-menu.png)
-
-Picomenu can be used to:
+It can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
 * Load and save snapshots, 48K and 128K, as `.sna`, `.z80` and `.szx`; load `.tap` and `.tzx` tapes.
 * Controls and instructions for each game from a text file `Instructions.txt` in the folder `Scraper` on the SD card (or in the root, if there is none there): shown beside a small copy of the game's screen (V in Browse Games, where D deletes a screen grab) and from the menu with I (Game Instructions) after the game has loaded (see `Docs/Instructions-example.txt`).
 * Quick save keeps earlier saves: Q asks to overwrite, or N saves as "<game> Save Game 2", 3 ...
-* Each game's information can also show its software house and year, and your own notes on the game (M while the information shows, E to edit them; kept in a `Game Notes` folder that you make in the root of the SD card).
+* Each game's information can also show its software house and year, and your own notes on the game. M while the information shows opens a menu to type in the software house, year, controls and instructions on the Spectrum (they are kept per game in `Game Notes/<game>.info.txt` and win over `Instructions.txt`, which you can still edit on a PC) and to write notes (kept in a `Game Notes` folder that you make in the root of the SD card).
 * A list of the last 10 games played (E on the menu), kept after power off; 1 to 9 and 0 load one, V then a number shows its picture and instructions.
-* G on the menu saves the running game's screen (`.scr`) in a `Screen Grabs` folder on the SD card; V in Browse Games cycles through a game's own screen and its grabs.
+* G on the menu saves the running game's screen (`.scr`) in a `Screen Grabs` folder on the SD card; V in Browse Games cycles through a game's own screen and its grabs; F there switches between the details and the picture full screen.
 * The SD card shows up as a USB drive on a PC when the Pico is plugged in with the Spectrum off (copy files without taking the card out; eject before unplugging).
 * Browse the SD card and the internal flash (both with folders, search, move files and folders, copy files and folders (a folder copy stays on one drive; the SD card and the flash are not mixed), copy files between the drives, rename files and folders, erase files and folders): preview a game's screen, show file sizes and which machine (48 or 128) each snapshot needs.
 * Quick save (`<game> Save Game`) and reload the last game with one key.
 * Apply pokes to loaded games, typed in or from a `.pok` file.
 * Reset into 48K or 128K from the menu.
 * Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (U on the menu; if it fails, BOOTSEL still works).
-* on-screen help
-
+* Show on-screen help and a diagnostics page.
+* Remotely control the Spectrum from another machine, like a PC or phone. This includes transferring snapshots and blocks of memory between these devices.
 
 ### The NMI menu
 
@@ -44,13 +40,16 @@ Picomenu can be used to:
 
 The NMI button: a short press opens the menu; a **double press** saves the screen as a screen grab (green border: saved, red: not); holding it for one second resets into the Spectrum's own ROM. See `CHANGELOG.md` for what changed and `Docs/Instructions.txt` for the details and test notes. Features have been tested in simulation; check anything important on your own hardware.
 
-![Browse Games](images/2-browse-games.png)
+For a demonstration of the device in action see this video:
 
-![View Screem](images/3-view-screen.png)
+[![picoFace Video](https://img.youtube.com/vi/BUWlcWCz8AM/0.jpg)](https://www.youtube.com/watch?v=BUWlcWCz8AM)
+
 
 ## Related repositories
 
 * The KiCad circuit design is held in https://github.com/brianapps/picoface_kicad
+* The Android Studio project for the phone loading application is held in https://github.com/brianapps/picoface_phone
+
 
 
 ## Building the pico firmware
@@ -62,14 +61,115 @@ The firmware build relies on the following being installed and on the path:
 - Raspberry Pi Pico SDK 
 - VSCode and VSCode Pico plugin.
 
+Building is performed by CMake, for example on Linux:
+
+```
+mkdir build
+cd build
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ../pico
+ninja
+```
+
+or on Windows:
+
+```
+md build
+cd build
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ../pico
+ninja
+```
+
+This will create the `picoface.uf2` that can be uploaded to the Pico e.g. using the `picotool`
+
+```
+picotool load picoface.uf2 -f
+```
+
+## GALasm
+
+The [gal](./gal) folder holds the logic design for the PLDs used by picoface.
+
+The logic is used to multiplex the address lines, perform memory access decoding, and io request decoding for the joystick.
+
+- `GALV22V10.pld` The original logic for the proof of concept design. Two identical GAL22V10s are used and some redudant logic is duplicated.
+- `GAL16v8_A.pld` and `GAL16v8_B.pld`. The revised design for the prototype PCB. The logic was reworked to fit onto smaller chips and redudant logic removed.
+
+The `.pld` should be compiled with [GALasm](https://github.com/daveho/GALasm) as follows:
+
+```
+galasm <filename.pld>
+```
+
+and this produces `.chp`, `.fus`, `.jed` and `.pin` files.
+
+I programmed the chips using a XGecu T48 programmer using the [minipro](https://gitlab.com/DavidGriffith/minipro) programmer.
+
+To program the GAL22V10D use:
+
+```
+minipro -p GAL22V10D -w GAL22V10.jed -u
+```
+
+And to program the ATF16V8Bs use
+
+
+```
+minipro -p ATF16V8B -w GAL16v8A.jed -u
+```
+
+The `-u` flag makes the chip unprotected so you can double check things worked with
+
+`minipro -p GAL22V10D --verify GAL22V10.jed`
+
+There's also a python script [`updatesym.py`](gal/updatesym.py) that updates a custom KiCad part library so that the pin names in KiCad match those specified in the .pld file. This ensures parts placed in the schematic have the correct labels (by using the Pin Helpers -> Net Label command in KiCad) and that they also mapped to the correct pin numbers on the footprint. This eliminates transcribing errors and helps ensure the PCB is designed and routed correctly.
+
+## Code
+
+The picoFace firmware in the Pico and can be split into three main parts:
+* The memory handler. This uses one core of the pico to emulate physical memory chips by bit banging. This core is given priority to the bus fabric to ensure the other core doesn't interrupt it. The timing is critical and incredibly tight, especially dealing with the extra progation delays of the multiplexer and the pico's input stabilisers. It uses a couple of the state machines in a single PIO devices and some optimised code to communicate with SM FIFOs. I struggled to get the C compiler to do what I wanted. I needed it to optimise certain code paths at the expense of others -- the compiler gave me the optimal choice across all code paths. In the end I learnt enough ARM M0 to hand craft the code in assembler.
+* General purpose code. This uses the other core in the Pico to do all the other stuff. Timing is not that critical and its much easier to write. The general purpose code does things like polling the magic button, reading/writing from flash, SD card handling, responding to CLI requests, and handling interactions from the Spectrum.
+* The NMI Rom. The code in the [nmirom](./nmirom) folder provides the picoFace menu handling. It is written in pure Z80 using the sjasmplus assembler. It provides a custom non-maskable interrupt handler at 0x66. The nmirom is automatically built by CMake via a custom command, the output from sjasmplus is converted (using the [asm_to_c_file.py](./pico/asm_to_c_file.py) script) to two files `nmi.c` which holds the binary and `nmi.h` that contains a selection of symbols.  The memory handler pages the NMI Rom in when the interrupt is executed and pages it out when the NMI Rom code exits. The NMI Rom communicates with the Pico by writing to certain memory locations. For example, to list the snap shots on the SD card we craft Z80 code to write a bunch parameters into memory e.g. what directory to list, the number of entries to read and where to store the results. The Z80 then spins waiting for the pico to respond. In turn the pico firmware monitors these memory address and acts upon these instructions, when complete it indicates so by modifying the content of the NMI ROM. The Z80 sees this change, exits its spin loop and continues. It's a crude remote procedure call scheme but it works.
+
+The code bears all the signs of proof-of-concept/prototype work. Comprehensive error handling has been abandoned in favour of getting something working. Comments are not 100% up-to-date and redundant code is still present. They are signs of the blind alleys and dead ends followed in this kind of work.
+
+## Scripts
+
+Various Python scripts are included. Several use PySide6/QT and should be cross platform (they have been tested on Linux and Windows).
+
+It is recommend to set up a virtual python environment and install the requirements given in `requirements.txt`. e.g.
+
+on Windows
+```
+python -m venv env
+env\bin\Activate
+pip install -r requirements.txt
+```
+
+on Linux
+```
+python3 -m venv env
+. env/bin/activate
+pip install -r requirements.txt
+```
+
+The scripts include
+
+* `usb.py`. This script handles the command line interface to the picoface. It uses the pySerial library to communicate with the RPi Pico via the USB port. 
+* `convertZ80.py`. Converts a 48K Z80 snapshot to an uncompressed version 1 Z80 file. It is no longer needed to upload files: the picoFace reads 48K and 128K SNA files and every kind of Z80 file (version 1, 2 or 3, compressed or not) just as they are.
+* `drag_drop.py`. A simple PySide6/QT application that acts a drop target for Z80 files. Dropping a file from file explorer onto this window automatically uploads it to the picoFace.
+* `create_snaps_zip.py`. A script to extract snapshots from a popular Spectrum archive and rezip them into a `snap.zip` files for use by other programs like the [phone loader](https://github.com/brianapps/picoface_phone). Putting all files in a single zip significantly speeds up copying files to another device, only one (big) file needs to be copied rather than 1000s of tiny files.
+* `filemanager.py`. A PySide6/QT application to aid the management of snapshots and rom images held on the picoFace.
+![filemanager](./filemanager.png)
+* `snap_uploader.py`. A bit like the phone loader but runs on the PC.
+
 
 ## License
 
-Picomenu is free software: you can redistribute it and/or modify it under the terms of
+picoFace is free software: you can redistribute it and/or modify it under the terms of
 the GNU General Public License as published by the Free Software Foundation, either
 version 3 of the License, or (at your option) any later version.
 
-Picomenu is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; 
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; 
 without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 

@@ -15,6 +15,11 @@
 namespace screengrab {
 
 static const char FOLDER[] = "/Screen Grabs";
+// The scraper program (scripts/scrape_game_info) saves the loading screens it downloads in a
+// "Screen Grabs" folder beside the Instructions file, so with the Instructions file in the
+// folder Scraper they are here. V shows pictures from both folders (these first); the grabs
+// the Picoface makes go in FOLDER.
+static const char SCRAPER_FOLDER[] = "/Scraper/Screen Grabs";
 static const size_t SCR_SIZE = 6912;
 static const int MAX_SCAN = 40;         // the numbers looked at for one game (none, 1 ... 39)
 static const int MAX_PICTURES = 8;      // the most V cycles through for one game
@@ -53,13 +58,18 @@ inline size_t base_name(const char* game, char* out) {
     return n;
 }
 
-// "/Screen Grabs/<base>" then nothing for number 0, or the number, then the extension (with its dot)
-inline void path_for(const char* base, int number, const char* ext, char* out, size_t outsize) {
+// "<folder>/<base>" then nothing for number 0, or the number, then the extension (with its dot)
+inline void path_in(const char* folder, const char* base, int number, const char* ext, char* out, size_t outsize) {
     if (number == 0) {
-        snprintf(out, outsize, "%s/%s%s", FOLDER, base, ext);
+        snprintf(out, outsize, "%s/%s%s", folder, base, ext);
     } else {
-        snprintf(out, outsize, "%s/%s%d%s", FOLDER, base, number, ext);
+        snprintf(out, outsize, "%s/%s%d%s", folder, base, number, ext);
     }
+}
+
+// The same in the Picoface's own folder, "/Screen Grabs"
+inline void path_for(const char* base, int number, const char* ext, char* out, size_t outsize) {
+    path_in(FOLDER, base, number, ext, out, outsize);
 }
 
 // The text the Pico shows after a grab: "Saved as <name>", cut to fit a line of 31

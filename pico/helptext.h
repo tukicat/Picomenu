@@ -268,14 +268,15 @@ static const HelpPage help_pages[] = {
       "G on the menu or a double\n"
       "press of the NMI button while\n"
       "in game saves the screen as a\n"
-      "grab in the /Screen Grabs\n"
-      "folder on the SD card\n"
-      "(<game name>.scr).\n"
-      "N and P turn the pages. ENTER\n"
+      "grab in /Screen Grabs on the\n"
+      "SD card (<game name>.scr).\n"
+      "N and P turn pages. ENTER\n"
       "loads, X goes back. D deletes\n"
       "the grab shown (Y to confirm).\n"
-      "You can also add your own notes\n"
-      "(Edit and notes: M)\n"
+      "F shows the picture full\n"
+      "screen, F again goes back (the\n"
+      "pictures still cycle). Add your\n"
+      "own notes: Edit and notes: M\n"
     },
     { "Set up SD card",
       "# D-Set up SD card\n"
@@ -317,6 +318,9 @@ static const HelpPage help_pages[] = {
       "so on.\n"
       "Details typed in on the\n"
       "Spectrum (M) win over this file.\n"
+      "The scraper's loading screens\n"
+      "are read from /Scraper/Screen\n"
+      "Grabs too (V shows them first).\n"
     },
     { "Edit and notes: M",
       "In Browse Games (V) or on the\n"
