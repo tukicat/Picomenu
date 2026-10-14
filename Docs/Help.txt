@@ -165,7 +165,7 @@ N and P turn the pages. ENTER
 loads, X goes back. D deletes
 the grab shown (Y to confirm).
 You can also add your own notes
-(Your notes: M)
+(Edit and notes: M)
 @@ Set up SD card
 # D-Set up SD card
 Place a blank fat32 formatted
@@ -203,18 +203,32 @@ For example
 The name needs to match the game
 name without .sna, .tap and
 so on.
+Details typed in on the
+Spectrum (M) win over this file.
 
-@@ Your notes: M
-Available in the Browse Games
-(V), or from the NMI menu (I on
-the menu) - press M to enter a
-section where you can write your
-own notes on the game. These
-are kept as <game name>.txt in
-a folder named /Game Notes in
-the root of the SD card. Save
-Games also share the game's
-notes.
+@@ Edit and notes: M
+In Browse Games (V) or on the
+menu (I) press M to change what
+is shown about the game. It
+needs the Game Notes folder.
+H  software house
+Y  year
+C  controls (512 letters)
+I  instructions (2048 letters)
+N  your own notes
+R  take back all you typed in
+In a box: letters, ENTER,
+DELETE, cursor keys or CAPS+5-8.
+BREAK finishes, then Y saves
+and N does not.
+# Where it is kept
+Details: <game name>.info.txt,
+notes: <game name>.txt, both in
+/Game Notes on the SD card.
+Details you type in are shown
+instead of the same part of the
+Instructions file, which stays
+as it is. Save Games share them.
 @@ Finding files: F
 F asks for up to 12 letters.
 ENTER searches, BREAK cancels,

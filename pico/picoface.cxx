@@ -713,7 +713,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 1.6 (tapeloader v106)";
+static const char FIRMWARE_ID[] = "Rev 1.7 (tapeloader v107)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -3825,6 +3825,31 @@ static const char* notes_message = nullptr;             // shown once on the key
 
 static const char NOTES_NO_FOLDER[] = "No Game Notes folder - add one";    // 30 letters: the editor's width
 
+// ---- Details typed in on the Spectrum: <game>.info.txt in the Game Notes folder (gameinfo::Details).
+// M on the game's information opens a small menu (the hub): N the notes, H the software house,
+// Y the year, C the controls, I the instructions, R takes back what was typed in. Each of H Y C I
+// is edited in a box of its own, with a limit, and saved on its own.
+using DetEditorBig = notes::EditorT<96, 30>;            // the controls and the instructions
+using DetEditorOne = notes::EditorT<1, 30>;             // the software house and the year
+static const uint32_t DETAILS_OFFSET = 49152;           // the Details of the game
+static const uint32_t DET_EDITOR_OFFSET = DETAILS_OFFSET + 3584;
+static const uint32_t DET_FILE_OFFSET = DET_EDITOR_OFFSET + 3584;
+static const size_t DET_FILE_MAX = 3072;
+static_assert(sizeof(gameinfo::Details) <= 3584, "the details do not fit");
+static_assert(sizeof(DetEditorBig) <= 3584, "the details editor does not fit");
+static_assert(NOTES_HANDLE_OFFSET + sizeof(FileHandle) <= DETAILS_OFFSET, "the details would cover the notes' file handle");
+static_assert(DET_FILE_OFFSET + DET_FILE_MAX <= 65536, "the details use the recent games' room");
+static_assert(gameinfo::TEXT_MAX + gameinfo::CONTROLS_MAX + 200 <= DET_FILE_MAX, "a details file does not fit its buffer");
+enum EditKind : uint8_t { EK_HUB, EK_NOTES, EK_FIELD };
+static uint8_t edit_kind = EK_HUB;                      // which screen is up while notes_editing
+static char det_field = 0;                              // h y c or i, while EK_FIELD
+static bool det_saved = false;                          // something was saved: show the first page after
+static bool det_have = false;                           // the game has a details file
+static bool det_confirm = false;                        // R was pressed: Y takes the details back
+
+static gameinfo::Details* det_data() { return reinterpret_cast<gameinfo::Details*>(snap_load_buffer + DETAILS_OFFSET); }
+static char* det_file() { return snap_load_buffer + DET_FILE_OFFSET; }
+
 // The folder is made on a PC (in the root of the card), not by the Picoface
 NOTES_FUNC static bool notes_folder_there() {
     return fsops::kind(Drive::EXTERNAL_SD_CARD, notes::FOLDER) == fsops::KIND_DIR;
@@ -3886,6 +3911,230 @@ NOTES_FUNC static bool notes_write(const char* game, const char* data, size_t n)
     return ok;
 }
 
+NOTES_FUNC static bool det_path(const char* game, char* path, size_t size) {
+    char base[screengrab::NAME_MAX + 1];
+    if (!sd_card_mounted || screengrab::base_name(game, base) == 0) {
+        return false;
+    }
+    snprintf(path, size, "%s/%s.info.txt", notes::FOLDER, base);
+    return true;
+}
+
+// The game's details file into the Details (empty ones if there is none). True if there is one.
+NOTES_FUNC static bool det_read(const char* game, gameinfo::Details* d) {
+    d->clear();
+    char path[screengrab::NAME_MAX + 24];
+    if (!det_path(game, path, sizeof(path))) {
+        return false;
+    }
+    FileHandle& f = *notes_handle();
+    if (!f.open(Drive::EXTERNAL_SD_CARD, path, true)) {
+        return false;
+    }
+    int got = f.read(det_file(), DET_FILE_MAX - 1);
+    f.close();
+    if (got <= 0) {
+        return true;
+    }
+    d->parse(det_file(), (size_t) got);
+    return true;
+}
+
+// Keeps the Details as the game's file (removes the file when nothing is left in them)
+NOTES_FUNC static bool det_write(const char* game, const gameinfo::Details* d) {
+    char path[screengrab::NAME_MAX + 24];
+    if (!det_path(game, path, sizeof(path))) {
+        return false;
+    }
+    size_t n = d->serialize(det_file(), DET_FILE_MAX);
+    if (!d->any() || n == 0) {
+        if (notes_folder_there()) {
+            fsops::remove_path(Drive::EXTERNAL_SD_CARD, path);
+        }
+        det_have = false;
+        return true;
+    }
+    if (!notes_folder_there()) {
+        notes_message = NOTES_NO_FOLDER;
+        return false;
+    }
+    bool ok = false;
+    FileHandle& f = *notes_handle();
+    if (f.open(Drive::EXTERNAL_SD_CARD, path, false)) {
+        ok = f.write(det_file(), n) == (int) n;
+        ok = f.close() && ok;
+    }
+    if (!ok) {
+        fsops::remove_path(Drive::EXTERNAL_SD_CARD, path);
+        set_last_error("Cannot save", "details");
+        det_have = false;
+    } else {
+        det_have = true;
+    }
+    return ok;
+}
+
+// ---- the details menu
+// The text of a field to edit as it is now (what the screen shows, from the information)
+NOTES_FUNC static const char* det_current(const gameinfo::Info* info, char field) {
+    switch (field) {
+        case 'h': return info->house;
+        case 'y': return info->year;
+        case 'c': return info->controls;
+        default: return info->text;
+    }
+}
+
+// Starts the box for a field. False (with a message) if what is there does not fit it.
+NOTES_FUNC static bool det_open_field(const gameinfo::Info* info, char field) {
+    const char* cur = det_current(info, field);
+    char* file = det_file();
+    if (field == 'h' || field == 'y') {
+        DetEditorOne* one = new (snap_load_buffer + DET_EDITOR_OFFSET) DetEditorOne();
+        one->set_limit(field == 'y' ? gameinfo::YEAR_MAX + 2 : 0);
+        if (!one->load(cur, strlen(cur))) {
+            notes_message = "Too long to edit here";
+            return false;
+        }
+        return true;
+    }
+    // the text is cut into lines of the box's width, each line ending where it was cut
+    size_t n = 0;
+    gameinfo::Wrap w(cur, 30);
+    char line[40];
+    while (w.next(line)) {
+        size_t len = strlen(line);
+        if (n + len + 1 >= DET_FILE_MAX) {
+            break;
+        }
+        memcpy(file + n, line, len);
+        n += len;
+        file[n++] = '\n';
+    }
+    DetEditorBig* big = new (snap_load_buffer + DET_EDITOR_OFFSET) DetEditorBig();
+    big->set_limit(field == 'c' ? gameinfo::CONTROLS_MAX : gameinfo::TEXT_MAX);
+    if (!big->load(file, n)) {
+        notes_message = "Too long for this screen";
+        return false;
+    }
+    return true;
+}
+
+// The box's save: the field into the game's file, keeping the other parts that are there
+NOTES_FUNC static bool det_save_field(const char* game, char field, gameinfo::Info* info) {
+    gameinfo::Details* d = det_data();
+    det_read(game, d);
+    char* file = det_file();
+    size_t n;
+    if (field == 'h' || field == 'y') {
+        DetEditorOne* one = reinterpret_cast<DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET);
+        n = one->text(file, DET_FILE_MAX);
+        if (n > 0 && file[n - 1] == '\n') {
+            file[--n] = '\0';
+        }
+    } else {
+        DetEditorBig* big = reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET);
+        n = big->text(file, DET_FILE_MAX);
+    }
+    switch (field) {
+        case 'h': d->set_house(file); break;
+        case 'y': d->set_year(file); break;
+        case 'c': d->set_controls(file); break;
+        default: d->set_text(file); break;
+    }
+    if (!det_write(game, d)) {
+        return false;
+    }
+    info->apply(*d);                // what is on the screen from now on
+    return true;
+}
+
+NOTES_FUNC static void det_hub_draw(uint8_t* screen, const gameinfo::Info* info, const char* game) {
+    memset(screen, 0, 6144);
+    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    char title[40];
+    snprintf(title, sizeof(title), "Edit: %s", game);
+    help_put_text(screen, 0, 1, title, (int) strlen(title) > 30 ? 30 : (int) strlen(title), gameinfo::ATTR_BANNER);
+    auto put = [&](int row, int col, const char* s, uint8_t attr) {
+        help_put_text(screen, row, col, s, (int) strlen(s) > 30 - col + 1 ? 30 - col + 1 : (int) strlen(s), attr);
+    };
+    char s[40];
+    put(2, 1, "H-Software house", gameinfo::ATTR_HEADING);
+    put(3, 3, info->house[0] != '\0' ? info->house : "(none)", info->house[0] != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+    put(4, 1, "Y-Year", gameinfo::ATTR_HEADING);
+    put(5, 3, info->year[0] != '\0' ? info->year : "(none)", info->year[0] != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+    snprintf(s, sizeof(s), "C-Controls  %u/%u", (unsigned) info->ncontrols, (unsigned) gameinfo::CONTROLS_MAX);
+    put(6, 1, s, gameinfo::ATTR_HEADING);
+    snprintf(s, sizeof(s), "I-Instructions  %u/%u", (unsigned) info->ntext, (unsigned) gameinfo::TEXT_MAX);
+    put(7, 1, s, gameinfo::ATTR_HEADING);
+    put(8, 1, info->nnotes > 0 ? "N-My notes  (there are notes)" : "N-My notes  (none yet)", gameinfo::ATTR_HEADING);
+    if (det_have) {
+        put(10, 1, "R-Take back what you typed in", gameinfo::ATTR_HEADING);
+    }
+    put(12, 1, "What you type in is kept in", gameinfo::ATTR_DIM);
+    put(13, 1, "the Game Notes folder as", gameinfo::ATTR_DIM);
+    put(14, 1, "<game>.info.txt and is shown", gameinfo::ATTR_DIM);
+    put(15, 1, "instead of the same part of", gameinfo::ATTR_DIM);
+    put(16, 1, "the Instructions file.", gameinfo::ATTR_DIM);
+    const char* keys = "X-Back";
+    if (det_confirm) {
+        keys = "Take back all? Y-Yes N-No";
+    }
+    if (notes_message != nullptr) {
+        put(21, 1, notes_message, gameinfo::ATTR_KEYS);
+    }
+    help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
+}
+
+NOTES_FUNC static const char* det_field_name(char field) {
+    switch (field) {
+        case 'h': return "Software house";
+        case 'y': return "Year";
+        case 'c': return "Controls";
+        default: return "Instructions";
+    }
+}
+
+template <class E>
+NOTES_FUNC static void det_field_draw_lines(uint8_t* screen, const E& ed) {
+    for (int i = 0; i < E::VIEW && ed.top() + i < ed.line_count(); i++) {
+        const char* l = ed.line(ed.top() + i);
+        help_put_text(screen, 2 + i, 1, l, (int) strlen(l), gameinfo::ATTR_TEXT);
+    }
+    screen[6144 + (2 + ed.row() - ed.top()) * 32 + 1 + ed.col()] = 0xC7;       // bright white, flashing
+    char count[32];
+    if (ed.limit() > 0) {
+        snprintf(count, sizeof(count), "%u of %u letters", (unsigned) ed.used(), (unsigned) ed.limit());
+        help_put_text(screen, 1, 1, count, (int) strlen(count), gameinfo::ATTR_DIM);
+    }
+    const char* keys = ed.prompting() ? "Y-Save  N-Discard  other-Back" : "BREAK-Finish";
+    if (notes_message != nullptr) {
+        help_put_text(screen, 21, 1, notes_message, (int) strlen(notes_message), gameinfo::ATTR_KEYS);
+    }
+    help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
+}
+
+NOTES_FUNC static void det_field_draw(uint8_t* screen, const char* game) {
+    memset(screen, 0, 6144);
+    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    char title[48];
+    snprintf(title, sizeof(title), "%s: %s", det_field_name(det_field), game);
+    help_put_text(screen, 0, 1, title, (int) strlen(title) > 30 ? 30 : (int) strlen(title), gameinfo::ATTR_BANNER);
+    if (det_field == 'h' || det_field == 'y') {
+        det_field_draw_lines(screen, *reinterpret_cast<const DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET));
+        const char* hint = det_field == 'y' ? "The year, up to 8 letters" : "The name, up to 30 letters";
+        help_put_text(screen, 4, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
+        help_put_text(screen, 6, 1, "ENTER finishes. DELETE deletes.", 31, gameinfo::ATTR_DIM);
+        help_put_text(screen, 7, 1, "Leave it empty to show nothing.", 31, gameinfo::ATTR_DIM);
+    } else {
+        det_field_draw_lines(screen, *reinterpret_cast<const DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET));
+        help_put_text(screen, 20, 1, "Move: cursor keys or CAPS+5-8", 29, gameinfo::ATTR_DIM);
+        help_put_text(screen, 22, 1, "ENTER new line  DELETE deletes", 30, gameinfo::ATTR_DIM);
+    }
+}
+
 // The editor's screen: the lines, the cursor flashing, the keys
 static void notes_draw(uint8_t* screen, const notes::Editor& ed, const char* game) {
     memset(screen, 0, 6144);
@@ -3914,16 +4163,31 @@ static void notes_draw(uint8_t* screen, const notes::Editor& ed, const char* gam
     help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
 }
 
-// One step of the notes editor, kept apart from nmi_action_game_info so the SD card's
+// One step of the edit screens, kept apart from nmi_action_game_info so the SD card's
 // file calls do not run on top of that function's big stack frame.
-// op 3 starts the editor on the game's notes, op 4 gives it a key. True when it has ended
-// (saved or left) and the information should be shown again.
+// op 3 starts (M: the details menu, the hub), op 4 gives a key. From the hub: N is the notes
+// (viewed first, E edits), H Y C I a box for the field, R takes back what was typed in, X ends.
+// True when it has ended and the information should be shown again at the notes page.
+NOTES_FUNC static bool notes_open(const char* name, char* file, notes::Editor* editor) {
+    // the notes are shown, not to be changed until E is pressed
+    notes_edit = false;
+    size_t got = notes_read(name, file, notes::FILE_MAX + 1);
+    new (editor) notes::Editor();
+    if (got > notes::FILE_MAX || !editor->load(file, got)) {
+        notes_message = "Notes too long for this screen";
+        return false;
+    }
+    edit_kind = EK_NOTES;
+    return true;
+}
+
 NOTES_FUNC static bool notes_step(int op, const char* name, uint8_t key) {
     notes::Editor* editor = reinterpret_cast<notes::Editor*>(snap_load_buffer + NOTES_EDITOR_OFFSET);
     char* file = reinterpret_cast<char*>(snap_load_buffer) + NOTES_FILE_OFFSET;
+    gameinfo::Info* info = reinterpret_cast<gameinfo::Info*>(snap_load_buffer + INFO_DATA_OFFSET);
     if (op == 3) {
-        // M: the notes are shown, not to be changed until E is pressed
-        notes_editing = notes_edit = notes_saved = false;
+        // M: the menu of what can be edited
+        notes_editing = notes_edit = notes_saved = det_saved = det_confirm = false;
         if (name[0] == '\0' || !sd_card_mounted) {
             notes_message = "No SD card or no game";
             return false;
@@ -3932,25 +4196,84 @@ NOTES_FUNC static bool notes_step(int op, const char* name, uint8_t key) {
             notes_message = NOTES_NO_FOLDER;
             return false;
         }
-        size_t got = notes_read(name, file, notes::FILE_MAX + 1);
-        new (editor) notes::Editor();
-        if (got > notes::FILE_MAX || !editor->load(file, got)) {
-            notes_message = "Notes too long for this screen";
-        } else {
-            notes_editing = true;
-        }
+        char path[screengrab::NAME_MAX + 24];
+        det_have = det_path(name, path, sizeof(path)) && fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_FILE;
+        edit_kind = EK_HUB;
+        notes_editing = true;
         return false;
     }
     if (!notes_editing) {
+        return false;
+    }
+    if (edit_kind == EK_HUB) {
+        if (det_confirm) {
+            det_confirm = false;
+            if (key == 'y' || key == 'Y') {
+                gameinfo::Details* d = det_data();
+                d->clear();
+                if (det_write(name, d)) {
+                    det_saved = true;
+                    info_loaded = false;            // the information as the Instructions file has it
+                }
+            }
+            return false;
+        }
+        switch (key) {
+            case 'n': case 'N':
+                notes_open(name, file, editor);
+                break;
+            case 'h': case 'H': case 'y': case 'Y': case 'c': case 'C': case 'i': case 'I': {
+                char f = (char) (key | 0x20);
+                if (info_loaded && det_open_field(info, f)) {
+                    det_field = f;
+                    edit_kind = EK_FIELD;
+                }
+                break;
+            }
+            case 'r': case 'R':
+                if (det_have) {
+                    det_confirm = true;
+                }
+                break;
+            case 'x': case 'X': case notes::KEY_BREAK: case notes::KEY_EDIT:
+                notes_editing = false;              // back to the information
+                info_loaded = false;
+                if (det_saved && !notes_saved) {
+                    (rom_data + 16384)[3] = 0;      // the first page, where the details are
+                }
+                return notes_saved;                 // at the notes page if they were changed
+            default:
+                break;
+        }
+        return false;
+    }
+    if (edit_kind == EK_FIELD) {
+        bool one = det_field == 'h' || det_field == 'y';
+        // the two editors' results are the same three numbers (CONTINUE, SAVE, DISCARD)
+        int r = one ? (int) reinterpret_cast<DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET)->key(key)
+                    : (int) reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET)->key(key);
+        if (r == notes::Editor::CONTINUE) {
+            return false;
+        }
+        if (r == notes::Editor::SAVE) {
+            if (!det_save_field(name, det_field, info)) {
+                if (notes_message == nullptr) {
+                    notes_message = "Could not save it";
+                }
+                return false;                       // the box stays open: nothing is lost
+            }
+            LOG("Details saved for %s\n", name);
+            det_saved = true;
+        }
+        edit_kind = EK_HUB;
         return false;
     }
     if (!notes_edit) {
         if (key == 'e' || key == 'E') {
             notes_edit = true;
         } else if (key == 'x' || key == 'X' || key == notes::KEY_BREAK || key == notes::KEY_EDIT) {
-            notes_editing = false;              // back to the information
+            edit_kind = EK_HUB;                     // back to the menu
             info_loaded = false;
-            return notes_saved;                 // at the notes page if they were changed
         }
         return false;
     }
@@ -3986,6 +4309,28 @@ NOTES_FUNC static void info_paint_text(uint8_t* screen, const gameinfo::Info& in
     });
 }
 
+// The information of a game: its entry in the Instructions file, what was typed in on the
+// Spectrum (Details) over it, the notes and, for a tape, its summary
+NOTES_FUNC static void info_load(gameinfo::Info* info, const char* name, int mode) {
+    new (info) gameinfo::Info();
+    if (name[0] != '\0' && sd_card_mounted) {
+        info_read_file(info, name);
+        gameinfo::Details* d = det_data();
+        if (det_read(name, d)) {
+            info->apply(*d);
+        }
+        char* file = reinterpret_cast<char*>(snap_load_buffer) + NOTES_FILE_OFFSET;
+        size_t got = notes_read(name, file, gameinfo::NOTES_SHOW_MAX);
+        info->set_notes(file, got);
+    }
+    if (mode == 0 && tape_sum_valid) {
+        char* text = reinterpret_cast<char*>(snap_load_buffer) + NOTES_FILE_OFFSET;
+        const char* say;
+        tape_text(text, gameinfo::TAPE_MAX + 1, &say);
+        info->set_tape(text, say);
+    }
+}
+
 // Shows the game information (the editor's screen while the notes are edited). `ended`: the
 // notes editor has just finished, so go to the last page, where the notes are.
 NOTES_FUNC static void nmi_game_info_show(bool ended) {
@@ -4006,27 +4351,28 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
         op = 0;                     // the notes editor's, done in nmi_action_game_info
     }
     if (notes_editing) {
-        notes_draw(reinterpret_cast<uint8_t*>(snap_load_buffer) + INFO_SCREEN_OFFSET, *editor, name);
-        preview_screen = reinterpret_cast<uint8_t*>(snap_load_buffer) + INFO_SCREEN_OFFSET;
+        uint8_t* edit_screen = reinterpret_cast<uint8_t*>(snap_load_buffer) + INFO_SCREEN_OFFSET;
+        if (edit_kind == EK_NOTES) {
+            notes_draw(edit_screen, *editor, name);
+        } else {
+            if (!info_loaded) {
+                info_load(info, name, mode);
+                info_loaded = true;
+            }
+            if (edit_kind == EK_HUB) {
+                det_hub_draw(edit_screen, info, name);
+            } else {
+                det_field_draw(edit_screen, name);
+            }
+        }
+        preview_screen = edit_screen;
         nmi_rom_data[1] = 3;
         nmi_rom_data[0] = 1;
         return;
     }
     const bool fresh = !info_loaded || (page == 0 && pic == 0);
     if (page == 0 || !info_loaded) {
-        new (info) gameinfo::Info();
-        if (name[0] != '\0' && sd_card_mounted) {
-            info_read_file(info, name);
-            char* file = reinterpret_cast<char*>(snap_load_buffer) + NOTES_FILE_OFFSET;
-            size_t got = notes_read(name, file, gameinfo::NOTES_SHOW_MAX);
-            info->set_notes(file, got);
-        }
-        if (mode == 0 && tape_sum_valid) {
-            char* text = reinterpret_cast<char*>(snap_load_buffer) + NOTES_FILE_OFFSET;
-            const char* say;
-            tape_text(text, gameinfo::TAPE_MAX + 1, &say);
-            info->set_tape(text, say);
-        }
+        info_load(info, name, mode);
     }
     if (mode == 0 && fresh) {
         grabs_find(name);

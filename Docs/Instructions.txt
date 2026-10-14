@@ -1,0 +1,891 @@
+# SD card browsing, search, file management and save location (added 2026-10-07, extended 2026-10-08)
+
+The "Load snapshot" screen of the NMI menu can:
+- enter sub directories of the SD card;
+- search for snapshots by name;
+- make folders;
+- move, rename and erase snapshot files.
+
+Save snapshot can save into a folder of the SD card chosen with the same browser (see "Save snapshot location").
+
+Base: `picoface-tapeloader_V2`. The save location was added on top of `picoface-tapeloader_V3`.
+
+## Screen layout (Load snapshot, SD card)
+- Row 1: title. Row 2: current path.
+- Rows 3-12: entries 1-0.
+- Row 13: `M-Move  R-Rename  E-Erase`. While moving it shows `M-Move here Q-Cancel`. It also shows `Searching... BREAK to stop` while a search runs.
+- Row 14: `X-Exit P-Previous N-Next U-Up`.
+- Row 15: `S-SD Card  I-Internal Flash`.
+- Row 16: `F-Find C-Clear <text>`.
+- Row 17: `D-New folder`. The menu now clears 18 rows (`clearscreen`).
+- On internal flash rows 13 and 17 are empty.
+
+## Browsing
+- Sub directories are listed before snapshots, with a trailing `/` (e.g. `1-GAMES/`). Pressing the number enters the directory.
+- Folders with more than 1,000 entries (`DIRS_FIRST_LIMIT`) are listed in card order instead, with sub directories wherever they fall. Putting directories first would mean reading the whole folder.
+- `U-Up` goes to the parent; it is hidden at the root and on internal flash.
+- Paths over 30 characters keep their tail: `SD:../ARCADE/SHOOTERS VERTICAL`.
+- Names longer than 28 characters are shortened for display, keeping the start and the end: `Renegade (1987)(I..tware)[a]`. The Pico keeps the full names (`list_entry_name`) and uses them for every operation.
+- Hidden/system directories and names starting with `.` are not listed.
+- The Pico remembers the directory between NMI presses (until power off). If it no longer exists, the list falls back to the root.
+
+## Search
+- `F-Find` opens a text entry screen: up to 12 characters, ENTER searches, BREAK cancels, CAPS SHIFT+0 deletes.
+- Matching is "name contains", ignoring case. On the SD card it covers the current folder and up to 7 levels below it; on internal flash it filters the root list.
+- Results show names only. Matching folders are listed too and can be entered. Loading a result does not change the current folder.
+- Results appear as they are found. Each list request reads the card for at most 0.3 s (`LIST_TIME_LIMIT_US`), then returns what it has with the busy flag set, and the NMI ROM asks again. BREAK stops the search and keeps what it has found.
+- `C-Clear`, an empty search, entering a folder or `U-Up` all end the search. A search is not kept between NMI presses.
+
+## File operations (SD card only; files only, never folders)
+- **Picking a file:** M, R and E all ask "<verb> which file? 1-0" on row 13 (`.pickfile`). BREAK cancels. Choosing a folder gives "That is a folder, not a file".
+- **Move (M):**
+  - After picking, browse or search to the destination; row 13 shows `M-Move here Q-Cancel`.
+  - M then shows a confirmation (file, From, To) and `Y-Yes, move it   N-No`. N keeps the file picked; Q forgets it.
+  - Uses `f_rename` and never overwrites: "That name is already in use". Moving into the same folder gives "It is already in this folder".
+  - A picked file is forgotten when the NMI menu is left.
+- **Rename (R):**
+  - A text entry screen (`Rename file`, `New name:`, up to 28 characters) starts from the current name if it is 28 characters or fewer. Longer names start empty. The line below shows `Was: <shortened name.ext>`.
+  - The extension is kept: you type the name only.
+  - Name in use gives "That name is already in use"; disallowed names give "Could not rename the file". The same name is a no-op, and a change of case only works.
+- **Erase (E):** a confirmation screen (`Erase file`, name, `In:` path) with `Y-Yes, erase it   N-No`, then `f_unlink`.
+- **New folder (D):**
+  - A text entry screen (up to 28 characters) makes a folder in the current folder.
+  - Names with `\ / : * ? " < > |`, names starting with `.`, and names making the path longer than 127 characters are refused. Trailing spaces and dots are dropped, as FAT does (`tidy_new_name`, also used by rename).
+
+## Save snapshot location (added 2026-10-08, on V3)
+- **Save screen:**
+  - Rows 1-6 as before (title, `Name:`, the name, `Border:`).
+  - Row 8: `Save to:`. Row 9: where it goes, e.g. `SD:/GAMES/ARCADE` or `Internal Flash`.
+  - Rows 11-14: help, ending `Shift 9 to change where it goes`.
+- **Choosing (CAPS SHIFT+9):**
+  - Opens the Load snapshot browser in a choosing mode. The title is `Save snapshots in...` and it starts in the current save folder.
+  - Browse, Up, Find, Next/Previous, `S`/`I` and `D-New folder` all work. Move, Rename and Erase are hidden, and pressing a file's number does nothing.
+  - `H-Save here` (row 13) picks the folder shown; on internal flash it picks the flash root. `X-Exit` changes nothing.
+  - The Load screen's folder and drive are put back afterwards, and any search is ended.
+- **Remembered:** the choice is stored in `saveto.cfg` on the internal flash: byte 0 = drive, then the path. It is read at start-up (`load_save_dir`), so it survives power off. The default is still the internal flash root.
+- **Fallbacks:**
+  - The SD card is chosen but not mounted: the snapshot goes to the internal flash, and the screen says `Internal Flash`.
+  - The chosen folder no longer exists: the root of the card is used (`SD:/`).
+  - Either way the stored choice is kept, for when the card or folder is back.
+- **Saving on the SD card:**
+  - The file is `<folder>/<name>.sna`, opened with `FA_CREATE_NEW`. If it exists, the usual overwrite prompt appears and Y uses `FA_CREATE_ALWAYS`.
+  - The name goes through `tidy_new_name`, so `\ / : * ? " < > |` and leading dots are refused.
+  - A short write (card full) or any error deletes the partial file. Then `Could not save the snapshot` is shown and the save screen comes back with the name kept. Before, an error silently went back to the top menu.
+- ENTER with an empty name now does nothing. Before, it saved a file called `.sna` on the flash.
+
+## How listing works
+- **Resumable walker:** a listing (one folder or a search) is produced by `walk`/`walk_next`, which keeps its open `DirHandle`s (`find_dirs[8]`) between requests. Next carries on from where the last page stopped.
+- **Opening sub-folders:** they are opened straight from the entry just read (`DirHandle::openSubdir` -> FatFs `f_opendir_last`), not by path. Opening by path re-read the parent from the start each time, which was quadratic.
+- **Results cache:** `list_pool` (32 KB, up to 1,500 results) holds results, so Previous costs no card reads. Beyond the cache the walker carries on forwards; going backwards past the cache re-walks from the start for each page.
+- **Invalidation:** the walker and cache are thrown away when the drive, folder or search changes (`walk_is_for`), on every NMI entry (`sendNmiRequest` -> `walk_stop`), and before any move, rename, erase, new folder or SD save.
+- **Read-ahead:** in `FatFs_SPI/src/glue.c`, when a single-sector read follows the previous sector, 8 sectors are read with one CMD18. Writes and card init empty the buffer.
+
+### FatFs changes (vendored ff15, kept CRLF)
+- `ff.h`: `DIR.item_ofs`, plus the prototype `f_opendir_last(DIR* dp, DIR* parent)`.
+- `ff.c`:
+  - `f_readdir` records `item_ofs` (the SFN entry offset on FAT, the file entry offset on exFAT).
+  - `f_opendir_last` re-reads that entry and opens it as `f_opendir` does after `follow_path`, including the exFAT allocation info and the FF_FS_LOCK share count.
+
+### Measured in the harness
+Rough time from a model of 0.3 ms per SD command + 0.37 ms per sector at 12.5 MHz SPI. These are estimates, not hardware measurements.
+
+| Search for "renegade" (archive: A-Z, 300 game folders each) | 2026-10-08 morning | Now |
+|---|---|---|
+| From the root | ~163 s | ~7 s, first result after ~5 s |
+| From archive/R | ~7 s (user saw "under 5 s") | ~0.3 s |
+
+| 31,000 files in one folder | 2026-10-07 | Now |
+|---|---|---|
+| Open the folder (page 1) | ~2.6 s | ~0.1 s |
+| Next / Previous page | ~2.6 s each | 0 card reads |
+| Search with 1 match | ~2.6 s | ~1.6 s |
+
+Further options (not done): raise the SPI clock in `sd_config.c` (the commented 25 MHz line gives 20.8 MHz), or keep an index file of names on the card.
+
+## NMI ROM free space (important)
+- The NMI ROM's working buffer `spare_space` is whatever is left of the 16 KB after the code, the stack, `screen_save` and `sna_header`. It is now 1,913 bytes (`spare_size`; 2,210 before saving 128K snapshots, 2,365 before 128K loading, 2,660 before the save location), and every feature added shrinks it. `MOVE_INFO` is now 1,024 (it was 2,048): a list page is at most about 400 bytes. The tightest limit is now `SNAP_SEND_BLOCK` (1,760), which leaves 153 bytes.
+- `sendsnapshottopico` (snapshot save and transfer) used fixed 3,520-byte blocks, and `startupactionsavememory` used 13 x 256 = 3,328-byte blocks.
+- In the 2026-10-08 `picoface-file-manager` build `spare_size` was 3,277, so saving a snapshot overflowed the buffer. The Pico then read past `rom_data`, so **saved snapshots from that build were corrupt**. Fixed in `picoface-file-manager-v2`:
+  - snapshots go in `SNAP_SEND_BLOCKS` (24) x `SNAP_SEND_BLOCK` (1,760);
+  - memory save uses `spare_size_hi`, like memory load.
+- Assembler `ASSERT`s after `spare_size` now fail the build if:
+  - `spare_size < SNAP_SEND_BLOCK`;
+  - `spare_size_hi * 256 > spare_size`;
+  - the description area (`MOVE_INFO` 2,048 + 96 bytes) does not fit.
+- The harness checks snapshot transfer, memory save and memory load byte for byte.
+- `getimmode` (run by every snapshot save) writes over `spare_space` around 0x3D00-0x3E45. Nothing may be kept there across a save.
+
+## Protocol (NMI ROM <-> Pico)
+- `ACTION_SNAP_LIST` (0x05): start (word @2), drive (@4), destination (word @5), flags (@7, bit 0 = stop the search).
+  - Results: `[0]` count, `[1]` more, `[2..21]` name pointers, `[22]` hasParent, `[23]` busy, `[24..55]` path, strings from `[56]`.
+  - These offsets are the `SNAPLIST_*` symbols.
+- `ACTION_SNA_SAVE` (0x06): name pointer (@2), overwrite (@4). Saves to the chosen location. Status: 0 / 1 exists / 2 failed.
+- `ACTION_SNAP_CHDIR` (0x0B): name pointer or `..` (@2), drive (@4). Ends any search.
+- `ACTION_SNAP_FIND` (0x0C): text pointer (@2; empty ends the search), drive (@4).
+- `ACTION_SNAP_MOVE` (0x0D): entry pointer or description destination (@2), drive (@4), op (@5: PICK/DESCRIBE/DO/CANCEL = 0-3).
+  - Status: 0 ok, 1 name in use, 2 failed, 3 already in that folder.
+- `ACTION_SNAP_MKDIR` (0x0E): name pointer (@2), drive (@4). Status: 0 / 1 / 2.
+- `ACTION_SNAP_RENAME` (0x0F): entry pointer (@2), drive (@4), param (word @5), op (@7: DESCRIBE 0 / DO 1).
+  - With DESCRIBE, param is the destination for two 32-byte strings: the editable name and the "Was:" line. With DO, param points to the new name without its extension.
+  - Status: 0 / 1 / 2.
+- `ACTION_SNAP_ERASE` (0x10): entry pointer (@2), drive (@4), param (@5), op (@7: DESCRIBE 0 / DO 1).
+  - With DESCRIBE, param is the destination for two 32-byte strings: the file and its folder.
+  - Status: 0 / 2.
+- `ACTION_SNA_SAVE_DIR` (0x11): destination (word @2, DESCRIBE only), drive (@4, SET only), op (@5):
+  - 0 DESCRIBE: writes a 32-byte string, e.g. `SD:/GAMES` or `Internal Flash`.
+  - 1 BROWSE: saves `sd_cwd`, sets it to the save folder and clears the search. Status = the drive to browse.
+  - 2 SET: the drive and folder being browsed become the save location, stored to flash.
+  - 3 CANCEL: changes nothing. SET and CANCEL both restore `sd_cwd` and clear the search.
+- Descriptions go to `spare_space + MOVE_INFO` (2,048).
+- The Pico records the directory and full name of each returned entry, keyed by the name's address in the NMI ROM. Load, chdir, move, rename and erase therefore work on search results and shortened names.
+- `asm_to_c_file.py` exports `SNAPLIST_*` and `ACTION_*` symbols (including the `*_OP_*` values) to `nmi.h`.
+
+## Where the code is
+- `nmirom/nmirom.asm`, `loadscreen`:
+  - listing and search: `.fetchlist`, `.request`, `.updatefromdata` (decides which keys show), `.showthemenu`, `.stillsearching`/`.pollagain`/`.stopsearch`, `.snaphandler`, `.changedir`, `.uphandler`, `.findhandler`, `.clearhandler`, `.sendfind`;
+  - file operations: `.newfolderhandler`, `.movehandler`/`.movehere`/`.movedo`, `.cancelmovehandler`, `.renamehandler`, `.erasehandler`;
+  - choosing where to save: `.choosing`, `.herehandler`/`.exithandler`, `.menuhere`;
+  - shared helpers: `.pickfile`/`.pickfailed`, `.textinput` (descriptor: title, label, help1, help2, max, keep), `.message`, `.waitpico`, `.refresh`.
+- `nmirom/nmirom.asm`, elsewhere:
+  - `savesnapshotscreen`: `.choosefolder` (Shift 9), the `Save to:` lines, the empty-name check and the error message;
+  - `clearscreen` (18 rows);
+  - `sendsnapshottopico` and `startupactionsavememory` (block sizes from the free space).
+- `pico/picoface.cxx`:
+  - listing and search: `sd_cwd`, `snap_filter`, `nmi_action_list_sna`, `walk_*`, `list_cache_add`, `shorten_name`/`make_shown_name`, `list_out`, `format_sd_path`, `nmi_action_snap_chdir`, `nmi_action_snap_find`, `load_snapshot_file`;
+  - file operations: `nmi_action_snap_move`, `nmi_action_snap_mkdir`, `nmi_action_snap_rename`, `nmi_action_snap_erase`, `tidy_new_name`, `file_entry_for`, `entry_path`, `entry_shown_name`;
+  - save location: `save_drive`, `save_dir`, `load_save_dir`/`store_save_dir` (`saveto.cfg`), `save_drive_now`, `nmi_action_sna_save_dir`, `nmi_action_sna_save`.
+- `pico/file_wrapper.h/.cxx`: `DirHandle::isHidden()`, `DirHandle::openSubdir()`.
+- RAM: about 160 KB of static data (bss 159,752).
+
+## Known limits
+- Folders cannot be moved, renamed or erased.
+- New names (rename, new folder) are limited to 28 characters by the screen; a longer existing name cannot be edited, only replaced.
+- A directory is refused if the full path would exceed 127 characters.
+- Two results with the same name in different folders look the same on screen.
+- Change ROM still uses the internal flash root.
+- Save snapshot names are still limited to 20 characters, and are always `.sna`.
+- `saveto.cfg` shows up in the PC file manager's list of flash files.
+
+## Verification
+Host harness (2026-10-07/08, on V2): real NMI ROM in a Z80 emulator, real `picoface.cxx`, FatFs and `glue.c` over a simulated 4 GB FAT32 card. All runs use AddressSanitizer:
+- 695 functional checks, covering browsing, search, new folder, move, rename (editing, in use, bad names, BREAK, same name, long names, folders refused), erase (N, BREAK, Y, folders refused), keys hidden on flash and while moving, and byte-for-byte snapshot and memory transfers.
+- A 31,000-file run, paging to page 175 and back.
+- An A-Z archive search run.
+
+Save location (2026-10-08, harness rebuilt on V3): real NMI ROM in a Z80 emulator (superzazu/z80) with 50 Hz interrupts and keys pressed through the keyboard matrix. It uses the real `picoface.cxx`, littlefs on a RAM flash and FatFs on a 64 MB FAT32 RAM card, all with AddressSanitizer and UBSan. 93 checks:
+- the default (flash) and choosing in the SD root, a sub folder, a folder made while choosing, and a folder found by search;
+- that file numbers are ignored while choosing, X changes nothing, and the Load screen's folder, drive, keys and search are untouched;
+- overwrite N/Y on both the card and the flash, a bad name, a full card (no partial file left), and a card write error;
+- a deleted folder falling back to the root;
+- back to the flash, and loading a saved snapshot;
+- a memory save, and every saved file compared byte for byte with the Spectrum's RAM;
+- two power-on runs from saved images: the choice is remembered, and with no card it falls back to flash but keeps the SD choice.
+
+Firmware builds with Pico SDK 1.5.1 (arm-none-eabi-gcc 13.2.1): text 141,588, bss 159,752. Not yet run on real hardware with these changes. exFAT is covered by code review only.
+
+# 128K snapshots (added 2026-10-08, on V4)
+
+The Load snapshot screen now loads 128K snapshots as well as 48K ones. Nothing changes in the menu: 128K `.sna` and `.z80` files are listed like any other.
+
+## What loads
+- 48K `.sna` (49,179 bytes), exactly as before.
+- 128K `.sna`: 131,103 bytes, or 147,487 when the paged bank is 5 or 2 (it is in the file twice).
+- `.z80`, any kind: version 1 (compressed or not), version 2 and version 3, for a 48K or a 128K machine. The pages may be compressed or not and in any order. The pico decodes them, so **uploading a `.z80` no longer needs converting it first**; `filemanager.py` and `usb.py -i` now send it as it is. Compressed files are smaller than the 49 KB the old conversion made, so more fit in the flash.
+- A 128K machine is hardware mode 3 or 4 in a version 2 file, and 4, 5, 6, 9 or 12 or any other mode except the 48K ones (0-3 and 14) in a version 3 file. +3 / +2A snapshots load as 128K ones without their 0x1FFD paging.
+- The sound chip registers and the selected register of a `.z80` file are restored (a `.sna` file has none, so the sound chip is left alone).
+- A file that cannot be read (no header, a bad extended header length) resets the Spectrum, the same as a tape that cannot be converted, and the log says why.
+
+## Using it
+- The Spectrum must be in 128K mode when the NMI button is pressed. Choose "128 BASIC" or the Tape Loader and press the button there. **Do not choose "48 BASIC" first**: that locks the paging port until the next reset, and a 128K snapshot cannot be loaded (the banks all land in bank 0 and the game crashes). 48K snapshots load in either mode.
+- A snapshot's ROM bit (bit 4 of the paging port) decides which ROM is paged in when it starts.
+
+## How it works
+- `pico/snapload.h` (new, no Pico SDK in it so it is tested on a PC) turns a file into one of three things for the NMI ROM; the type byte of `ACTION_BEGIN_SNAP_READ` is 0, 1 or 2:
+  - 0: 48K `.sna`, as in the file;
+  - 1: 30 byte header + 49,152 bytes, the layout of an uncompressed version 1 `.z80`. Compressed version 1 and version 2/3 48K files are decoded into this;
+  - 2: a 128K snapshot. A 49 byte header (the 30 byte `.z80` header with PC filled in, then `Z80X_7FFD`, `Z80X_AYFLAG`, `Z80X_AYSEL`, `Z80X_AYREGS` x 16) and then 8 banks of 16,384 bytes in the order 5, 2, 0, 1, 3, 4, 6, 7.
+- A 128K `.sna` header is turned into the `.z80` layout by the Pico, so the NMI ROM restores the registers with the code it already had for `.z80` files (`z80_registers`).
+- `load_paged_snapshot` (NMI ROM): for each bank it writes the bank number to port 0x7FFD, then reads four 4,096 byte pieces with `ACTION_SNAP_READ_NEXT` and copies them to 0xC000 (the first two banks go to 0x4000 and 0x8000). Then it writes the sound chip registers, writes the final value to port 0x7FFD and carries on at `z80_registers`.
+- RAM: `snap_load_buffer` grew from 50 KB to 132 KB (it holds all eight banks), `tape_load_patched_rom` no longer has a 16 KB buffer of its own (it uses the part of `snap_load_buffer` above 64 KB). Net +66 KB: bss 225,836 and about 30 KB still free. A `WIFI_ENABLE` build needs more RAM than that and has not been tried.
+- `spare_size` is now 1,913 (after the 128K save code too) and `spare_size_hi` 6, so memory load and save move 1,536 bytes at a time instead of 2,048.
+- `asm_to_c_file.py` exports `Z80X_*` and `NMI_PAGE_ORDER` to `nmi.h`, and `picoface.cxx` has `static_assert`s that the header layout and the bank order agree with `snapload.h`.
+
+## Limits
+- See "Saving a 128K snapshot" below for what the save can and cannot know.
+- The R register is not restored (it never was).
+- Scorpion and similar machines with more than 128K of RAM are loaded as 128K machines.
+- Not run on real hardware.
+
+## Verification
+- `snapload.h` through its real code (AddressSanitizer + UBSan), the real NMI ROM in a SkoolKit Z80 simulator with the 0x7FFD paging port, a fake Pico answering `ACTION_BEGIN_SNAP_READ` / `ACTION_SNAP_READ_NEXT` as `picoface.cxx` does. 35 checks: every paged bank (0-7, with lock and ROM bits) of a `.sna`, `.z80` version 2 and 3 files of every 128K hardware mode with compressed, uncompressed, shuffled and ROM/multiface pages, single `ED` bytes at the end of pages, missing and truncated files, damaged headers, a version 1 file with PC = 0, and the 48K `.sna`, `.z80` v1, v1 compressed, v2 and v3 through the old paths. After each load every bank, the registers, the paging port, the sound chip, the border, IM and the interrupt state are compared with the file.
+- A real compressed version 3 file (`Commando.z80`) decodes byte for byte the same as SkoolKit's reader.
+- The firmware builds with Pico SDK 1.5.1 (arm-none-eabi-gcc 13.3.1).
+
+# Saving a 128K snapshot (added 2026-10-08)
+
+"Save snapshot" saves **a 128K machine as a version 3 `.z80` file, with the sound chip registers**, and anything else as the 48K `.sna` it always did. The menu is the same; the file just ends in `.z80` instead of `.sna`. The `.z80` loads again with Load snapshot, and in any emulator that reads `.z80` files (hardware mode 4, 128K).
+
+## How it picks
+- The NMI ROM tries to page bank 0 and bank 1 into 0xC000 and sees whether they are different. If they are, the machine can page and the 128K save is used. If not (a 48K machine, or **48 BASIC was chosen, which locks paging until the next reset**), it makes the 48K `.sna`.
+- The test puts back the bytes it wrote. Nothing else in the Spectrum's memory is changed by a save, and the bank that was paged in is paged back.
+
+## What is saved
+- All eight 16K banks, the registers, IM, interrupt state, the border, and the 16 sound chip registers (read with the usual select-then-read of port 0xFFFD).
+- The file is compressed (the usual `ED ED count byte` runs, a page that does not get smaller is stored as it is), so a game is typically 10 to 60 KB, not 131 KB. The Pico writes it in two passes over each page, without a second copy in RAM.
+- If the card is full or the write fails, the partly written file is removed.
+
+## What the save cannot know
+The Spectrum's paging port 0x7FFD can only be written, so the picoFace cannot read what it was set to. Two things are worked out instead:
+- **Which bank was at 0xC000.** The 128K ROM keeps a copy of the last value it wrote in a system variable (`BANK_M`, 0x5B5C). The NMI ROM sends that and a checksum of the last 9,472 bytes of whatever is at 0xC000. The Pico compares the checksum with each bank it received; if `BANK_M` is right (it nearly always is) it is used as it is, otherwise the first bank with the same checksum is used. Banks with the same contents give the same result when loaded, so it does not matter which. (Only if two different banks agree in those 9,472 bytes but not in the rest could the wrong one be picked, and only when `BANK_M` is also stale.)
+- **The other bits of the port** (ROM select and shadow screen) come from `BANK_M`. A game that writes port 0x7FFD itself, without going through the ROM, and uses the ROM 0 editor ROM or the shadow screen can have those two bits wrong in the file, and after the save the paging port is written with the same value. Games that stay with ROM 1 and the normal screen are not affected. The lock bit is always saved clear.
+- **Which sound chip register was selected** is not readable, so the file says register 0. Games select a register before every write, so this does not show.
+- **PC** is taken from the stack: the NMI pushed it, so the saved SP is 2 higher.
+- The R register is saved as the NMI ROM found it, which is not exact.
+
+## Pico side
+- New requests `ACTION_SNA_BEGIN_WRITE128` (0x12: the 27 byte header and 23 more bytes: PC, `BANK_M`, the checksum, the 16 sound chip registers) and `ACTION_SNA_END_WRITE128` (0x13: the reply is the value for port 0x7FFD to put back). The banks are sent with the existing `ACTION_SNA_NEXT_WRITE`, in the order 5, 2, 0, 1, 3, 4, 6, 7, 1,024 bytes at a time.
+- `snapload.h` has `finish_save128`, `choose_7ffd` and `write_z80_128`. They are tested on a PC like the loader, and the output is read back by the same loader.
+- `ACTION_SNA_SAVE` writes `<name>.z80` when the last snapshot sent was a 128K one, otherwise `<name>.sna`, in the flash or the SD folder. The USB transfer (`usb.py`) is still 48K.
+- RAM: no change worth mentioning (bss 225,888).
+
+## Verification
+- 22 checks with the real NMI ROM (`savesnapshot`) in the Z80 simulator of a 128K machine with paging and a sound chip whose registers have different values: every entry bank 0 to 7 including 5 and 2, a stale `BANK_M`, identical banks, banks ending in `ED`, the stack in bank 5, bank 2 and the paged bank, the screen the menu draws over in bank 5, a machine that cannot page (the 48K `.sna` with the same bytes as before, the test byte restored), and a failing sink. After each save the machine's RAM, paged bank and 7FFD were compared with before, the `.z80` was read back with `snapload.h`, and it was loaded by the NMI ROM into a second machine, where every bank, register, the port and the sound chip were compared.
+- The C++ compressor gives the same bytes as an independent Python one, and the checksum agrees with Python's.
+- Faults put into the NMI ROM (a checksum one byte short, a byte of the paging test not restored, one bank not sent) were each caught.
+- Not run on real hardware.
+
+# Tapes load by themselves (added 2026-10-08)
+
+Choosing a `.tap` that is loaded through the ROM trap (the "using ROM trap" case in the log) no longer needs `LOAD ""` typing: the Spectrum resets into 48 BASIC and types `LOAD ""` for you, and the tape loads as before. If the first block of the tape is a code header (type 3) it types `LOAD "" CODE`.
+
+## How it works
+- All in `tape_load_patched_rom` (Pico) and the 48K ROM the Pico serves. 48 BASIC's start up runs once per reset, and is where it is hooked (`TAPE_AUTO_*` in `picoface.cxx`):
+  - the last step of the start up (`SET 5,(IY+2)` at 0x129C) jumps to 48 bytes of code in the empty part of the ROM at 0x3870, which carries on as before and installs a new input routine for the keyboard channel. It cannot be done in the ROM's own table, because the start up's `CLS` sets the channel up again from a fixed address.
+  - the new input routine returns `LOAD`, `"`, `"`, `ENTER` (0xEF 0x22 0x22 0x0D; the editor takes them as if typed, so it shows the line and runs it), then works as `KEY-INPUT` does. How many keys have been typed is a byte at 0x5B00 (the unused printer buffer), set to 0 by the hook.
+- Only a 48K ROM with exactly the original bytes at the changed places and an empty 0x3870 to 0x38A7 is changed. Otherwise the log says "cannot type LOAD for you" and you type it as before.
+- `TAPE_AUTOTYPE` in `picoface.cxx` is the switch (true). Set it to false to go back to typing `LOAD ""` yourself.
+
+## Not changed
+- Tapes that need a different command (`LOAD "" SCREEN$`, a first block that is an array or a headerless block) are loaded with plain `LOAD ""`, the same as typing it. Turbo loaders (Paperboy and the like) still do not work through the ROM trap.
+- Snapshots are not affected. It only applies to the ROM trap, not to a clean tape-to-snapshot conversion, which has no BASIC to type into.
+
+## Verification
+- The real 48K ROM in the SkoolKit simulator, with the three changes made: from reset the four keys are typed, the edit line is `LOAD ""` + ENTER, and `LOAD` runs as far as the tape routine (`LD-BYTES`). The `CODE` variant also. Before the hook was moved after `CLS`, the keys were never typed, which is how the `CLS` behaviour was found.
+- The bytes in `picoface.cxx` are those of the tested assembly. The firmware builds.
+- Not run on real hardware.
+
+# 48K snapshots and tapes from the 128 menu (added 2026-10-08)
+
+Symptom (Dizzy, `.tap` chosen with the NMI button pressed in the 128 menu): the loading screen had scattered coloured specks and the music was slow. The same tape was fine after choosing "48 BASIC" first.
+
+## Cause (a theory, from the symptoms and how the 128K hardware works)
+- The 128K has paging port 0x7FFD. The 128 menu leaves a 128K state in it: probably bank 7 at 0xC000 (the 128 ROM keeps its workspace there), the 128 editor ROM selected, and the port unlocked. "48 BASIC" writes 0x30 to it (bank 0, 48K ROM, locked).
+- Banks 1, 3, 5 and 7 are contended (the ULA stalls the CPU while it reads the screen). Bank 0 is not, and on a 48K machine the top 16K is not either. A 48K game with its code, music routine and sprite tables at the top of memory that is in bank 7 runs slower than on a 48K machine and can overrun a frame: slow music and half-drawn screens.
+- Nothing wrote the port after the NMI exit: the reset into the 48K ROM, and the 48K snapshots, leave it as the menu had it.
+
+## Change
+- `ACTION_BEGIN_SNAP_READ` now returns in the second byte of param1 the value for port 0x7FFD, and the NMI ROM writes it in `loadsnapshot` before it loads any 48K snapshot (types 0 and 1; 128K snapshots set the port themselves):
+  - **0x10** (bank 0, 48K ROM, not locked) for a 48K `.sna` or `.z80`, and for a `.tap` that was converted to a snapshot;
+  - **0x30** (the same, locked) for a `.tap` loaded through the ROM trap **only if `TAPE_LOCK_PAGING` is true in `picoface.cxx`**. It is false: a locked port ignores all writes until a hardware reset, so the long press could not get back to the 128K start up (found on the first try of the long press, which stayed in 48 BASIC). With it false a tape also gets 0x10, unlocked.
+- Locked (if turned on) means a reset is needed before loading a 128K snapshot, as after choosing 48 BASIC. Unlocked, 128K snapshots can follow. Turn the lock on only if a 48K game misbehaves from the 128 menu (stray writes to the paging port).
+- A 48K machine: the write goes to a port that nothing decodes.
+
+## Verification
+- The NMI ROM in the simulator with bank 7 or bank 3 paged in when the menu was opened: after a 48K `.sna`, `.z80` v1 or v3 load the machine has bank 0 at 0xC000, the data is in bank 0, and the port was written once with the value the pico gave (0x10, or 0x30 locked). 41 checks in all (the 35 load checks, 6 new). Leaving the `out` out of the ROM fails them.
+- The firmware builds.
+- Hardware: the Dizzy fix was confirmed with the locked value (0x30). The unlocked default (0x10) has not been tried.
+- **Not tried on a real machine; if the specks and slow music are still there from the 128 menu, the theory is wrong** and the next thing to try is Dizzy loaded as a 48K snapshot from the same state.
+
+# Long press: reset into the internal ROM (added 2026-10-08)
+
+Hold the NMI button for **one second or more**. The Spectrum resets into its own ROM: on a +2 that is the 128 start-up menu, ROM 0 with bank 0 paged in and the paging port unlocked.
+
+Why: after a `.tap` is loaded through the ROM trap the pico keeps serving its patched 48K ROM (with the tape hook and the typed `LOAD ""`), so the Spectrum's reset key restarts that ROM and reloads the tape. The only ways out were the NMI menu (Change ROM, Internal Rom) or switching off. A long press does it in one step.
+
+## How it works
+- The main loop already timed the button for up to a second to tell a short press from a long one, and did nothing for a long one. A short press (released before a second) still opens the NMI menu.
+- A long press calls `reset_spectrum_to_internal_rom`: `tape_service_stop` (serve the Spectrum's own ROM when the NMI exits, drop the tape), then the same snapshot that the tape loader uses to reset (a blank 48K snapshot that jumps to 0), sent with the paging port value `PORT_7FFD_128K_ROM0` (0x00) instead of the 48K ones. It then waits for the button to be let go.
+- It is a snapshot load, so it takes the normal NMI route (the menu does not show) and the screen and memory are cleared by the start-up.
+
+## Limits
+- It cannot press the reset line, so the sound chip is not reset: if a game was playing music on the AY it may carry on until the 128 start-up silences it. (Not checked.)
+- It does nothing while an NMI is already active (the menu is open).
+- Holding the button for a second is the only trigger; there is no setting.
+
+## Verification
+- The NMI ROM in the simulator with bank 7 paged in: the reset snapshot loads, writes 0x00 to the paging port, leaves bank 0 paged and ends at address 0 (42 load checks pass). The firmware builds.
+- **Not tried on a real machine.**
+
+## Addendum (long press after a tape, 2026-10-08)
+First test of the long press: after a 48K `.tap` it dropped back to 48 BASIC, not the 128 menu. Cause: the tape path wrote 0x30 (locked) to the paging port, so the long press's write of 0x00 (ROM 0) was ignored. The lock is now off by default (`TAPE_LOCK_PAGING`). Not tried on hardware.
+
+# Screen preview: V key in the load menu (added 2026-10-08)
+
+Merged from the screen-preview patch (screen-preview.patch in the package).
+
+In the load menu, press **V** with a file highlighted to see that game's screen, then any key to return to the menu.
+- `.sna` and `.z80` (48K and 128K): the screen is taken from the snapshot, read from the SD card/flash into the snapshot buffer on the pico (nothing is loaded into the Spectrum).
+- `.tap`: the first SCREEN$ block (a 6912-byte CODE block at 16384) is shown. Taps without one show a "no preview" message.
+- Directories and other files: no preview.
+- The preview is cleared each time the menu opens.
+
+Verification: the NMI ROM and firmware build, and the 42 load checks still pass in the simulator (they do not exercise the preview). **The preview itself has not been tried on a real machine by me.**
+
+# .tzx tapes (added 2026-10-09)
+
+`.tzx` files are listed in the load menu with `.sna`, `.z80` and `.tap`, and are loaded the same way as a `.tap`: converted to a snapshot when that works, otherwise through the ROM trap with `LOAD ""` typed for you. The **V** preview works too (the SCREEN$ block).
+
+## What is read
+- The file is read as the same list of blocks as a `.tap`. Data blocks are standard speed (0x10), turbo speed (0x11) and pure data (0x14); the bytes are used, **the pulse timings are ignored**.
+- Skipped: pauses, tones, pulse sequences, direct recording, CSW, generalised data, groups, text, archive and hardware info, loops, jumps, calls, signal level and the rest. A block with an unknown id ends the tape.
+- A header that is not `ZXTape!` 0x1A, major version 1 is treated as an empty tape (the Spectrum resets).
+
+## Limits
+- A tape whose loader reads the signal itself (a custom turbo loader, tones and pulses, direct recording) cannot work: the same limit as a turbo `.tap`. Most "standard" game releases are fine, since their loader is the ROM's `LOAD ""` and their data is in 0x10 blocks.
+- 0x11/0x14 blocks are handed to the Spectrum as if the ROM loader had read them, so a loader that calls the ROM routine for them works.
+- Loops (0x24/0x25), jumps and call sequences are not followed; the blocks inside a loop are read once.
+- Saving is not affected (snapshots only; a `.tzx` is never written).
+
+## How it works
+- `picoface.cxx`: `tape_next_block()` leaves the file at the flag byte of the next data block and returns its length, for either type; `tzx_begin()` checks the header. It replaced the 2 byte length reads in the tape-to-snapshot conversion, the preview, the ROM trap (`tape_serve_block`, `tape_service_start`) and `tape_open_file`.
+- `is_snapshot_ext` and the load dispatch accept `tzx`.
+
+## Verification
+- The block reader on its own (host build, AddressSanitizer): every block id with a skip length, a turbo and a pure data block, blocks too short to be data, a truncated file, an unknown id, a bad header: 0 failures.
+- The conversion code from `picoface.cxx` on a tape written as `.tap`, as `.tzx` with standard blocks and as `.tzx` with turbo blocks (with text and pause blocks mixed in): the same 48K snapshot each time (entry 0x8000, code in place). A damaged `.tzx` is not a clean conversion.
+- Firmware builds (Pico SDK 1.5.1): text 158,748, bss 234,736. The NMI ROM is unchanged.
+- **Not tried on a real machine, and no real `.tzx` file was available to test with.**
+
+# On-screen help: H in the main menu (added 2026-10-09)
+
+The main NMI menu has a new item, **H-Help**. It shows 15 pages of instructions on the Spectrum's screen, covering every function and its limits. **N** or SPACE (or CAPS SHIFT+8) goes to the next page, **P** (or CAPS SHIFT+5) to the previous, **X**, ENTER or BREAK back to the menu. The game's screen is put back under the menu as it was.
+
+The text is `Docs/Help.txt`, which can also be read on a PC. It is the same file the Pico shows.
+
+## Changing the text
+- Edit `Docs/Help.txt`: a line `@@ Title` starts a page, a line starting `# ` is a heading (yellow). A page has up to 22 lines of 32 characters, plain ASCII, a title of up to 26 characters.
+- Run `python pico/make_help.py`. It checks the sizes and writes `pico/helptext.h` (the pages and the font), then build as usual. `helptext.h` is included in the package, so a build does not need Python for it.
+
+## How it works
+- NMI ROM: `H` on the start menu runs `.handle_help`, which sends `ACTION_HELP_PAGE` (0x1B, page number in the byte at +2) to the Pico, fetches the screen with `previewfrompico` (the same call the V preview uses), and waits for a key. The reply is the number of pages, so the ROM knows where the last page is. Leaving puts the game's screen back with `screenfrompico`. The code is about 120 bytes of the NMI ROM (`spare_size` 7,871).
+- Pico (`nmi_action_help_page`): draws the page into `snap_load_buffer` as a 6,912 byte screen (title row in white on blue with `n/15`, the text, a key line at the bottom), using the NMI ROM's own font (`charbank`, copied into `helptext.h` by `make_help.py`), and points `preview_screen` at it, so `ACTION_PREVIEW_READ` fetches it.
+- Three `jr` jumps back to the menu from the Load, Change ROM and Poke handlers became `jp`, since the new code moved them out of range.
+
+## Verification
+- The real NMI ROM in the Z80 simulator with keys pressed through the keyboard matrix, and the real page drawing code from `picoface.cxx` (host build, AddressSanitizer): X leaves from page 1; N, N, X shows pages 1, 2, 3; N, N, P goes back to 2; P on the first page stays; SPACE and ENTER work; other keys do nothing; N 17 times stops on the last page and P goes back; every page the ROM drew is byte for byte what the Pico made; the game's screen is restored on leaving. The pages were also drawn to pictures and read.
+- The 42 load checks still pass. The firmware builds (text 167,284, bss 234,736).
+- **Not tried on a real machine.** The help text describes what the code does, taken from the source and these notes; features not yet tried on hardware (long press, `.tzx`, the screen preview, saving over) are described as designed.
+
+# Choosing .sna or .z80 when saving (added 2026-10-09, on v16)
+
+On the Save snapshot screen, **Symbol Shift + R or Symbol Shift + T** (the `<` and `>` keys) changes the file type shown after `Border:`: `Type: auto`, `Type: .sna`, `Type: .z80`, round again. The screen opens on `auto` each time. `<` and `>` cannot be in a file name, so the keys lose nothing.
+
+| Type | 48K game | 128K game |
+|---|---|---|
+| auto | `.sna` | `.z80` (with the sound chip registers) |
+| `.sna` | `.sna` | 128K `.sna`: banks 5, 2 and the paged one, then PC, the paging port and the rest of the banks; **no sound chip registers** (the format has no place for them) |
+| `.z80` | version 3 `.z80` for a 48K machine, compressed | `.z80` as before |
+
+Both new files load back with the existing loader (`.sna` of 131,103 or 147,487 bytes, `.z80` of either machine). Saving over a game works as before with the chosen type; "Overwrite this file?" asks about the file of that type, so saving `game.sna` and `game.z80` makes two files.
+
+## Changes
+- `ACTION_SNA_SAVE` has a fourth parameter, a byte at +6: `ACTION_SNA_SAVE_TYPE_AUTO` 0, `_SNA` 1, `_Z80` 2 (exported to `nmi.h`).
+- `snapload.h`: `write_z80_48` (a 48K snapshot as a version 3 `.z80`, hardware mode 0, pages 8, 4, 5) and `write_sna_128` (a 128K snapshot as a 128K `.sna`).
+- `picoface.cxx`: `write_snapshot_file` picks the writer; the flash and SD paths both go through it now (`FlashSink`, `SdSink`). Because of that a failed 48K save to the internal flash now also removes the partial file, as the 128K one did.
+- NMI ROM: `.savetype`, `.nexttype`, `.showtype`, two more help lines (rows 15-16). Four `jr` jumps in the save screen's key handling became `jp`. `spare_size` 7,461.
+
+## Verification
+- The two writers through the real `snapload.h` (host build, AddressSanitizer): 48K `.sna` to `.z80` and back with seven stack positions (including SP below RAM, at 0xFFFE and 0xFFFF): memory identical, every register field and the PC taken off the stack; failing sinks reported. 128K with six paged banks (0, 7, 5, 2, 4, 0x17): the `.sna` is the right size (131,103 or 147,487), loads, and gives the same banks and registers as the `.z80`; the `.z80` has the sound chip registers and the `.sna` has none. 169 checks.
+- The real NMI ROM's save screen with keys pressed through the keyboard matrix: no key sends `auto`; one press of Symbol Shift T `.sna`, two `.z80`, three back to `auto`; Symbol Shift R changes it too; typing carries on and the type is not in the name; the type can be set before the name.
+- The 42 load checks and the 15 help page checks still pass. Firmware builds (text 176,732, bss 235,104).
+- **Not tried on a real machine.** In particular the file-level checks use `snapload.h`'s own loader, not another emulator, so load a saved `.sna`/`.z80` of each kind into an emulator once to confirm.
+
+# Saving a 128K game: the screen and ROM bits of port 0x7FFD (added 2026-10-09, on v17)
+
+**Reported:** Exolon, from a `.z80` made on another machine, ran fine. A snapshot taken with Picoface (`.z80` or `.sna`) made the display go blank as soon as the menu was left, and loading that snapshot gave music but no display.
+
+## Cause (found from the code; not reproduced with the game itself)
+- A 128K machine's paging port 0x7FFD can't be read. The NMI ROM only knows which **bank** is at 0xC000 (it hashes the bank and the Pico compares), but the **screen bit (3, shadow screen)** and the **ROM bit (4)** it took from `BANK_M` (0x5B5C), the 128K ROM's copy of the last value it wrote.
+- `BANK_M` is only right if the 128K ROM did the last paging. Loading a snapshot writes the port directly and leaves `BANK_M` as the snapshot's own memory had it, and a game that pages by itself, or uses that address for its own data (a 48K-style game on a 128K machine, which Exolon is), leaves anything there.
+- Whatever bits came out were written to the port when the menu was left and saved in the file. If bit 3 came out set, the ULA shows bank 7 (the shadow screen) while the game draws in bank 5: the music (the AY) carries on, the display is empty. Setting bit 4 wrongly pages the other ROM.
+
+## Fix
+- The Pico keeps `loaded_paging`: the port value of the last 128K snapshot it loaded and the byte that snapshot had at `BANK_M`. `snapload::choose_7ffd` uses the loaded port's ROM and screen bits unless the ROM has written `BANK_M` since the load (it no longer holds the byte the snapshot had **and** it looks like a port value, bits 5-7 clear and the bank number is the bank the hash found). The bank is always from the hash.
+- Not valid (so `BANK_M` is used as before) after a 48K load or a tape, the long press, a ROM change, and at power on.
+- Limits: a game that switches the screen itself (double buffering) is saved with whichever screen it had when loaded; it switches back by itself. After a **hand reset** the Pico can't see it: the load's port is used until `BANK_M` has been written (the 128K ROM does that at start-up, so it is believed again as soon as it differs from the byte the snapshot had).
+
+## Verification
+- `snapload.h` through the shim (host build, AddressSanitizer): without the load's port, a game with 0x0F in `BANK_M` gets port 0x08, the blank screen; with it the port is 0x10. BANK_M rewritten with a non-port value, or a port value for another bank: the load's port. BANK_M written by the ROM (a bank 3 port, with and without the shadow screen): believed. A game that paged bank 4 itself: 0x14. No load: unchanged from before (two cases). All the earlier writer checks still pass (169).
+- Firmware builds (text 177,036). **Not tried with Exolon or on a real machine.** If the display is still blank, send the working `.z80` and the snapshot made from it (the header bytes at 30-36 show the hardware mode and the port).
+
+# .szx snapshots (added 2026-10-09, on v18)
+
+The Spectaculator / Fuse snapshot format, loaded and saved.
+
+**Loading.** `.szx` files are listed with the other snapshots (Browse Games, SD card and flash) and load like a `.z80`. The **V** preview shows their screen. Supported machines: 16K, 48K, TC2048 and NTSC 48K (loaded as 48K), and 128K, +2 and 128Ke (loaded as 128K with the sound chip registers). The +2A, +3, Pentagon and the other machines are refused ("not a snapshot that can be loaded": the Spectrum just resets) because their ROMs and paging differ. RAM pages may be zlib compressed or not; the Pico decodes them itself (a small inflate in `snapload.h`, no zlib library). Other blocks (keyboard, joystick, disk, tape, the timing information) are skipped.
+
+**Saving.** On the Save snapshot screen the Type key (Symbol Shift R or T) now cycles `auto`, `.sna`, `.z80`, `.szx`. `auto` is unchanged. `.szx` writes a 48K file (49 KB) or, for a 128K machine, a 128K file with the sound chip (131 KB). The RAM is stored **uncompressed** (the Pico has no spare memory to compress a 128K image, and a stored page is valid `.szx`), so these are bigger than the `.z80`. Fuse and Spectaculator read them.
+
+**Limits.**
+- No timing information is saved (T-states into the frame start at 0), and no keyboard, joystick or disk blocks.
+- The +2A/+3 `.szx` files cannot be loaded. The machine ID written for a 128K save is 128K.
+- Same as the other 128K saves: the paging port is the one the Pico worked out (see the paging notes).
+
+**Tested (not on a real machine or in Fuse).**
+- The inflate against Python's zlib: 60 pages of five kinds at levels 0, 1, 3, 6, 9 and the default, filtered, Huffman-only, RLE and fixed strategies (1,500 streams) byte for byte, each consuming exactly the block's bytes; 3,000 truncated, bit-flipped and random streams never crash or overrun (AddressSanitizer + UBSan).
+- Files built by an independent writer following the spec, with packed and unpacked pages and keyboard/joystick blocks between: 40 seeds each of 48K, 128K, 128K without a sound chip; every register, IM, the interrupt flags, border, port, sound registers and all eight banks compared. Machines refused, bad magic and version, no registers, truncations, 400 corrupted files, a huge block size.
+- The two writers read back with an independent Python parser (zlib for packed pages) and by the loader: 30 seeds each, the PC taken off the stack in 48K, failing sinks reported.
+- The real NMI ROM's save screen: three presses of the Type key send `.szx`, four go back to `auto`. The 42 load checks and the 15 help pages still pass; the firmware builds.
+
+# v21: quick save, reload, resets, file info, .pok lists and diagnostics (added 2026-10-09)
+
+## Main menu keys
+S-Save snapshot, **Q-Quick save**, B-Browse Games, **L-Reload last game**, R-Change ROM, P-Poke, **4-Reset to 48K**, **1-Reset to 128K**, H-Help, X-Exit.
+
+## Q: quick save
+- Saves with no questions as `<game> Save Game` (the name of the last game loaded or saved, minus any ` Save Game` it already has), in the same folder and drive as that game, and as the same kind of file (`.sna`, `.z80` or `.szx`; the Save screen's new fifth type, `Type: same`, does this).
+- If that file exists, the Save screen's "Overwrite this file?" question is asked. If no game is known yet (after a tape, or at power on) the ordinary Save screen opens.
+- A game name over 18 letters is cut so that the name fits (trailing spaces dropped).
+
+## L: reload last game
+- Loads again the last game picked from Browse Games (it ignores quick saves, so a crash is undone with one key). "No game detected" until a snapshot has been loaded.
+- The Pico keeps the drive, folder and file name (`reload_*`), set on loads only. The ROM sends `ACTION_PREPARE_LOAD` (0x1C, mode 0) and then the usual begin-load request with no name: the snapshot already in the Pico is used (`snap_prepared`).
+
+## 4 and 1: reset into 48K or 128K
+- Each asks Y or N, since the running game is lost. `ACTION_PREPARE_LOAD` modes 1 and 2 make the Pico build a jump-to-0 snapshot (`tap_make_reset_snapshot`) with port 0x10 (48K ROM) or 0x00 (128 menu, `reset_to_128k_pending`), with the paging port left unlocked. The 128K reset needs the 128K ROM to be there.
+- Afterwards the Pico knows the machine's mode, so Save makes the right kind of file.
+- The Pico still cannot see the Spectrum's RESET key.
+
+## O: file size and type in Browse Games
+- **O** switches the list between names and details. Names are then cut to 16 letters and the details are in columns 20-31: the extension, the size (`999B`, ` 49K`, `128K`, `  5M`) and `128` for a snapshot that needs a 128K machine (a 128K `.sna`, a `.z80` or `.szx` of a 128K model) or `48` for one that runs on a 48K machine (a `.tap`/`.tzx` is left blank).
+- The Pico reads each file's header when the page is built (`read_file_details`, `extras::snapshot_needs`).
+
+## Browse Games layout
+- Row 1 title, row 2 `Number: open folder/load game`, row 4 the folder, rows 5-14 the entries, **row 15 a bar** in the colour of the "Pico Menu" bar with `Letter: command`, then the letter keys from row 16 (`M R E K` / `X U P N` / `S I` / `F C` / `D V A` / `O`). The old key row numbers in this document are one row lower now.
+
+## .pok lists: L in Poke
+- Put `<game>.pok` beside the snapshot (`.POK` also works; a name with ` Save Game` falls back to the game's own `.pok`). The standard format is read: `N<name>`, `M`/`Z <last> <bank> <addr> <value> <original>` lines, `Y` ends the file. Value 256 asks for a number (0-255). Up to 40 cheats, 200 pokes, 16 per cheat; names up to 28 letters.
+- **L** on the Poke screen lists ten cheats per page; **1-0** makes one, **N**/**P** turn pages, X leaves.
+- Banks: only banks 5 and 2 and, for a 48K game, bank 0 are poked. Other pokes are counted as not made.
+- Pokes are not undone.
+
+## Help > Diagnostics (D)
+The last Help page shows the firmware (`tapeloader v21`), free and total internal flash, free and total SD card space, and the last error (file that would not open, load or save; the SD card mount failure). **D** on any Help page jumps to it.
+
+## Changes
+- NMI ROM: `Q`, `L`, `4`, `1` handlers, `Type: same`, `OP_QUICK`, `ACTION_PREPARE_LOAD`, `ACTION_POKE_LIST` (0x1D), `ACTION_POKE_GET` (0x1E), the poke list screen, the Info toggle. `spare_size` 0x17EF.
+- Pico: `extras.h` (the pure parts: names, sizes, `.pok` parser), `picoface.cxx` (the actions above, `last_error`, `FIRMWARE_VERSION`), `make_help.py` (Help tokens).
+- Help.txt has 19 pages.
+
+## Verification (simulation and host builds only)
+- `extras.h` on the host with AddressSanitizer/UBSan: 23,330 checks (quick names, sizes, needs, `.pok` parsing including CR/LF, long lines, bad input).
+- The real NMI ROM in the Z80 simulator: quick save 17 checks, menu (L, 4/1 with Y and N, Q, menu text) 24, poke lists 42, info 22; Help pages and Diagnostics 32 plus the page tests. The 42 load checks and the `.sna`/`.z80`/`.szx` writer tests still pass.
+- The firmware builds (Pico SDK 1.5.1).
+- **Not tried on a real machine:** the resets, `read_file_details` on a real card, the free-space figures, `.pok` files from real sources (the tests use files written to the format), and quick save on a Spectrum.
+
+## Game name for every file type
+The "last game" name is taken on every successful load, so `.sna`, `.z80` and `.szx` all offer their name to Save (the S screen opens with it, Q uses it).
+
+# v22: the last game survives power off, and the L item shows its name (added 2026-10-09)
+
+- The NMI menu's L item reads **L-Reload: <name>** (the name, without its extension, cut to 20 letters), for example `L-Reload: Exolon`. If there is nothing to reload it reads **L-No game detected**, and so it does when the last game was on the SD card and the card is not in (or did not mount). Pressing L then says "No game detected".
+- The last game is kept in a small file, `lastgame.cfg`, in the Pico's internal flash (the same place as `saveto.cfg`). It holds the drive, folder, name and extension of the game to reload, the name Save snapshot starts with (so a quick save or a save after power on still has the right name) and the kind of file (`.sna`, `.z80`, `.szx`). It is written after each load and each save, only if something changed, and read at power-up (`initFileSystem`).
+- The file has a header (`0x4C`, version 1); one that is not ours, or is cut short, is ignored. A write that fails is tried again at the next load or save.
+- How the label gets to the menu: the NMI ROM has a 29 byte `start_up_reload_label`; `sendNmiRequest` writes the text into it each time the menu opens (`STARTUP_RELOAD_LABEL` is exported to `nmi.h`), so there is no extra request.
+- `extras.h`: `LastGame`, `lastgame_encode` / `lastgame_decode`, `reload_label`. `picoface.cxx`: `persist_last_game`, `load_last_game`.
+
+## Verification (host and simulator only)
+- `extras.h`: the file format round-trips (long names and folders at the limits, flash and SD, empty), refuses short, wrong-version, wrong-flag and padded files, and 4,000 mutated files never decode into oversized values (26,296 checks in all, AddressSanitizer and UBSan). The label for a game, none, no SD card, an empty name, a long name.
+- The real `persist_last_game` / `load_last_game` from `picoface.cxx`, over a one-file RAM flash (15 checks): a load writes once, unchanged state writes nothing, a power cycle (state wiped, then restored) brings back the same game and the same save name, a quick-save changes the save name but not the reload target, a removed or damaged file gives "nothing", a failed write is retried.
+- The real NMI ROM: the label text from the Pico appears as `L-Reload: Exolon` in the menu's colours, the longest label fits the line, the default is `L-No game detected`, and L with nothing says "No game detected".
+- **Not tried on a real machine:** the flash write at the end of a load (littlefs is already used for `saveto.cfg`), the SD-card-missing case.
+
+# v23: the internal flash gets folders and the file keys; erase a folder; move between drives (added 2026-10-09)
+
+## What you can do now
+- Browse Games treats the internal flash like the SD card: folders (go in with the number, U goes up, each drive remembers its own folder), search (F), sorting, favourites, and the keys M-Move, K-Copy, R-Rename, E-Erase, D-New folder, V-View, A-Add fav, O-Info. The Save screen's "Save to:" folder browser works on the flash as well.
+- `.rom` files are listed on both drives. Picking one in Browse shows "A ROM: use R-Change ROM" instead of loading. They can be moved, copied, renamed and erased like any file. R-Change ROM still only looks in the **top folder of the internal flash**, so to add a ROM from the SD card: Browse, S (SD card), pick it with M, press I (flash) and go to the top folder, then M again and Y.
+- **Moving or copying between drives**: pick the file on one drive, press S or I to change drive, browse to the folder, press M (or K) and confirm. A move between drives copies the file and then removes the original; if the removal fails you are left with both (nothing is lost). Nothing is overwritten ("That name is already in use").
+- **Erase a folder** (both drives): E, then the entry number of the folder. The screen reads *Directories can contain other directories and files, if you want to proceed type "ok"*. Type `ok` (any case) and ENTER. Anything else, or BREAK, erases nothing. The folder and everything inside it goes, to a depth of 8 levels; a deeper tree is refused (part of it may already be erased).
+- O-Info now reads "Info (size, 48/128)".
+
+## Limits
+- Folders cannot be renamed or moved (only files).
+- Change ROM does not look in flash sub-folders.
+- Flash paths are at most 127 characters, like the SD card's.
+- Nothing has been tried on real hardware.
+
+## Changes (for the code)
+- `pico/fsops.h` (new): file system operations that work on either drive: rename, remove, make folder, copy (across drives), move, recursive remove.
+- `picoface.cxx`: `flash_cwd` and `cwd_of(drive)`; the folder walker works on either drive; the move / copy / rename / erase / mkdir actions take the drive in byte 2 (0 flash, 1 SD); erase of a folder takes the typed text and only goes ahead if it is "ok" (`FILEOP_IS_DIRECTORY` 4 from DESCRIBE, `FILEOP_NOT_CONFIRMED` 5 from DO). `.rom` is a listed extension.
+- `file_wrapper.cxx`: paths beginning `/fl` open a flash directory. `littlefs-lib/pico_hal.c`: `pico_dir_close` now frees the handle (it leaked one allocation per directory read).
+- `nmirom.asm`: file keys on both drives, the erase-folder screen (`.erasedir`, optional third explanation line `.textextra`), the ROM notice.
+
+## Verification (host and simulator only)
+- `fsops.h` over the real FatFs (exFAT/LFN) and the real littlefs in RAM: copy, move, rename, never overwriting, recursive remove including deep trees and a full flash, no leaked directory handles (129 checks, AddressSanitizer and UBSan).
+- The real `picoface.cxx` browser code on the same two file systems (62 checks): list flash and SD, folders first, `.rom` listed, enter and go up, search in flash sub-folders, mkdir, rename, move and copy flash to SD and back, same-folder refusal, name in use, favourites, erase file, erase folder refused without "ok" and done with it on both drives, a ROM moved across and back.
+- The real NMI ROM in a Z80 simulator (27 checks): file keys on both drives, the folder warning text, "ok" and ENTER sends the erase with the text, wrong text / ENTER alone / BREAK erase nothing, a ROM is not loaded, drive numbers sent with pick / move.
+- Earlier suites rerun: extras (26,296), last game (15), quick save, menu, poke, info, 128K (42), help and diagnostics.
+- **Not tried on a real machine:** flash writes and deletes of this size, the SD card, cross-drive copies, the typed "ok" on a real Spectrum keyboard.
+
+# v24: fix for New folder on the SD card, and "ok" to erase a ROM file (added 2026-10-09)
+- **New folder on the SD card froze the NMI menu** (v23). Cause found from the code, not reproduced on hardware: v23 added a look-before-you-make step that put a 270 byte buffer on the Pico's small stack on top of what FatFs's own f_mkdir needs. That step is gone: the SD card's f_mkdir is called straight away, as before v23, and "already exists" comes from its own error. The action now uses 96 bytes of stack instead of 360. The buffers used to look at a path (`fsops::kind`) are static for the same reason, which also lightens rename, move and copy on both drives. If it still freezes, tell me which key and the folder name.
+- **Erasing a .rom file** now needs "ok" typed, like a folder (screen title "Erase ROM file", "A ROM file is hard to replace, if you want to erase it type "ok""). Anything else erases nothing. Moving, copying and renaming a ROM file are unchanged. `FILEOP_IS_ROM` (6) is the new status from the erase DESCRIBE.
+- Tests: host (PC) browser code 72 checks (adds ROM erase and SD / flash folder making), file system layer 129, Z80 simulator 33 (adds the ROM erase screen and the folder screen after it).
+
+# v25: New folder on the SD card still froze; a bigger buffer and a note for diagnosing (added 2026-10-09)
+- I could not reproduce the freeze (on a PC the same code makes the folder on FAT and on exFAT with 4 KB to 512 KB clusters, 72 checks). The SD-card call is the same f_mkdir as before v23, so the likely suspects are (1) FatFs clearing the new folder's whole cluster in single-sector writes, because the Pico's heap is too small for its buffer, and (2) something specific to the card. This build lends FatFs the 32 KB list memory while a folder is made (`ff_pool` in `ffsystem.c`), so the cluster is cleared in a few large writes.
+- **A note for finding the cause:** before the SD card's f_mkdir the Pico writes a note (`trace.cfg` in the internal flash) and writes "finished" after. If it freezes in f_mkdir, power cycle the Spectrum, then Help > D (Diagnostics): "Last error" will read `New folder froze in FatFs (SD)`. If the error line is empty, the Pico finished and the freeze is somewhere else (the menu after it).
+
+# v26: a special warning for erasing 48.rom (added 2026-10-09)
+- Erasing `48.rom` in the top folder of the internal flash shows: *48.rom is required for .tap functionality, are you sure you want to delete it? if so, type ok*. Only `ok` + ENTER erases it. A 48.rom on the SD card, or in a flash sub-folder, gets the ordinary ROM warning. `FILEOP_IS_48ROM` (7) is the new erase DESCRIBE status; the screen's row 9 is a second extra line (`.textextra2`).
+- Tests: host 78 checks, Z80 simulator 39.
+
+# v27: poke lists come from the "Poke List" folder (added 2026-10-09)
+- The Poke screen's L (poke list) now looks for `<game>.pok` only in a folder called **Poke List** in the root of the SD card (the name is not case sensitive), for example `Poke List/Exolon.pok`. A .pok file next to the game, or on the internal flash, is no longer used. The game itself can have been loaded from either drive. A name with " Save Game" on the end still falls back to the game's own name.
+- With no SD card, or no file for the game, L says "No .pok for it in Poke List".
+- Tests: host 84 checks (a valid .pok beside the game or on the flash is ignored; the one in Poke List is found for a game from either drive; no card gives none), Z80 simulator poke screen 42.
+
+# v28: .pok files are listed in Browse Games (added 2026-10-09)
+- `.pok` is now a listed extension (with the snapshots, tapes and `.rom`), on both drives and in searches, so you can see the files in the `Poke List` folder and copy, move, rename and erase them. Selecting one shows "A poke list: use Poke, then L" instead of loading it.
+- Tests: host 85 checks (adds .pok and .POK listed), Z80 simulator file keys 41 (adds the notice).
+
+# v29: T-Test ROM, the diagnostic ROM on the flash (added 2026-10-09)
+- A new main menu item **T-Test ROM (diagnostics)** (Exit moved down a row). It asks Y or N ("The running game is lost."), then puts the diagnostic ROM in place of the Spectrum's ROM and resets the Spectrum, the same way the tape loader's ROM is started.
+- **The ROM image is not included.** I could not fetch it here, and it is another project's file: Brendan Alford's zx-diagnostics (LGPL-3.0), `testrom.bin` in its release package. Put it in the **top folder of the internal flash** named `testrom.rom` (`testrom.bin` also works, any case). Easiest: put it on the SD card, Browse Games, pick it with M, press I (flash), M again, Y. Only the first 16384 bytes are used; a file shorter than that is refused ("testrom.rom is too short") and the running ROM is left alone. With no file: "Save testrom.rom on the flash".
+- To get the Spectrum's own ROM back: hold the NMI button for 1 second, or R-Change ROM, Internal Rom. A new Help page "Test ROM: T" says this.
+- The test ROM's own start-up keys (SPACE test card, S soak test, U ULA test, M memory browser, K keyboard test, and so on) are read at start-up, so they cannot be held from the menu; use the menus the ROM shows.
+- Code: `PREPARE_LOAD_DIAGNOSTIC` (3) of ACTION_PREPARE_LOAD; `use_diagnostic_rom()` in `picoface.cxx`.
+- Tests: host 91 checks (no file, a short file leaves the ROM alone, a whole `TestRom.BIN` is copied, a reset is ready and our ROM is served), Z80 simulator menu 31 (T asks first, Y prepares and loads, N cancels, the two messages), help 34.
+- **Not tried on a real machine, and not tried with the real test ROM.** I do not know how it behaves on a +2 behind the Picoface; it is built to run on the 16K/48K ROM position, and on a 128K machine the Picoface serves it as the 48K ROM.
+
+# v30: the T question says how to get out (added 2026-10-09)
+- Pressing T now shows: "Reset the Spectrum into the diagnostic ROM? The running game is lost. To exit the test ROM press the NMI button, choose Change ROM, then choose Internal Rom." with Y-Yes / N-No. (Tested in the Z80 simulator, menu 32 checks.)
+
+# v31: a warning for erasing testrom.rom (added 2026-10-09)
+- Erasing `testrom.rom` in the top folder of the internal flash shows: *testrom.rom is required for Test ROM functionality, are you sure you want to delete it? if so, type ok*. Only `ok` + ENTER erases it. The same file on the SD card or in a flash folder gets the ordinary ROM warning. `FILEOP_IS_TESTROM` (8) is the new erase DESCRIBE status.
+- Tests: host 96 checks, Z80 simulator file keys 46.
+
+# v32: quick saves go in the "Save Games" folder (added 2026-10-09)
+- **Q-Quick save** now saves `<game> Save Game.<type>` in a folder called **Save Games** in the root of the SD card (made the first time if it is not there), whichever drive the game came from. With no SD card it saves in the game's own folder as before. The Save screen shown while it saves says `SD:/Save Games`. The name, file type, overwrite question and error handling are unchanged. The S (Save snapshot) screen is unchanged: it still saves over the game in its own folder, or in the folder chosen with CAPS SHIFT+9.
+- Later quick saves of the same game overwrite (after the Y/N question) in Save Games; Browse Games will find them there.
+- How: the NMI ROM sends 2 (not 1) as the "last game's folder" parameter of ACTION_SNA_SAVE and of the SAVE_DIR DESCRIBE for a quick save; the Pico (`quick_save_place`) turns that into the Save Games folder.
+- Tests: host 105 checks (folder made, file there and not on the flash, a second save is name-in-use, overwrite works, the Save screen text, no card falls back to the game's folder), Z80 simulator quick save 17 and menu 32.
+- **Not tried on a real machine.** A card where New folder froze (see v25) might also freeze when this makes the folder the first time; if so, make the folder `Save Games` on a PC first.
+
+# v33: a second test ROM, DiagROM (added 2026-10-10)
+- **T-Test ROM** now first asks which test ROM: **1** zx-diagnostics (Brendan Alford, `testrom.rom`) or **2** DiagROM (Phil Ruston, `DiagROM.rom`); X or BREAK goes back to the menu. After the choice it asks Y or N as before ("The running game is lost. To exit the test ROM press the NMI button, choose Change ROM, then choose Internal Rom."), then puts the chosen ROM in place of the Spectrum's ROM and resets.
+- **DiagROM.rom goes in the top folder of the internal flash** (any case; `DiagROM.bin` and `DiagROM` with no extension are found too, `.rom` is preferred). Copy it there with Browse Games from the SD card like testrom.rom. Only the first 16384 bytes are used. No file: "Save DiagROM.rom on the flash". A file under 16384 bytes: "DiagROM.rom is too short"; the running ROM is left alone.
+- **Erasing DiagROM.rom** in the top folder of the internal flash shows: *DiagROM.rom is required for Test ROM functionality, are you sure you want to delete it? if so, type ok*. Only `ok` + ENTER erases it. On the SD card or in a flash folder it gets the ordinary ROM warning. `FILEOP_IS_DIAGROM` (9) is the new erase DESCRIBE status.
+- How: ACTION_PREPARE_LOAD with PREPARE_LOAD_DIAGNOSTIC takes a second parameter byte, 0 testrom.rom or 1 DiagROM.rom.
+- Tests: host 119 checks, Z80 simulator menu 43 and file keys 52.
+- **Not tried on a real machine, and not tried with the real DiagROM image** (I have no copy of it here). I do not know whether DiagROM wants anything of the machine that the Picoface does not give it, such as a particular ROM page.
+
+# v34: a tidier key area on the Browse Games screen (added 2026-10-10)
+- The six rows of keys under the "Letter: command" bar are in groups, each with a yellow name at the left and the keys from column 6:
+  ```
+   File M-Move R-Rename E-Erase
+        K-Copy D-New folder
+   Game O-Info V-View A-Add fav
+   Find F-Find <search> C-Clear
+   Disk S-SD Card I-Internal Flash
+   Go   U-Up P-Prev N-Next X-Exit
+  ```
+  Every key keeps its letter, and a key that does not apply (U in the top folder, P on the first page, N on the last, C with no search, and the file keys while moving) is left blank where it was, so the others do not move. While a file is picked to move or copy, or a folder to save in, the first group is called **Here** (`M-Move here  Q-Cancel`, `K-Copy here  Q-Cancel`, `H-Save here`). With no SD card the Disk row is left out.
+- The questions "Move which file? 1-0" and so on now start at column 1 and cover the group name.
+- Shortened to fit: `Previous` is `Prev` and `Info (size, 48/128)` is `Info` (the Help page says what Info shows).
+- Copy is still **K**: **C** is Clear (it clears a search). To make Copy = C, Clear would need another letter.
+- How: the key rows are still the MENU_ITEM table of the NMI ROM (only row and column changed); `.grouplabels` draws the yellow names after the menu; the Copy and New folder items move between their normal places and the "Here" row in `.updatefromdata`.
+- Tests: Z80 simulator file keys 75 (every row, colours, no SD card, moving, copying, choosing, a search, the questions) and info 26, menu 43, quick 17, poke 42.
+- **Not seen on a real screen.** The simulator shows the text and the colours, so check the look on the Spectrum.
+
+# v35: Copy is C, and F clears the search (added 2026-10-10)
+- **C-Copy** (was K-Copy), also **C-Copy here** while copying. The Find row now has one key: **F-Find** when nothing is being searched for, **F-Clear** (followed by the words searched for) while a search is in force. Clear ends the search the way C-Clear did. To start a different search press F (Clear) and then F (Find) again.
+  ```
+   File M-Move R-Rename E-Erase
+        C-Copy D-New folder
+   Find F-Clear <search>
+  ```
+- How: the F item of the key table (`.menufind`) has its word and handler swapped between Find and Clear in `.updatefromdata`; the old Clear item is gone; the copy item's key is 'c'. The search words start at column 14.
+- Everything else in v34 is unchanged. Old notes above that say K-Copy or C-Clear describe the earlier versions.
+
+# v36: the drive you are in is highlighted (added 2026-10-10)
+- On the Disk row the two drive keys are a pair, and the one being browsed is drawn in **white on blue** (the colours of the Pico Menu bar): `S-SD Card` when on the SD card, `I-Internal Flash` when on the flash. The other keeps its red key and green word. Pressing S or I swaps them. With no SD card there is no Disk row. The same shows when choosing a folder to save in.
+- How: `.grouplabels` sets the attributes of the cells of the current drive's key (9 cells at column 6 for SD, 16 at column 16 for the flash) from `.drive` after the menu is drawn.
+- The assembler prints "Label has different value in pass 3" for `spare_size_hi` with this version. It is only the size of the free space settling between passes (15 in the final pass, which is what the code uses; the end-of-file ASSERTs pass), not a problem.
+- Tests: Z80 simulator file keys 86 (both drives, the other drive's key colours).
+- **Not seen on a real screen.** Check that white on blue is easy to read on the +2 and tell me if you want another colour.
+
+# v37: long cheat names scroll in the poke list (added 2026-10-10)
+- In P-Poke, L-Poke list, a cheat name that does not fit in the 28 columns from column 4 now scrolls to the left one letter at a time, with a pause at each end, like the names in Browse Games (same speed, `SCROLL_DELAY` and `SCROLL_PAUSE`). Names that fit stay still. All the names that are too long move together. The keys 1-0, N, P and X work while it scrolls.
+- The Pico keeps cheat names up to **64** letters (`POK_NAME_MAX`, was 28, which cut them); a .pok line is read up to 95 characters. The page the Pico sends for ten cheats is under 700 bytes.
+- How: the ROM waits for a key with `.listwait`, which calls `.listscroll` while no key is down; `.listnames` draws the names from the scroll position. New variables `.lscrollpos`, `.lscrollmax`, `.lscrolltimer`.
+- Tests: Z80 simulator poke 63 (the first view, the shown part at several positions up to the end, short names and a name of exactly 28 letters not moving, the timer step and wrap, a key working afterwards); extras 26296 (a name is cut at 64 now).
+- **Not seen on a real screen.**
+
+# v38: the SD card as a USB drive for a PC (added 2026-10-10)
+- **Use:** with the Spectrum off, connect the Pico (micro-USB socket) to a PC. After a moment a drive (name "picoFace SD card") appears; copy, make folders, delete as with any drive. Eject it with *Safely Remove* before unplugging: Windows keeps writes in memory until then. Only the SD card is shown; the flash is still handled by the Browse screen and `usb.py`.
+- **Sharing the card:** the card is used by the Pico or by the PC, never both.
+  - The PC gets the card the first time it asks for it (Test Unit Ready or a read) while the Pico is not using it. The Pico is using it while the NMI menu is open or about to open, while a tape plays from the card, and while a serial command (`usb.py`) is working; the PC is then told "no disk" and tries again later.
+  - While the PC has it, the Pico unmounts the card (FatFs) so nothing of the Pico can touch it, and tells the NMI ROM there is no card but "in use by the PC": the Browse Disk row shows "SD in use by the PC", the S/I drive keys are hidden and the flash is used. Diagnostics shows "In use by the PC". Opening the menu while the PC holds the card does not take it away: eject first.
+  - The PC loses the card when it ejects the drive, when the cable is pulled or the PC sleeps (USB suspend) or the bus is reset. The Pico then mounts the card again and goes back to the top folder (`sd_cwd` cleared, listing stopped) because the PC may have changed anything. The PC is told "medium may have changed" each time it gets the card, so it re-reads it.
+  - After an eject the drive stays empty until the cable is plugged in again.
+- **How:** `usb_msc_core.h` (the rules above, no TinyUSB, tested on a PC), `usb_msc.cxx` (TinyUSB mass storage callbacks over the FatFs disk functions), `usb_descriptors.c` and `tusb_config.h` (serial CDC + mass storage, same VID/PID as before so `usb.py` finds the port), and hooks in `picoface.cxx` (`pico_sd_in_use`, `pico_sd_give_to_pc`, `pico_sd_take_back_from_pc`). TinyUSB is now run from the main loop (`usb_msc_task()`), and while the PC is busy with the card the loop does not sleep; the serial upload/download loops also call `tud_task()`. The hooks run inside TinyUSB so they print nothing.
+- **Changes you may notice:** the BOOTSEL-less reset used by tools (the picotool reset interface) is not in the new USB description, so update the firmware by holding BOOTSEL while plugging in, as for any new Pico. Free memory (heap) is about 0.6 KB smaller. Windows may take longer the first time (new driver for the drive); if the serial port is not found after the update, unplug and replug.
+- **Not tested on hardware or real USB.** Tested here: the sharing rules (Core, 0 fail), the Pico side hooks on the host (give / take back, files readable again, 127 checks), the Z80 notice (Disk row), Diagnostics, and a full firmware build. Please try: plug in with the Spectrum off, copy a file, eject, plug in the Spectrum and browse; also usb.py ls; tell me what Windows does.
+
+# v39: controls and instructions for each game (added 2026-10-10)
+- **The file:** `Instructions` (or `Instructions.txt`) in the root of the SD card, plain text, any number of games. `Docs/Instructions-example.txt` is a sample (Skool Daze). Each entry:
+  ```
+  Skool Daze
+  Controls
+  O or Cursor Left: Go left
+  ...
+  Instructions
+  Activate All Shields: ...
+  ```
+  - The first line is the game's name: the file name in Browse Games without .sna, .z80, .tap and so on. Capitals do not matter. A game saved with Quick save ("<game> Save Game") finds the entry of <game>.
+  - `Controls` and `Instructions` are on lines of their own (a colon is allowed, and text after it). The next game's name (a line followed by `Controls` or `Instructions` that has been seen already) ends the entry. Each may be left out.
+  - The other way to write a name is `[Skool Daze]` (several `[Name]` lines in a row share the entry; then the text is the instructions unless `Controls` is used).
+  - Each line of the file is one line on the screen; a line that is too long wraps at a space. One blank line at a time is kept. Lines starting with `;` are ignored. Letters outside plain ASCII show as `?`. Windows line ends and a byte order mark are fine.
+  - Limits: 512 letters of controls, 2048 of instructions, 700 letters in a line (the rest is cut).
+- **V (Browse Games):** the first page has the screen at half size (16 x 12 characters, top left), "Controls" at the right (15 letters wide, 11 lines) and "Instructions" below (32 wide, 9 lines). What does not fit goes on the next pages, full width (Controls first, then Instructions). N next, P previous, ENTER loads the game, any other key goes back. A page number shows when there are several.
+- **I (main menu):** the same for the game last loaded (the L-Reload game), with the game's current screen as the picture. N and P turn pages, any other key (X) goes back. After a power off the last game is the one remembered from before.
+- **How:** new action `ACTION_GAME_INFO` (0x1F, params: byte mode 0 = the file last previewed / 1 = the last game, byte page; status = number of pages). The Pico reads the file, takes the entry (`gameinfo.h`, tested on a PC), draws the whole screen (small picture, text) in `snap_load_buffer` at 16384 and the ROM fetches it with `ACTION_PREVIEW_READ` as it does for help pages. The picture takes the colours of the one of each four old characters with the most detail; each pixel is ink where two of its four old pixels are nearer the ink colour. The ROM routine is `showgameinfo`. V first runs ACTION_SNAP_PREVIEW as before: "no picture" (status 1) now still shows the information; only a file that cannot be read gives the message.
+- **Changes you may notice:** on the menu T and X are one row lower (I is above T). If the PC has the SD card (v38) there is no information.
+- **Tests:** gameinfo parser, wrapping and picture on a PC 117; Pico action on the host 161 (drv); Z80 simulator `test_gameinfo.py` 14 (I, V, pages, keys), menu 43.
+- **Not seen on a real screen.** The page layout was checked on a drawing of the screen only. Controls are narrow (15 letters) beside the picture, so short lines like `Q: up` fit best; long controls go on the second page. Tell me if you want a different layout (for example the picture smaller, or controls on a page of their own).
+
+# v40: pages go round (added 2026-10-10)
+- In the controls and instructions screens (V in Browse Games, I on the menu) **N** and **P** now go round: N on the last page shows the first, P on the first shows the last. With one page they do nothing. Only **X** (or BREAK) leaves; in Browse Games ENTER loads the game; every other key is ignored. The key line says `X-Back` / `X-Exit`. This replaces "any other key goes back" of v39.
+- How: `showgameinfo` in the ROM; the key lines are `gameinfo::key_help`. Tests: Z80 simulator `test_gameinfo.py` 12 (go round both ways, other keys ignored, one page, ENTER loads).
+
+# v41: screen grabs (added 2026-10-10)
+- **G-Screen grab** (main menu): saves the screen of the running game. The Pico keeps a copy of the screen from the moment the menu opens (the same copy the Instructions page shows), and that is what is saved.
+  - Where: the folder `Screen Grabs` in the root of the SD card, made the first time, with the FAT *hidden* attribute. Browse Games already skips hidden entries, so the Picoface does not list it (V finds the files itself). On a PC (the SD card as a USB drive from v38, or the card in a reader) it shows when hidden files are shown (Windows: File Explorer, View, Show, Hidden items).
+  - Name: the game last loaded (the L-Reload game), without " Save Game", cut to 64 letters, with the letters FAT does not allow (`\ / : * ? " < > |`) changed to `_`. If nothing has been loaded yet the name is `Screen`. One file is written: `<name>.scr` (6912 bytes, the Spectrum screen, which V reads).
+  - If the name is taken the number is added: `Name1`, `Name2`, up to `Name39` (a gap left by a deleted grab is filled first). After that: "Too many grabs of this game".
+  - Messages: `Saved as <name>`; "No SD card (or the PC has it)"; "Could not save the screen grab" (the cause may be in Diagnostics, Last error); "No screen to save". Any key goes back to the menu.
+  - A game that uses the other (shadow) screen of a 128K shows its normal screen in the grab: the Pico only has the screen at 0x4000.
+- **V** (Browse Games): the picture is now chosen from the game's file (a .sna/.z80/.szx screen or a tape's SCREEN$) and the screen grabs named like the file (name without extension; " Save Game" ignored), at most 8 grabs (`Name`, `Name1` ... in order). **S** cycles through them (and goes to the first page of the text); the title row shows `Pic n/m` when there is more than one; the key line shows `S-Pic` then. A game with no picture of its own but grabs shows the grabs; with neither it shows "No picture". The page numbers are `Pg n/m` now.
+- **I** (menu) is as in v39/v40: the running game's screen, nothing to cycle.
+- **How:** `ACTION_SCREEN_GRAB` (0x20, WORD param1 where the message goes; status 0 saved, 1 no card, 2 could not save, 3 too many, 4 no screen). `ACTION_GAME_INFO` has a third parameter (the picture) and its status holds the pages in the low four bits and the number of pictures in the high four. The pure parts (names) are `screengrab.h`; the Pico side is `nmi_action_screen_grab`, `grabs_find`, `grab_load` in `picoface.cxx`. `FF_USE_CHMOD` is 1 in `ffconf.h` for `f_chmod(AM_HID)`.
+- **Tests:** screengrab on a PC 14 (names), gameinfo 122; Pico side on the host 199 (grab files, hidden attribute, numbering, gaps, Save Game, V pictures, 8 at most, 39 then too many, no card); Z80 simulator `test_gameinfo.py` 25 (G messages, S cycling, menu rows).
+- **Not tried on hardware.** Check on the real machine: that Windows shows the folder with hidden items on; that V shows the picture (the half-size copy is rough for detailed screens).
+
+# v42: the pictures change by themselves (added 2026-10-10)
+- In V (Browse Games) the pictures of a game (the screen in its file, then its screen grabs) now **change by themselves**, round and round, about every 3 seconds. The S key and `S-Pic` are gone; the title row still says `Pic 2/3`. They change only while the first page shows (the picture is on that page); N and P work as before and the pictures go on when the first page comes back.
+- The file's own screen is only a picture if it has one: a file with no screen (status 1 of `ACTION_SNAP_PREVIEW`), one that cannot be read (status 2) or whose 6912 bytes are all zero is left out, so only the screen grabs are cycled. With nothing at all the picture area says **No Picture**. A file that cannot be read now shows the information too (the "No picture in that file" message is gone).
+- How: the Z80 waits in `.infokey` with `getkeypress`; with two or more pictures on the first page it counts `PICTURE_DELAY` (5000, about 3 seconds: a pass takes about 0.6 ms) idle passes, then asks for the next picture (`ACTION_GAME_INFO` param 3). To change the time change `PICTURE_DELAY` in `nmirom.asm`. `gameinfo::screen_is_blank` is the all-zero test.
+- Tests: Z80 simulator `test_gameinfo.py` 28 (pictures go round, not before the delay, one picture or none nothing changes, other pages, X, other keys), host 200, gameinfo 123.
+- **Not timed on a real machine.** About 3 seconds is an estimate from the instruction count; tell me if it is too fast or slow.
+
+# v42 (also): no .bmp
+- The screen grab is only the `.scr` file now (the `.bmp` of v41 is no longer written). Grabs already saved by v41 have a `.bmp` beside the `.scr` that the Picoface ignores; delete them on the PC if you like. A name counts as taken only by its `.scr`.
+
+
+# v43: recently played list (added 2026-10-11)
+- **What it does:** E on the main menu shows the last 10 games loaded, newest first (name, type, SD or FL). 1-9 and 0 load the first to the tenth; X, ENTER or BREAK go back. Loading from it also moves that game to the top.
+- **Where it is kept:** `recent.cfg` on the internal flash (littlefs): a version byte, a count, then per game the drive, folder, name and type (`extras::RecentList`, tested on a PC by `tests/test_recent.cpp`). It is read and written in `snap_load_buffer` at 65536, which is free when a game is about to load, so no new static memory is used. It is written only when the order changes. A game played twice in a row writes nothing.
+- **How:** `load_snapshot_file` calls `recent_note` (the one place every load goes through). `ACTION_RECENT_LIST` (0x21) draws the screen in `snap_load_buffer` and the ROM fetches it with `ACTION_PREVIEW_READ`; status is the count. Loading uses `ACTION_PREPARE_LOAD` with `PREPARE_LOAD_RECENT` (4) and the game's number in the next byte (status 1: no such game or SD card not in; 2: the file is gone), then `.doload` as for L.
+- **Limits:** a name of 64 letters or more, or a type of 8 or more, is not recorded. A folder path over 127 letters is not recorded. The list does not follow a file that was renamed or moved.
+- **Menu:** E is under L, so R, P, 4, 1, H, I, G, T and X are one row lower.
+- **Verification (host and simulator only; not on hardware):** host driver 219 checks (add, order, ten at most, persist across a cleared buffer, flash and SD games, no card, deleted file, long name), `trom/test_recent.py` 8, menu tests updated.
+
+# v44: V-View in the recently played list (added 2026-10-11)
+- V then a number (1-9, 0) shows the game's picture, controls and instructions, the same screen as V in Browse Games (pictures cycle, N and P page, ENTER loads, X goes back to the list). V on an empty list does nothing; X on "View which? 1-0  X-Cancel" cancels.
+- **How:** `ACTION_RECENT_LIST` now has a byte param1: 0 the list, 1 the list asking which to view, 2 + n gets game n ready (name for `info_name`, the file's screen for `info_source`, using `find_preview`; status as ACTION_SNAP_PREVIEW, 1 also when it is an SD game and the card is out), after which the ROM calls `showgameinfo` with mode 0. The ROM keeps the mode and the chosen number in `.recentmode` and `.recentindex`.
+- **Verification (host and simulator only):** host driver 226 checks, `trom/test_recent.py` 13.
+
+# v45: quick save slots (added 2026-10-11)
+- Q: if the quick-save name ("<game> Save Game") is taken, the ROM shows "Do you want to overwrite / the existing save? Y or N?" (`savesnapshotscreen.promptquick`; the ordinary "A file with this name exists" question is kept for typed names). Y saves again with the overwrite flag 1. N saves with flag 2.
+- **Pico:** `ACTION_SNA_SAVE` param2 = 2 means "the first free number from 2": `nmi_action_sna_save` tries `<name> 2`, `<name> 3` ... (`extras::numbered_name`) with `fsops::kind` until none exists, and fails with "Too many saves" after 99. The numbered name becomes the last game, so L (reload) loads that slot and E lists it.
+- **Names:** `extras::base_name_length`, `gameinfo::Info::set_game` and `screengrab::base_name` strip " Save Game" and also " Save Game N" (N up to three digits).
+- **ROM space:** spare_size is 0xD02 against the 0xD00 needed (`spare_size >= MOVE_INFO + SCREEN_PIECE`). Any further ROM code means making space first (shorter texts, or moving a screen's strings to the Pico).
+- **Verification (host and simulator only):** host driver 232 checks (numbers 2 and 3, a gap refilled, 99 taken gives an error), `trom/test_quick.py` 19, name tests in tinfo (grab 17, info 124, recent 33).
+
+# v46: Q needs a game loaded (added 2026-10-11)
+- `game_running` (picoface.cxx) is set by `load_snapshot_file` (so Browse, L, E and tapes) and cleared by the resets (`PREPARE_LOAD_RESET_*`, the diagnostic ROM, the long press). Power-up: false.
+- `ACTION_SNA_SAVE_DIR` `OP_QUICK` returns status 254 when it is false (a name's length otherwise, 0 for "use the ordinary screen"). The ROM (`savesnapshotscreen.nogame`) shows `startmenu.noreloadmsg` ("No game loaded"), waits for a key and returns 1 so the menu comes back. 255 cannot be a status: byte 0 holds 255 while a request is waiting.
+- **ROM space:** spare_size 0xD05 against 0xD00 needed.
+- **Verification (host and simulator only):** host driver 241 checks (254 until a load, a name after, 254 again after the 48K and 128K resets), `trom/test_quick.py` 23, test_menu and test_gameinfo updated for the shorter messages.
+
+# v47: delete a screen grab from V (added 2026-10-11)
+- **Keys:** in V (not on the I screen) with a screen grab showing, D then Y deletes it; N or any other key cancels. The key line shows `D-Del` (`D-Delete` with one page) only when the picture is a grab and it is the first page.
+- **How:** `ACTION_GAME_INFO` has a fourth parameter, BYTE param4 = 0 normal, 1 ask, 2 delete. For 1 the Pico draws "Delete this grab?  Y-Yes  N-No" as the key line and sets byte 1 of the mailbox to 1 (the ROM keeps it in `.infoop`; while it is 1 the next key is the answer and the pictures do not cycle). For 2 it deletes `Screen Grabs/<name><n>.scr` with `fsops::remove_path`, finds the grabs again and shows the picture that follows. The Pico decides whether the picture shown is a grab, so a D on the game's own picture simply asks nothing.
+- **ROM space:** the three duplicated Erase testrom/DiagROM strings now share one copy; spare_size is 0xD13 against the 0xD00 needed.
+- **Verification (host and simulator only):** host driver 259 checks (asking, deleting the second of three, the file picture left alone, the last grab giving No Picture, the menu page never deleting), `trom/test_gameinfo.py` 34, `tinfo/test_info.cpp` 127.
+
+# v48: protected folders, Poke List hidden (added 2026-10-11)
+- **Erase:** `ACTION_SNAP_ERASE` DESCRIBE returns `FILEOP_IS_PROTECTED` (10) for a folder whose path is `/Favourites` (either drive) or `/Save Games` (SD card). After the name (32 bytes) and the folder (32 bytes) in the buffer the Pico writes four 32-byte texts: the title, two lines of warning, and what to type. The ROM (`.eraseprotected`) points the same "type ok" screen as for any folder at them, so the wording lives in the Pico, not in the ROM. DO still needs "ok" (FILEOP_NOT_CONFIRMED otherwise).
+- **Wording:** quick save and the A key make their folders again if they are missing, so what is lost by erasing is what is in them; the message says so ("all your quick saves", "all your favourites") rather than saying the function goes.
+- **Poke List:** the listing walker skips a folder called Poke List in the root of the SD card (`walk.drive == 1`, empty folder), so it cannot be opened or erased from Browse Games. It is not given a hidden attribute, so a PC sees it as before. Poke lists are read from it as before.
+- **ROM space:** spare_size 0xD01 against 0xD00 needed: one byte left.
+- **Verification (host and simulator only):** host driver 277 checks (describe, the four texts, no ok, Poke List not listed on the SD card and listed on the flash), `trom/test_files.py` 91.
+
+# v49: firmware updater (added 2026-10-11)
+- **Menu:** U-Update Picoface (row 15; T and X moved down one). `ACTION_UPDATE` (0x22), BYTE param1 = 0 check (draws the question as a screen for ACTION_PREVIEW_READ, status 0 ready, 1 no SD, 2 no .uf2, 3 several, 4 file refused, then the reason on the screen), 1 stage (status 0 done, 5 no room, 6 failed, with a screen), 2 install (does not return; 7 if nothing was staged). The ROM (`.handle_update`) only moves between these.
+- **Files:** `pico/fwupdate.h` has everything that does not touch the hardware, so `tinfo/test_fwupdate.cpp` can test it on a PC: `Checker` reads the `.uf2` block by block; `map_file` finds where a littlefs file lies (the CTZ skip list: block 0 is data only, block n starts with ctz(n)+1 pointers, the file head is its last block); `apply` copies from those blocks over the program. The Pico side is in picoface.cxx (`nmi_action_update`, `fw_run`).
+- **Staging:** the image (the 256-byte payloads of the `.uf2`) is written to `fwnew.bin` in the internal flash, flushed, and its head block and size are taken with `pico_ctz_info`. The file is kept (not removed) until the next start-up, so its blocks cannot be reused before the copy. The map and the 4096-byte sector buffer live in `snap_load_buffer` (offset 69632 and after), free while the menu is open.
+- **Install:** `fw_run` and what it calls (`crc32_update`, `gather`, `file_crc`, `apply`) are in the section `.time_critical.fwupdate` (RAM). It checks the staged copy's checksum again, then erases and programs the sectors from offset 0 with the SDK's `flash_range_erase`/`flash_range_program` (also in RAM), compares the CRC of the program flash with the file's, tries up to three times, and restarts the chip through the watchdog registers directly (no call into the flash). If the program cannot be written it goes to BOOTSEL (ROM function looked up before). Before it, `multicore_reset_core1()` and interrupts are off. The disassembly shows no call from these into the flash.
+- **Size:** the flash left for the program is 0x3E000 (the file system takes the top 1800 KB). If the firmware grows past that, the updater and the build both need changing.
+- **Verification (host and simulator only):** `tinfo/test_fwupdate.cpp` 76 checks (good and many damaged `.uf2` files, the real `picoface.uf2`, files of several sizes through littlefs, a bad write repeated or refused), host driver 305 checks (check, two files, damaged, not a Picoface, no room, stage, install into a pretend flash, stale copy removed), `trom/test_update.py` 7, test_menu 43, test_gameinfo 34.
+
+# v50: progress bar and finish screens for the update (added 2026-10-11)
+- **Staging is stepped:** `ACTION_UPDATE` op 1 copies up to 32 pages of 256 bytes (8 KB) per request and returns FWU_MORE (8) until done, with byte 3 of the mailbox = cells of the 28-cell bar. The ROM draws the bar in the attribute row 12, columns 2 to 29 (bright green done, blue to go), and repeats op 1. State is kept in `fw_stage_open`, `fw_stage_out`, `fw_stage_pages`. The last step flushes, maps the file, and checks its CRC (the bar stops one cell short until then).
+- **Install:** op 2 is one request that does not return until the end: the ROM polls byte 3 (bar) and byte 0 (255 while busy). `fwupdate::apply` takes a `progress` pointer and sets it after each 4096-byte sector of the first pass (no division). `fw_run` then writes byte 0 = 0 (done) or 9 (FWU_WRITE_FAILED) and waits 3 s with the hardware timer before the watchdog restart (or BOOTSEL on failure), so the Spectrum can draw its last screen. If the staged file's CRC is wrong before anything is written, `fw_run` returns, nothing is changed, and status 6 shows the error screen.
+- **Core 1 is no longer stopped.** It serves the Spectrum from RAM and has to for the ROM to run the bar. This relies on core 1 using no flash code or data while the flash is erased and written: the same thing the file system already relies on when the Pico saves to the internal flash with the NMI menu open. The disassembly of `fw_run`, `apply`, `gather`, `file_crc` and `crc32_update` shows calls only into RAM.
+- **ROM end:** after "Update complete" (or "Update failed") the ROM copies `di; jr $` to 0x8000 and jumps there, so the Spectrum stays still when the Pico goes away. Spare ROM: 0xD3A of 0xD00 needed.
+- **Verification (host and simulator only):** `trom/test_update.py` 13 (steps and bar, the done screen, the failed screen, a refused install, the bar restarting), host driver 305 (including the staging steps), `tinfo/test_fwupdate.cpp` 84.
+
+# v51: Software house, Year and My notes (added 2026-10-11)
+- **File format:** after a game's name line (or its `[Name]` lines): `Software house:`/`Publisher:` (40 letters kept, 15 shown) and `Year:`/`Year released:` (8 letters). `gameinfo::Info::meta_line` takes them while a name is waiting (`has_pend_`) or in the `[Name]` form and keeps them in `pm_house_`/`pm_year_` until `start_entry` finds the entry is the wanted one. Elsewhere (no name waiting) such a line is ordinary text. `any()` is true with only these.
+- **Layout:** `meta_rows`/`ctrl_rows` in gameinfo.h: the house is row 1 and the year row 2 of the right column, the Controls heading and lines move down by the number given (CTRL_ROWS is 11 less that number). `page_count` and the "(more)" pages use the same figure.
+- **Notes:** `notes.h` has the file name (`/Game Notes/<base>.txt`, base from `screengrab::base_name`) and the `Editor` (18 lines x 30 letters; load refuses a file with a longer line or more lines; text() gives lines each ending in \n, none empty at the end). `Info::set_notes` keeps up to 1024 letters for display and `page_count`/`draw_text` add them as the last section after the Controls and Instructions leftovers. The editor is kept in snap_load_buffer at 40960 (the bytes of the file at 41984), above the screen grab.
+- **Protocol:** `ACTION_GAME_INFO` param4 (op) = 3 start the editor, 4 a key (BYTE param5, mailbox byte 6). While the editor is going byte 1 of the mailbox is 3 and the screen is the editor's (`notes_draw`: lines from row 2, the cursor a flashing cell, the key row). The ROM (`showgameinfo`) keeps `.infoop` = 3 and sends every key as op 4 (`.infotyped`). When the Pico answers 0 the page keys work again. The Pico also writes the page back to mailbox byte 3 (clamped to the pages there are, or the last one after a save), which the ROM now reads into `.infopage`.
+- **Saving:** `notes_write` writes `<name>.txt` directly into the Game Notes folder (v52; v51 wrote `.new` and renamed, which needed too much stack). `n == 0` removes the file. From v53 the folder is made by the user on a PC (v51 and v52 made it and hid it with `f_chmod(AM_HID)`); `notes_folder_there()` is checked when M is pressed and again on a save.
+- **Keys the editor takes** (the ROM's keyboard table): printable letters except `~` (the table's "no key"), ENTER 0x13, CAPS+0 0x0A delete, CAPS+5/6/7/8 0x05/06/07/08 arrows, BREAK 0x18 and CAPS+1 0x01 finish.
+- **ROM space:** spare_size 0xD1E (30 bytes over the 0xD00 needed). More ROM code needs room made first.
+- **Verification (host and simulator only):** host driver 345 checks (meta lines and layout, bracket form, next game's lines, editing, saving, the hidden folder, discard, empty note, too-long file, no card, numbered saves), `tinfo/test_info.cpp` 149, `tinfo/test_notes.cpp` 34, `trom/test_gameinfo.py` 42.
+
+# v52: My notes save no longer hangs (added 2026-10-11)
+- **Report:** in the notes editor the cursor flashed and typing worked, but saving (BREAK, Y) hung the Spectrum and nothing was saved.
+- **Cause:** found by measuring the compiled code, not by a reproduction. The first core's stack is 2 KB (`__StackBottom` 0x20041800 to `__StackTop` 0x20042000) and the free space below it only reaches the second core's stack (0x20041000). `nmi_action_game_info` had a frame of about 1.5 KB (two `FileHandle`s for the Instructions and the grabs, which hold a FatFs `FIL` of about 600 bytes, plus the text drawing), and v51 called the SD card from inside it: the save went `processNmiRequest` (312) > `nmi_action_game_info` (1.5 KB) > `f_rename` (about 900 with `dir_register` ... `disk_write`) > the SD driver, about 3 KB. Past 4 KB the second core's stack, which serves the ROM to the Spectrum, would be overwritten, and the Spectrum hangs. The grab delete and the rename in Browse Games have shallower paths. Treat this as the likely cause, not a proven one.
+- **Fix:** `nmi_action_game_info` is now a thin routine that does the editor's step first (`notes_step`, op 3 and 4) and then calls `nmi_game_info_show` to draw. The text drawing is in `info_paint_text`. The notes' `FileHandle` is placed in the spare buffer (`NOTES_HANDLE_OFFSET` = editor + 2048) rather than on the stack. `notes_write` writes the file directly, with no `.new` file and no rename. The worst path of the save is now about 1.7 KB.
+- **To check a stack:** `arm-none-eabi-objdump -d picoface.elf` and read the `sub sp` or `add sp, rN` of the function (the constant is a pc-relative literal), or build with `-fstack-usage`. Any new SD card use should go through a small function called straight from `processNmiRequest`, not from inside a function with a big frame.
+- **Cursor keys:** the +2's cursor keys are CAPS SHIFT+5 6 7 8 in the keyboard matrix, so the editor already took them; the editor's key line and Help now say so.
+- Test changes: the host test checks that no `.new` file is left, and that the notes are written to `<name>.txt`.
+
+# v53: the Game Notes folder is made on a PC (added 2026-10-11)
+- The user still saw the Spectrum hang on a save with the folder present. `f_mkdir` and `f_chmod` are removed from the save (the folder is checked with `fsops::kind`); without it M and the save say "No Game Notes folder - add one" (30 letters, the editor's width) and nothing is made.
+- **New test, the real Pico code against the real ROM:** `thost/bridge.cpp` is `picoface.cxx` on a PC behind a pipe (it must not print on the pipe: the Pico's LOG goes to stderr), and `trom/test_notes_real.py` runs the NMI ROM in the Z80 simulator and sends every request to it. It types `i m h i BREAK y`, saves again over the file, discards, and tries with no folder. Nothing hangs and the files are right, so the protocol, the ROM and the Pico's editor agree. What it cannot show is the Picoface's stack, SD card and timing.
+- Build: `cd thost; ... g++ ... bridge.cpp ... -o bridge` as for `drv`, then `cd trom; python3 test_notes_real.py ../asm21`.
+
+# v54: the notes are shown first, E edits (added 2026-10-11)
+- Request: the My notes screen should show what is there and not be editable unless E is pressed.
+- How: still no ROM change. The ROM sends op 3 for M and then every key as op 4 (mailbox byte 1 = 3 while the notes screen is up). The Pico has two states in `notes_step`: looking (`notes_editing`, not `notes_edit`) and editing (`notes_edit`). Looking: E starts editing, X, BREAK or EDIT leave, other keys are ignored. Editing: as before; a save or a discard goes back to looking (a discard reloads the file, a save keeps the text, which is the file). Leaving returns `notes_saved` as `ended`, so the information goes to the notes page only if something was saved.
+- `notes_draw` shows `E-Edit  X-Back` when looking and no cursor; the editing hints only when editing.
+- `nmi_action_game_info` resets `notes_editing` and `notes_edit` for any request that is not op 3 or 4 (the ROM only sends those two while the notes screen is up), so a notes screen left up by an NMI exit can't come back.
+- Tests: `thost/drv.cpp` section 18 and `trom/test_notes_real.py` (the keys are now `i m e ...`, with checks that typing before E changes nothing).
+
+# v55: the Instructions file is read from the folder Scraper (added 2026-10-11)
+- `info_read_file` tries `/Scraper/Instructions.txt`, `/Scraper/Instructions`, `/Instructions.txt`, `/Instructions`, the first that opens. Nothing else changed: the entry format, `Screen Grabs` (`screengrab::FOLDER`) and `Game Notes` (`notes::FOLDER`) stay in the root.
+- Effect on the scraper (`scripts/scrape_game_info.py` / `.exe`, see the project's game-info-scraper notes): it writes `Screen Grabs` beside the Instructions file, so beside `Scraper/Instructions.txt` it makes `Scraper/Screen Grabs`, which the firmware does not read. Either move that folder's `.scr` files (and `_downloaded.txt`) to the root `Screen Grabs`, or change the scraper to use the card's root. The scraper program is not in this source tree and was not changed.
+- Tests: `thost/drv.cpp` section 18 (Scraper/Instructions.txt, Scraper/Instructions, both present, and the root fall-back).
+
+# v56: PICOFACE title bar (added 2026-10-12)
+- ROM: `clearscreen` draws the row-0 bar with `TITLE_ATTR` (bright green ink on blue) and the text PICOFACE in columns 12 to 19 on every ROM menu screen. The main menu then calls `bigtitle`, which makes rows 0-2 blue, clears their pixels and draws PICOFACE from the font (`charbank`) at 16x16 pixels from pixel line 5, columns 8 to 23, widening each font byte with the `.nibbles` table.
+- A black shadow is not possible (two colours per 8x8 cell), so there is none.
+- `SCREEN_PIECE` is 1728 (6912 / 4) to make room; the Pico needs no change, it is told the piece size in the request.
+- The `BANNER_ATTR` bars (the Browse Games letter-keys bar, the drive row) stay bright white on blue.
+- Tests: `test_menu.py` (title colours, space, double height), `test_info.py` (row 0 is the title).
+
+# v57: each letter of the main menu title has its own colour (added 2026-10-12)
+- `bigtitle` calls `.colour` for each letter: its two cells on rows 0-2 get one of `.inks` (red, yellow, green, cyan, bright on blue paper) in turn. The letters are drawn from pixel line 3. Everything else as v56.
+
+# v58: .tzx loops, jumps and calls; the tape stops at the end (added 2026-10-12)
+- `tape_next_block` for a `.tzx` now plays the control blocks: `tzx_read_header` reads a block's id and fixed header, `TzxState tz` holds the index of the next block (0 = the first after the 10 byte header), the loop (start index, file position, passes left, whether a data block was seen) and one call sequence (up to 32 relative offsets, the next one to use). A jump is made by `tzx_goto`, which rewinds to the first block and skips forward when the target is behind, using `FileHandle::seek`.
+- Limits: 2000 control blocks without a data block (`TZX_MAX_IDLE`), 4096 data blocks per run (`TZX_MAX_BLOCKS`); both end the tape. Targets before the start or after the end end the tape. Nested loops are not played (the inner start replaces the outer), nested calls are ignored.
+- ROM trap: `tape_serve_block` returns false at the end of the tape and rewinds (`tape_open_file`); `tape_tz` keeps the place of the tape being served while other code uses `tz`.
+
+# v59: the tape summary on the game information (added 2026-10-12)
+- `find_preview` calls `tape_scan` for a `.tap` or `.tzx` (after the screen has been looked for, with a seek back to the start): it counts the blocks into `TapeSummary tape_sum` and sets `tape_sum_valid` (cleared at the start of every preview). `tape_hop` skips a block with a seek and says no when the block is longer than the file (a damaged tape). For a `.tzx` the blocks are read with `tzx_read_header`, without following loops, jumps or calls.
+- `nmi_game_info_show` (mode 0 only) makes the text with `tape_text` into the notes file's place in `snap_load_buffer` and gives it to `Info::set_tape` (`ntape`, `tape`, `verdict`). `gameinfo.h` counts it in `page_count` and draws it with the heading Tape before My notes in the pages after the first; with no information entry the first page also shows the verdict and `N-Tape details`.
+- The verdict (`tape_verdict`): bad or no data blocks: No; any pulse, tone, direct recording, CSW or generalised block: Probably not; any turbo or pure data block: Maybe; otherwise Yes.
+- Stack: `tape_scan` is a noinline function of its own (about 70 bytes of frame) called from `find_preview`, as the tape reading was. `f_lseek` replaces `f_read` at the bottom of that chain; not measured on hardware.
+- Tests: `tests/drv.cpp` (a .tzx with a loop, a jump and a call; turbo; pulses and direct recording; an unknown block; a truncated block; not a .tzx; a .tap; with an Instructions entry; after a snapshot).
+
+# v60: libraries built for size (added 2026-10-12)
+- `CMakeLists.txt` sets `CMAKE_C/CXX/ASM_FLAGS_RELEASE` to `-Os -DNDEBUG` (the SDK's Release default is `-O3`) and gives `picoface.cxx` `-O3` by `COMPILE_OPTIONS` (the last flag wins). Measured with the same sources: all `-O3` 248,804 bytes (text + rodata), libraries `-Os` and `picoface.cxx` `-O3` 204,276, everything `-Os` 162,468, `picoface.cxx` `-O2` 190,308. FatFs and littlefs at `-O3` are the big part of the difference (about 34 KB).
+- Not taken: `picoface.cxx` at `-O2` or `-Os` (a further 14 to 42 KB), because the stack frames of the Picoface's own functions change with it (for example `extras::RecentList::decode` gets a 2088 byte frame at `-Os`, more than core 0's whole 2 KB stack) and nothing can be tried on hardware here. If more room is needed, that is the next step, with the frames checked function by function.
+- The checks made: the frame of every function against the v59 build (library functions the same or smaller, the Picoface's own the same); the deepest call chains of the SD card and flash calls (not more); no direct call from a function in RAM into flash.
+
+# v61: double press of the NMI button saves the screen (added 2026-10-12)
+- The main loop calls `extras::classify_press` (extras.h) once the button is seen down: held for 1000 ms is LONG (the reset into the internal ROM, as before); let go sooner, then 25 ms for the contact to settle and up to 350 ms for the button to go down again and stay down for another 25 ms: DOUBLE; otherwise SHORT (the menu). The button is therefore watched about 375 ms after a short press before the menu opens.
+- DOUBLE sends `sendNmiRequest(STARTUP_ACTION_GRAB, 0, 0)` (5), then waits for the button to be let go. If an NMI is already active (the menu is open) nothing is sent.
+- NMI ROM: the entry point stashes the screen with the Pico as for any NMI (`screentopico`, 4 pieces), then `quickgrab` asks for `ACTION_SCREEN_GRAB` (0x20, message to `spare_space`, not shown) and takes the status: 0 sets the border to 4 (green), anything else to 2 (red) for `GRAB_FLASH` (420) times about 3,300 T-states (about 0.4 s with interrupts off), then writes the game's border (`sna_on_entry + SNAHEADER.BORD`) back and leaves without restoring the screen (it was not touched). The Pico side is the existing `nmi_action_screen_grab`.
+- Cost: NMI ROM +66 bytes (`spare_size` 0xC1C = 3,100 bytes; the assert needs at least 2,752). Firmware text 204,804 bytes of 253,952.
+- Tests: see the CHANGELOG (v61): `trom/test_grab.py`, `tbutton/t.cpp`; `harness.py` now has `record_outs` (the OUT writes of a run) and `sp` (the starting stack). `test_recent.py` was fixed to stop at the start of the load.
+- Not tried on a real machine.
+
+# v62: C - Set up SD card (restored, added 2026-10-13)
+
+The v56 feature again, on top of v61. Menu item C (NMI ROM `handle_sdsetup`, which calls `showgameinfo` with a = 2; the Pico answers in `nmi_sd_setup`, `pico/sdsetup.h` lists the folders).
+- C shows the list. D (op 1) makes the Pico ask "Set up this card?" (byte 1 = 1); Y sends op 2, which runs `sd_setup_run`; anything else cancels.
+- Folders: Scraper, Game Notes, Save Games, Screen Grabs (Hidden attribute), Favourites, Poke List. Existing folders are left alone ("there already"). A file in the way gives FAILED for that item only.
+- `Scraper/Instructions.txt` (an example, with `;` comment lines) is written only when none of Scraper/Instructions.txt, Scraper/Instructions, /Instructions.txt, /Instructions exists ("kept yours" otherwise).
+- Stack: the SD calls are in small noinline routines called from the handler, not from the drawing routine. The file handle is the one in the spare buffer used by the notes.
+- Tests: `trom/test_sdsetup_real.py`, `thost/bridge.cpp` (new commands K, M, T), `drv.cpp` section 19, `test_menu.py`, `test_gameinfo.py`.
+- Firmware text 208,948 bytes of the 253,952 the updater accepts; ROM `spare_size` 0xC02.
+
+# v63: Screen Grabs is not hidden (added 2026-10-13)
+- `nmi_action_screen_grab` and `sd_setup_run` no longer call `f_chmod(AM_HID)` for Screen Grabs (`sdsetup::Folder.hidden` is false for every folder). The v41 notes above that say the folder is hidden are out of date.
+- `walk` (the Browse Games lister) skips `Screen Grabs` in the root of the SD card, like `Poke List` (v48), because the folder was only kept out of the list by its hidden attribute. Existing hidden folders stay hidden.
+
+# v64: Set up SD card, freeze fixes and the result heading (added 2026-10-13)
+- Reported: Y on the Set up SD card screen hung and no folders were made. Not reproduced in the simulator.
+- `sd_setup_early()` (called in the main loop before `processNmiRequest()` when the mailbox is ACTION_GAME_INFO, mode 2, op 2 and the card is there) runs `sd_setup_run()`; `nmi_sd_setup()` skips running it if `sd_setup_ran` is set (the tests that call the handler directly still work: it runs it itself then). Depth by the static count: 912 bytes from the main loop against 1,536 for the deepest request handler.
+- `make_sd_folder(path)`: `walk_stop()`, FatFs lent `list_pool` (`ff_pool`), `fsops::make_dir`, pool taken back. Used by the set up and by `nmi_action_screen_grab`.
+- `trace_step('S', n)` before each step and `trace_step('Z', 0)` at the end; `check_trace()` at start-up turns an `S` note into the Diagnostics line `Set up SD froze at step N`.
+- Result heading: `sd_setup_draw` counts MADE and FAILED over the result array: failed beats made beats nothing.
+- Test tooling: `tests/lim.c` (with `lim.h`) stands in for the Pico's small heap. Build FatFs' `ffsystem.c` with `-Dmalloc=lim_malloc -include lim.h` and link it and `lim.o`: with `lim_on` set the heap refuses (and counts, `lim_refused`) a buffer over 2,048 bytes, as a cluster-sized one is on the Pico. FatFs' `dir_clear` halves its buffer until it gets one, so on the host a missing pool only slows the clearing; the check is that the lent pool is used (the count stays 0), which is the New folder way. Without `make_sd_folder`'s pool lines the count is not 0 and the checks fail.
+
+# v65: Moving folders (added 2026-10-13)
+- ROM: `.copyhandler`/`.movehandler` set `.pickdirs` for M only (0 for copy), so `.pickfile` returns folders for M. `.movehere`: DESCRIBE status 0 = the file screen; FILEOP_IS_DIRECTORY (4) = `.eraseprotected` (the "type ok" screen, texts at MOVE_INFO+2..6); anything else = `.message` of the text at MOVE_INFO (reason) and a refresh. `.eraseconfirm` with `.moving` non-zero stores the typed text address in bytes 6 and 7 and jumps to `.movedo`; `.erasedirno` shows "Not moved: ok was not typed" for a move.
+- Pico (`nmi_action_snap_move`): PICK takes folders; DESCRIBE for a folder returns FILEOP_CANT_MOVE_FOLDER (11) with the reason in line 0, or FILEOP_IS_DIRECTORY (4) with line 0 the quoted name, lines 2-5 the title, help, "From:" and "To:". DO for a folder: COPY is refused (2); a problem gives 3 (same folder) or 2; "ok" (any case) at the text address else 5; then `walk_stop()` and `fsops::rename_path` (never replaces: 1 if the name is in use). Checks in `folder_move_problem`: same drive, not the same folder, not into itself or a descendant, and the protected root folders of `sdsetup::FOLDERS` in the SD root.
+- A rename inside one drive is a single FatFs/littlefs call whatever the folder holds, so there is no progress bar. Cross-drive folder moves would need `remove_tree` plus a recursive copy with progress; not done.
+
+# Rev 1.0 (added 2026-10-13)
+- v65 renamed Rev 1.0: `FIRMWARE_VERSION` is "Rev 1.0". Frozen copies kept: `rev1.0_source/` (the whole source tree) and the uf2 and zip. New work goes in a separate tree.
+- The Update screen's check (`fwupdate.h`, `Checker::find_version`) takes `Rev <n.n>` or `tapeloader v<n>`, whichever text comes first. `FIRMWARE_ID` ("Rev 1.0 (tapeloader v100)") carries both so firmware up to v65 still accepts the file; `firmware_version()` cuts the Rev out of it for display (it also keeps the text in the image: an unused string is dropped by the linker). Keep both parts in every future build.
+
+# Rev 1.1 (added 2026-10-13)
+- Menu keys: `.startmenu_def` has 'r' Reload, 'c' Change ROM, 'd' Set up SD card. Tests that open Set up SD card press D first, then D again to ask.
+- Reload scroll: `startmenu.scrollinit` / `scrollfill` / `scrollidle`. The Pico writes the full "Reload: name" (65 bytes, `extras::LABEL_SIZE`) at `start_up_reload_label`; the menu item points at `SCROLL_WINDOW` (0x3C00, in spare_space, unused while the top menu waits) which holds the 28 letters shown. `menuhandler_with_idle` calls `scrollidle` on each pass of the key scan. `SCROLL_STEP` 350 passes per letter and `SCROLL_HOLD` 2000 at each end (a pass is about 2,500 T-states in the simulator).
+- Update screen: `fw_put_wrapped` (word wrap at `FW_WIDTH` 30) and `shorten_name` for the file name.
+- O-Info titles: `loadscreen.drawcolumns` (after `drawnames` in the screen set-up, so a page change or O redraws them): blanks row 4, writes the folder on row 3, then Type at column 18, Size at 23, Mode at 28 with `INFO_ATTR`.
+- Save screen: `showtype` colours columns 24 to 27 of row 6 with `INFO_ATTR` after drawing "Type: xxxx".
+- `SCREEN_PIECE` 1152: screentopico, screenfrompico and previewfrompico send 6 pieces (the piece size is in the mailbox, the Pico takes it from there).
+- `FIRMWARE_ID` holds the Rev and the older `tapeloader v<n>` text; bump both for each build (see Rev 1.0).
+- `demo_logging.c` (FreeRTOS, GPL 2 with exception) is gone from the SD driver: no caller, and not in the linked firmware. If it ever returns, check that licence against the project's GPL 3 first.
+
+Licences (Rev 1.1)
+------------------
+THIRD-PARTY-NOTICES.txt (top folder) lists the third-party code in the firmware and gives each licence in full. The Apache 2.0 text for the SD driver is in pico/FatFs_SPI/LICENSE-Apache-2.0.txt. Keep both with any copy of the uf2 or source you pass on.
+
+Rev 1.2
+-------
+Recently played (E on the menu): a game name longer than the 21 letters that fit now scrolls: it waits, moves a letter at a time to its end, waits and goes back. Several long names scroll together. 1-0 and V work as before while it scrolls.
+
+Rev 1.3
+-------
+Copy a folder (C): pick the folder, browse to the destination on the same drive, press C, type ok and ENTER. A bar shows the progress; BREAK stops it and removes what was copied. A folder cannot be copied from the SD card to the flash or the other way, into itself, over a name that exists, or when it is nested more than 8 levels. See CHANGELOG.md for how it works and what has not been tried on hardware.
+
+Rev 1.4
+-------
+Rename a folder (R): pick the folder by its number, edit the name, ENTER. The folder keeps its contents. The Picoface's own folders at the top of the card or flash cannot be renamed. Paths remembered elsewhere (the recently played list, the Save to: folder) are not changed. See CHANGELOG.md.
+
+Rev 1.5
+-------
+Help text replaced by the hand-edited version (25 pages). To change it again: edit Docs/Help.txt (pages start with "@@ Title", at most 32 letters a line and 22 lines a page, ASCII only, no tabs), then run python pico/make_help.py.
+
+Rev 1.6
+-------
+The firmware is called PicoMenu now (a fork of picoFace by Brian Apps). The menu title, the Update screen, the Help and the messages say PicoMenu; the hardware is still a picoFace.
+
+Rev 1.7
+-------
+Editing a game's details on the Spectrum. On a game's information (V in Browse Games, or I on the menu) press M, then:
+  H  software house       Y  year
+  C  controls (512 letters)
+  I  instructions (2048 letters)
+  N  your own notes       R  take back what you typed in
+In a box type, use ENTER, DELETE and the cursor keys (or CAPS+5-8); BREAK finishes, then Y saves.
+What you type in is kept in the Game Notes folder as <game>.info.txt and is shown instead of the same part of the game's entry in Instructions.txt, which is never changed. You can read or change the .info.txt file on a PC: it is the same text as an Instructions.txt entry without the game's name, for example
+  Software house: Microsphere
+  Year: 1985
+  Controls
+  Q up  A down
+  Instructions
+  Hit all the shields ...
+Delete the file (or press R) to go back to what Instructions.txt says.

@@ -29,18 +29,21 @@ inline void path_for(const char* base, char* out, size_t outsize) {
 static const uint8_t KEY_EDIT = 0x01, KEY_LEFT = 0x05, KEY_DOWN = 0x06, KEY_UP = 0x07, KEY_RIGHT = 0x08;
 static const uint8_t KEY_DELETE = 0x0A, KEY_ENTER = 0x13, KEY_BREAK = 0x18;
 
-class Editor {
+// The editor is a template so the game's details can be edited in a taller one (scrolling) than
+// the notes: LINES lines of COLS letters. The notes' is Editor, 18 lines of 30.
+template <int LINES, int COLS>
+class EditorT {
 public:
     enum Result { CONTINUE, SAVE, DISCARD };
 
-    Editor() { clear(); }
+    EditorT() { clear(); }
 
     void clear() {
         for (int i = 0; i < LINES; i++) {
             lines_[i][0] = '\0';
         }
         count_ = 1;
-        row_ = col_ = 0;
+        row_ = col_ = top_ = 0;
         changed_ = false;
         prompt_ = false;
     }
@@ -96,6 +99,7 @@ public:
         row_ = count_ - 1;
         col_ = (int) strlen(lines_[row_]);
         changed_ = false;
+        scroll();
         return true;
     }
 
@@ -140,6 +144,14 @@ public:
                 prompt_ = true;
                 return CONTINUE;
             case KEY_ENTER:
+                if (LINES == 1) {
+                    // a one-line box: ENTER is the end of it
+                    if (!changed_) {
+                        return DISCARD;
+                    }
+                    prompt_ = true;
+                    return CONTINUE;
+                }
                 split();
                 break;
             case KEY_DELETE:
@@ -179,8 +191,28 @@ public:
                 }
                 break;
         }
+        scroll();
         return CONTINUE;
     }
+
+    // At most this many bytes of text() (each line counts its letters and its end of line); 0 is no limit
+    void set_limit(size_t bytes) { limit_ = bytes; }
+    size_t limit() const { return limit_; }
+    // The bytes text() would give now
+    size_t used() const {
+        int last = count_ - 1;
+        while (last >= 0 && lines_[last][0] == '\0') {
+            last--;
+        }
+        size_t n = 0;
+        for (int i = 0; i <= last; i++) {
+            n += strlen(lines_[i]) + 1;
+        }
+        return n;
+    }
+    // The first line on the screen, for an editor with more lines than the screen's 18
+    int top() const { return top_; }
+    static const int VIEW = 18;
 
     bool changed() const { return changed_; }
     bool prompting() const { return prompt_; }
@@ -193,7 +225,19 @@ private:
     char lines_[LINES][COLS + 1];
     int count_;
     int row_, col_;
+    int top_ = 0;
+    size_t limit_ = 0;
     bool changed_, prompt_;
+
+    void scroll() {
+        if (row_ < top_) {
+            top_ = row_;
+        } else if (row_ >= top_ + VIEW) {
+            top_ = row_ - VIEW + 1;
+        }
+    }
+
+    bool full() const { return limit_ != 0 && used() + 2 > limit_; }
 
     void clamp_col() {
         int len = (int) strlen(lines_[row_]);
@@ -203,6 +247,9 @@ private:
     }
 
     void insert(char c) {
+        if (full()) {
+            return;
+        }
         char* l = lines_[row_];
         int len = (int) strlen(l);
         if (len >= COLS) {
@@ -228,7 +275,7 @@ private:
     }
 
     void split() {
-        if (count_ >= LINES) {
+        if (count_ >= LINES || full()) {
             return;
         }
         for (int i = count_; i > row_ + 1; i--) {
@@ -267,5 +314,7 @@ private:
         }
     }
 };
+
+using Editor = EditorT<LINES, COLS>;
 
 }   // namespace notes
