@@ -4,6 +4,8 @@ PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardwar
 
 Pico Menu has been built using Brian Apps original code, an AI (Claude) has then developed on this with my input. My main input to this project was to decide on functionality, layout, feature set and testing.
 
+![The NMI menu](images/1-nmi-menu.png)
+
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
 * Load and save snapshots, 48K and 128K, as `.sna`, `.z80` and `.szx`; load `.tap` and `.tzx` tapes.
