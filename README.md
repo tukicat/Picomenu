@@ -2,7 +2,7 @@
 
 PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardware and the original firmware are his, and the menu and file features here are added on top. It keeps the GPL v3 licence (see `LICENSE` and `THIRD-PARTY-NOTICES.txt`). The picoFace is an inexpensive device for the ZX Spectrum that uses a Raspberry Pi Pico to provide Multiface style functionality.
 
-It can be used to:
+Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
 * Load and save snapshots, 48K and 128K, as `.sna`, `.z80` and `.szx`; load `.tap` and `.tzx` tapes.
 * Controls and instructions for each game from a text file `Instructions.txt` in the folder `Scraper` on the SD card (or in the root, if there is none there): shown beside a small copy of the game's screen (V in Browse Games, where D deletes a screen grab) and from the menu with I (Game Instructions) after the game has loaded (see `Docs/Instructions-example.txt`).
@@ -16,8 +16,8 @@ It can be used to:
 * Apply pokes to loaded games, typed in or from a `.pok` file.
 * Reset into 48K or 128K from the menu.
 * Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (U on the menu; if it fails, BOOTSEL still works).
-* Show on-screen help and a diagnostics page.
-* Remotely control the Spectrum from another machine, like a PC or phone. This includes transferring snapshots and blocks of memory between these devices.
+* on-screen help
+
 
 ### The NMI menu
 
