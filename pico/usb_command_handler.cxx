@@ -24,6 +24,8 @@ not, see <https://www.gnu.org/licenses/>.
 #include "ff.h"
 #include "hw_config.h"
 #include "file_wrapper.h"
+#include "usb_msc.h"
+#include "tusb.h"
 
 
 
@@ -131,6 +133,7 @@ static int usbGetChars(char* buffer, int len, absolute_time_t expiry) {
     int readsofar = 0;
 
     while (absolute_time_diff_us(get_absolute_time(), expiry) > 0)  {
+        tud_task();     // TinyUSB is run from the main loop, not in the background
         int read = (stdio_usb.in_chars)(buffer + readsofar, len - readsofar);
         if (read > 0) {
             readsofar += read;
@@ -780,6 +783,7 @@ void pollUsbCommandHandler() {
             int args = escapeCommandLine(commandBuffer);
 
             putchar(COMMAND_RESPONSE_BEGIN);
+            usb_msc_set_command_active(true);   // the PC is not given the SD card meanwhile
             // process command
             if (strcmp(commandBuffer, "upload") == 0) {
                 const char* name = commandBuffer + 7;
@@ -837,6 +841,7 @@ void pollUsbCommandHandler() {
                 putchar(COMMAND_FAILURE);
                 printf("Unknown command: %s\n", commandBuffer);
             }
+            usb_msc_set_command_active(false);
             putchar(COMMAND_RESPONSE_END);
             commandLength = 0;
         }

@@ -31,7 +31,6 @@ import usb
 import io
 import json
 from pathlib import Path
-from convertZ80 import Z80Snapshot
 
 from filemanager_ui import Ui_MainWindow
 
@@ -239,21 +238,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             shortened_name = strip_guff(path.stem)
             if len(shortened_name) > 26:
                 shortened_name = shortened_name[0:26]
-            if path.suffix.upper() == ".Z80":
-                snapshot = Z80Snapshot()
-                snapshot.process_file(filename)
-                upload_data = snapshot.to_bytes()
-            else:
-                upload_data = path.read_bytes()
+            # Every file is sent as it is.  The firmware reads 48K and 128K .sna
+            # files and every kind of .z80 file (compressed or not, version 1, 2
+            # or 3), so .z80 files no longer have to be converted first.
+            upload_data = path.read_bytes()
 
-            if len(path.suffix) == 5 and path.suffix[-1] == "z":
-                cmd = usb.join_params(["upload", shortened_name + path.suffix])
-                usb.send_command(usb.default_port(), cmd, upload_data, None)
-            else:
-                cmd = usb.join_params(["upload", shortened_name + path.suffix + "z"])
-                usb.send_command(
-                    usb.default_port(), cmd, usb.compress_data(upload_data), None
-                )
+            # All files are sent uncompressed, keeping their original extension
+            cmd = usb.join_params(["upload", shortened_name + path.suffix])
+            usb.send_command(usb.default_port(), cmd, upload_data, None)
             return True
 
         except Exception as ex:

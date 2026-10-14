@@ -210,14 +210,9 @@ if __name__ == "__main__":
     input_data = None
 
     if args.input != None:
-        if args.input.lower().endswith(".z80"):
-            print("convert z80 to v1 uncompressed")
-            snapshot = convertZ80.Z80Snapshot()
-            snapshot.process_file(args.input)
-            input_data = snapshot.to_bytes()
-        else:
-            with open(args.input, "rb") as fp:
-                input_data = fp.read()
+        # .z80 files are sent as they are, the firmware reads every kind of them
+        with open(args.input, "rb") as fp:
+            input_data = fp.read()
         if args.compress:
             input_data = lz4.block.compress(
                 input_data, mode="high_compression", store_size=False, compression=12

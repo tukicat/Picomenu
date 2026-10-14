@@ -4709,6 +4709,12 @@ FRESULT f_readdir (
 			res = DIR_READ_FILE(dp);		/* Read an item */
 			if (res == FR_NO_FILE) res = FR_OK;	/* Ignore end of directory */
 			if (res == FR_OK) {				/* A valid entry is found */
+				/* picoFace: remember where the item is, for f_opendir_last() */
+#if FF_FS_EXFAT
+				dp->item_ofs = (fs->fs_type == FS_EXFAT) ? dp->blk_ofs : dp->dptr;
+#else
+				dp->item_ofs = dp->dptr;
+#endif
 				get_fileinfo(dp, fno);		/* Get the object information */
 				res = dir_next(dp, 0);		/* Increment index for next */
 				if (res == FR_NO_FILE) res = FR_OK;	/* Ignore end of directory now */
@@ -4716,6 +4722,70 @@ FRESULT f_readdir (
 			FREE_NAMBUF();
 		}
 	}
+	LEAVE_FF(fs, res);
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/* picoFace: Open the sub-directory f_readdir last returned              */
+/*-----------------------------------------------------------------------*/
+/* f_opendir() follows the path from the root, so opening each sub-directory
+   of a big directory in turn reads the big directory from the start each
+   time.  This opens the sub-directory straight from its entry, which the
+   parent directory object has just read. */
+
+FRESULT f_opendir_last (
+	DIR* dp,			/* Pointer to directory object to create */
+	DIR* parent			/* The open directory the sub-directory was read from */
+)
+{
+	FRESULT res;
+	FATFS *fs;
+	DEF_NAMBUF
+
+
+	if (!dp || !parent) return FR_INVALID_OBJECT;
+	res = validate(&parent->obj, &fs);
+	if (res == FR_OK) {
+		INIT_NAMBUF(fs);
+		*dp = *parent;							/* Start out as the parent directory */
+#if FF_FS_LOCK
+		dp->obj.lockid = 0;
+#endif
+		res = dir_sdi(dp, parent->item_ofs);	/* Go back to the item */
+		if (res == FR_OK) res = DIR_READ_FILE(dp);	/* and read it again */
+		if (res == FR_OK && !(dp->obj.attr & AM_DIR)) res = FR_NO_PATH;
+		if (res == FR_OK) {						/* As in f_opendir() */
+#if FF_FS_EXFAT
+			if (fs->fs_type == FS_EXFAT) {
+				dp->obj.c_scl = dp->obj.sclust;	/* Get containing directory inforamation */
+				dp->obj.c_size = ((DWORD)dp->obj.objsize & 0xFFFFFF00) | dp->obj.stat;
+				dp->obj.c_ofs = dp->blk_ofs;
+				init_alloc_info(fs, &dp->obj);	/* Get object allocation info */
+			} else
+#endif
+			{
+				dp->obj.sclust = ld_clust(fs, dp->dir);	/* Get object allocation info */
+			}
+			dp->obj.id = fs->id;
+			res = dir_sdi(dp, 0);				/* Rewind directory */
+#if FF_FS_LOCK
+			if (res == FR_OK) {
+				if (dp->obj.sclust != 0) {
+					dp->obj.lockid = inc_share(dp, 0);	/* Lock the sub directory */
+					if (!dp->obj.lockid) res = FR_TOO_MANY_OPEN_FILES;
+				} else {
+					dp->obj.lockid = 0;
+				}
+			}
+#endif
+		}
+		FREE_NAMBUF();
+		if (res == FR_NO_FILE) res = FR_NO_PATH;
+	}
+	if (res != FR_OK) dp->obj.fs = 0;		/* Invalidate the directory object if function failed */
+
 	LEAVE_FF(fs, res);
 }
 

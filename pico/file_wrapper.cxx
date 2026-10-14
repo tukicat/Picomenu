@@ -53,6 +53,14 @@ bool DirHandle::open(const char* path) {
     }
     else {
         drive = Drive::INTERNAL_FLASH;
+        // "/fl" and a path is a directory of the flash, in the form the SD card paths are
+        // in (the root is empty); anything else is a path as it is
+        if (strStartsWith(path, "/fl") && (path[3] == '\0' || path[3] == '/')) {
+            path += 3;
+            if (path[0] == '\0') {
+                path = "/";
+            }
+        }
         intDir = pico_dir_open(path);
         if (intDir < 0) {
             return false;
@@ -63,6 +71,18 @@ bool DirHandle::open(const char* path) {
         }
         return ret >= 0;
     }
+}
+
+
+bool DirHandle::openSubdir(DirHandle& parent) {
+    drive = Drive::EXTERNAL_SD_CARD;
+    memset(&sdDir, 0, sizeof(sdDir));
+    memset(&sdFileInfo, 0, sizeof(sdFileInfo));
+    if (f_opendir_last(&sdDir, &parent.sdDir) != FR_OK) {
+        return false;
+    }
+    sdDir.pat = "*";
+    return f_findnext(&sdDir, &sdFileInfo) == FR_OK;
 }
 
 

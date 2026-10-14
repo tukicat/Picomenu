@@ -106,6 +106,18 @@ float hal_elapsed(void) { return (time_us_32() - tm) / 1000000.0; }
 
 // posix emulation
 
+// Where a file is kept (see fwupdate.h): the head block of its CTZ list and its size. Call
+// pico_fflush first so these are the stored ones.
+int pico_ctz_info(int file, uint32_t* head, uint32_t* size) {
+    lfs_file_t* f = (lfs_file_t*)file;
+    *head = f->ctz.head;
+    *size = f->ctz.size;
+    return LFS_ERR_OK;
+}
+
+// The file system as the processor reads it (flash mapped, not cached)
+const uint8_t* pico_fs_xip(void) { return (const uint8_t*)(FS_BASE + XIP_NOCACHE_NOALLOC_BASE); }
+
 int pico_mount(bool format) {
 #if LIB_PICO_MULTICORE
     recursive_mutex_init(&fs_mtx);
@@ -199,8 +211,9 @@ int pico_dir_open(const char* path) {
 }
 
 int pico_dir_close(int dir) {
-	return lfs_dir_close((lfs_dir_t*)dir);
-	lfs_free((void*)dir);
+	int res = lfs_dir_close((lfs_dir_t*)dir);
+	lfs_free((void*)dir);      // (it was after the return, so every directory read leaked its handle)
+	return res;
 }
 
 int pico_dir_read(int dir, struct lfs_info* info) { return lfs_dir_read((lfs_dir_t*)dir, info); }

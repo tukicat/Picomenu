@@ -14,10 +14,25 @@
 #include <stdlib.h>		/* with POSIX API */
 
 
+/* A block of memory the caller can lend to FatFs (ff_pool, ff_pool_size): blocks are taken from
+   it first, then from the heap.  Making a directory clears a whole cluster, which is much
+   quicker with a big buffer than with whatever the small heap has left. */
+unsigned char* ff_pool = 0;
+size_t ff_pool_size = 0;
+static size_t pool_used = 0;
+static int pool_blocks = 0;
+
 void* ff_memalloc (	/* Returns pointer to the allocated memory block (null if not enough core) */
 	UINT msize		/* Number of bytes to allocate */
 )
 {
+	size_t n = ((size_t)msize + 7) & ~(size_t)7;
+	if (ff_pool != 0 && pool_used + n <= ff_pool_size) {
+		void* p = ff_pool + pool_used;
+		pool_used += n;
+		pool_blocks++;
+		return p;
+	}
 	return malloc((size_t)msize);	/* Allocate a new memory block */
 }
 
@@ -26,6 +41,12 @@ void ff_memfree (
 	void* mblock	/* Pointer to the memory block to free (no effect if null) */
 )
 {
+	if (ff_pool != 0 && (unsigned char*)mblock >= ff_pool && (unsigned char*)mblock < ff_pool + ff_pool_size) {
+		if (--pool_blocks == 0) {
+			pool_used = 0;
+		}
+		return;
+	}
 	free(mblock);	/* Free the memory block */
 }
 

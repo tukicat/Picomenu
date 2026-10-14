@@ -2,23 +2,23 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# set(CMAKE_C_STANDARD 11)
+# set(CMAKE_CXX_STANDARD 17)
+# set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Initialise pico_sdk from installed location
 # (note this can come from environment, CMake cache etc)
 
 # == DO NEVER EDIT THE NEXT LINES for Raspberry Pi Pico VS Code Extension to work ==
-if(WIN32)
-    set(USERHOME $ENV{USERPROFILE})
-else()
-    set(USERHOME $ENV{HOME})
-endif()
-set(sdkVersion 1.5.1)
-set(toolchainVersion 13_2_Rel1)
-set(picotoolVersion 2.0.0)
-include(${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+# if(WIN32)
+#    set(USERHOME $ENV{USERPROFILE})
+# else()
+#    set(USERHOME $ENV{HOME})
+# endif()
+# set(sdkVersion 1.5.1)
+# set(toolchainVersion 13_2_Rel1)
+# set(picotoolVersion 2.0.0)
+# include(${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 # ====================================================================================
 
 set(WIFI_ENABLE 0 CACHE BOOL "Enable wifi server, needs pico-w board.")
@@ -50,6 +50,14 @@ endif()
 
 project(picoface C CXX ASM)
 
+# Size. The libraries (FatFs, littlefs, the SD driver, TinyUSB, the SDK) are built for size, -Os,
+# which is about 45 KB smaller than the SDK's usual -O3 for a Release build. picoface.cxx stays
+# at -O3: the stack it uses (core 0 has only 2 KB) was measured with that, and its code is
+# not helped by the libraries' being fast. The Z80 bus is served by piohandler.S, which is assembly.
+set(CMAKE_C_FLAGS_RELEASE "-Os -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-Os -DNDEBUG")
+set(CMAKE_ASM_FLAGS_RELEASE "-Os -DNDEBUG")
+
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
@@ -78,12 +86,14 @@ add_executable(picoface
         lz4.c
         http_server.cxx
         usb_command_handler.cxx
+        usb_msc.cxx
+        usb_descriptors.c
         file_wrapper.cxx
         sd_config.c
         piohandler.S
-        ${CMAKE_CURRENT_BINARY_DIR}/nmi.c
-        ${CMAKE_CURRENT_BINARY_DIR}/nmi.h)
-
+	${CMAKE_CURRENT_BINARY_DIR}/nmi.c
+)
+        
 pico_set_program_name(picoface "picoface")
 pico_set_program_version(picoface "0.1")
 
@@ -96,11 +106,13 @@ pico_enable_stdio_usb(picoface 1)
 
 # Add the standard library to the build
 target_link_libraries(picoface
-        pico_stdlib)
+        pico_stdlib
+        tinyusb_device)
 
 # Add the standard include files to the build
 target_include_directories(picoface PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_BINARY_DIR} # 🌟 CRITICAL: Allows C++ files to find generated nmi headers naturally!
   ${CMAKE_CURRENT_LIST_DIR}/.. # for our common lwipopts or any other standard includes, if required
 )
 
@@ -125,6 +137,14 @@ target_link_libraries(picoface
         )
 
 target_link_libraries(picoface littlefs-lib)
+
+# 🌟 Bulletproof Compilation Timeline Synchronization 🌟
+# This forces the build system to wait for the Z80 assembler and python scripts 
+# to finish generating nmi.h and nmi.c BEFORE compiling any source code files.
+set_source_files_properties(piohandler.S picoface.cxx PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/nmi.h"
+)
+set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-O3")
 
 pico_add_extra_outputs(picoface)
 

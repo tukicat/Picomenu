@@ -24,6 +24,7 @@ not, see <https://www.gnu.org/licenses/>.
 
 #define SNA_FILE_SIZE 49179
 #define Z80_FILE_SIZE (48 * 1024 + Z80_HEADER_SIZE)
+#define ACTION_STREAM_TAP 0x15  // Pick any unused unique command byte index
 
 
 // Attempt to obtain snapshot from the running spectrum

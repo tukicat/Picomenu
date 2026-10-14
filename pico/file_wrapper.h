@@ -71,6 +71,21 @@ public:
         }
     }
 
+    // Moves to a byte position of the file (from its start), and says where it is
+    bool seek(uint32_t pos) {
+        if (drive == Drive::EXTERNAL_SD_CARD) {
+            return f_lseek(&sdFile, pos) == FR_OK;
+        }
+        return pico_lseek(intFile, pos, LFS_SEEK_SET) >= 0;
+    }
+
+    uint32_t tell() {
+        if (drive == Drive::EXTERNAL_SD_CARD) {
+            return f_tell(&sdFile);
+        }
+        return pico_tell(intFile);
+    }
+
     int size() {
         if (drive == Drive::EXTERNAL_SD_CARD) {
             return f_size(&sdFile);
@@ -109,6 +124,11 @@ public:
 
     bool open(const char* path);
 
+    // Opens the sub directory that is the current entry of parent, an SD
+    // card directory.  Much quicker than opening it by its path, which
+    // means reading parent from the start to find it.
+    bool openSubdir(DirHandle& parent);
+
     bool next();
 
     bool atEnd() {
@@ -127,6 +147,14 @@ public:
         return drive == Drive::EXTERNAL_SD_CARD ?
             (sdFileInfo.fattrib & AM_DIR) != 0 :
             (intInfo.type == LFS_TYPE_DIR);
+    }
+
+    // Entries marked as hidden or system, e.g. "System Volume Information".
+    // The internal flash has no such attributes.
+    bool isHidden() {
+        return drive == Drive::EXTERNAL_SD_CARD ?
+            (sdFileInfo.fattrib & (AM_HID | AM_SYS)) != 0 :
+            false;
     }
 
     bool close() {

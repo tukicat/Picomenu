@@ -1,0 +1,22 @@
+Skool Daze
+Software house: Microsphere
+Year: 1985
+Controls
+O or Cursor Left: Go left
+P or Cursor Right: Go right
+Q or Cursor Up: Go upstairs / keep walking
+A or Cursor Down: Go downstairs / keep walking
+Shift (+ direction): Run
+F: Shoot with catapult
+H: Hit
+J or L: Jump or leap
+S: Sit down / stand up
+W: Write on blackboards
+U: Understand (when prompted by characters)
+RETURN: Finish writing on a blackboard
+Instructions
+Activate All Shields: Hit all 15 wall shields across the school by jumping, using your catapult, or standing/bouncing off fallen students and teachers until every shield flashes.
+Attend Lessons: Follow the schedule shown at the bottom of the screen. Skipping classes or misbehaving earns you "lines". Reaching 10,000 lines results in immediate expulsion.
+Get the Safe Combination : Knock over Mr. Wacker (Headmaster), Mr. Rockitt (Science), and Mr. Withit (Geography) with your catapult to reveal their combination letters. (Mr. Wacker's letter is always first). For Mr. Creak (History), listen during his history lesson when he asks his birth year. Einstein will name a historical battle (e.g., Battle of Hastings for 1066). Write that four-digit year on a clean blackboard before Creak enters to get his letter.
+Open the Safe: Write the four-letter combination on a classroom blackboard, go to the staff room safe, stand underneath it, and jump.
+Deactivate the Shields: Hit all 15 shields a second time to turn them off and complete the school year.

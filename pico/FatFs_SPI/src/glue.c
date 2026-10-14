@@ -20,6 +20,8 @@ specific language governing permissions and limitations under the License.
 /* storage control modules to the FatFs module with a defined API.       */
 /*-----------------------------------------------------------------------*/
 #include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
 //
 #include "ff.h" /* Obtains integer types */
 //
@@ -30,6 +32,28 @@ specific language governing permissions and limitations under the License.
 #include "sd_card.h"
 
 #define TRACE_PRINTF(fmt, args...)
+
+/* picoFace: a small read-ahead.  Reading a big directory means reading
+   thousands of sectors one after the other, one command per sector.  When a
+   single sector read follows on from the previous one, the next
+   READAHEAD_SECTORS are read with one multiple block read instead and kept
+   here.  Writes, and initialising the card, empty the buffer so it never
+   holds stale data. */
+#define READAHEAD_SECTORS 8
+#define READAHEAD_SECTOR_SIZE 512
+static uint8_t ra_buf[READAHEAD_SECTORS * READAHEAD_SECTOR_SIZE] __attribute__((aligned(4)));
+static BYTE ra_pdrv;
+static LBA_t ra_first;
+static UINT ra_count;           /* sectors held, 0 when empty */
+static BYTE ra_last_pdrv;
+static LBA_t ra_last;           /* the last single sector asked for */
+static bool ra_last_valid;
+
+static void readahead_discard(void) {
+    ra_count = 0;
+    ra_last_valid = false;
+}
+
 //#define TRACE_PRINTF printf  // task_printf
 
 /*-----------------------------------------------------------------------*/
@@ -59,6 +83,7 @@ DSTATUS disk_initialize(
 
     sd_card_t *p_sd = sd_get_by_num(pdrv);
     if (!p_sd) return RES_PARERR;
+    readahead_discard();
     // See http://elm-chan.org/fsw/ff/doc/dstat.html
     return p_sd->init(p_sd);  
 }
@@ -98,6 +123,38 @@ DRESULT disk_read(BYTE pdrv,  /* Physical drive nmuber to identify the drive */
     TRACE_PRINTF(">>> %s\n", __FUNCTION__);
     sd_card_t *p_sd = sd_get_by_num(pdrv);
     if (!p_sd) return RES_PARERR;
+    if (count == 1) {
+        // Served from the read-ahead buffer?
+        if (ra_count != 0 && ra_pdrv == pdrv && sector >= ra_first &&
+            sector < ra_first + ra_count) {
+            memcpy(buff, ra_buf + (sector - ra_first) * READAHEAD_SECTOR_SIZE,
+                   READAHEAD_SECTOR_SIZE);
+            ra_last = sector;
+            return RES_OK;
+        }
+        // The sector after the last one read: probably a directory or file
+        // being read in order, so read the next few in one go
+        bool sequential = ra_last_valid && ra_last_pdrv == pdrv && sector == ra_last + 1;
+        ra_last = sector;
+        ra_last_pdrv = pdrv;
+        ra_last_valid = true;
+        if (sequential) {
+            uint64_t n = READAHEAD_SECTORS;
+            if (sector + n > p_sd->sectors) n = p_sd->sectors - sector;
+            if (n > 1) {
+                ra_count = 0;
+                int rc = p_sd->read_blocks(p_sd, ra_buf, sector, (uint32_t)n);
+                if (rc == SD_BLOCK_DEVICE_ERROR_NONE) {
+                    ra_pdrv = pdrv;
+                    ra_first = sector;
+                    ra_count = (UINT)n;
+                    memcpy(buff, ra_buf, READAHEAD_SECTOR_SIZE);
+                    return RES_OK;
+                }
+                // otherwise fall back to reading just the one sector
+            }
+        }
+    }
     int rc = p_sd->read_blocks(p_sd, buff, sector, count);
     return sdrc2dresult(rc);
 }
@@ -116,6 +173,7 @@ DRESULT disk_write(BYTE pdrv, /* Physical drive nmuber to identify the drive */
     TRACE_PRINTF(">>> %s\n", __FUNCTION__);
     sd_card_t *p_sd = sd_get_by_num(pdrv);
     if (!p_sd) return RES_PARERR;
+    readahead_discard();
     int rc = p_sd->write_blocks(p_sd, buff, sector, count);
     return sdrc2dresult(rc);
 }

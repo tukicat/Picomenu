@@ -42,6 +42,11 @@ struct pico_fsstat_t {
 // Returns a negative error code on failure.
 int pico_mount(bool format);
 
+// For the firmware updater: where a closed file's data is kept in the flash (head block and
+// size of its list of blocks), and the file system as the processor sees it
+int pico_ctz_info(int file, uint32_t* head, uint32_t* size);
+const uint8_t* pico_fs_xip(void);
+
 // Unmounts a littlefs
 //
 // Returns a negative error code on failure.

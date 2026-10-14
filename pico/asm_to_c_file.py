@@ -68,8 +68,15 @@ with open("nmi.h", "w") as fp:
 
 
     for k, v in symbols.items():
-        if k.startswith("ACTION_"):
+        # ACTION_ are the request codes, SNAPLIST_ the layout of the
+        # ACTION_SNAP_LIST results
+        # Z80X_ the extra fields of a 128K snapshot's header
+        if k.startswith("ACTION_") or k.startswith("SNAPLIST_") or k.startswith("Z80X_") or k.startswith("SAVE128_"):
             fp.write(f"#define {k} {v}\n")
+
+    # the order the NMI rom asks for the banks of a 128K snapshot in
+    order = ", ".join(str(romdata[symbols["page_order"] + i]) for i in range(8))
+    fp.write(f"#define NMI_PAGE_ORDER {order}\n")
 
 
 
@@ -78,6 +85,7 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define STARTUP_PARAM1_OFFSET 0x{startup_param1:x}\n")
     fp.write(f"#define STARTUP_PARAM2_OFFSET 0x{startup_param2:x}\n") 
     fp.write(f"#define STARTUP_SDCARD_PRESENT 0x{symbols['start_up_sdcard_present']:x}\n") 
+    fp.write(f"#define STARTUP_RELOAD_LABEL 0x{symbols['start_up_reload_label']:x}\n")
 
     for k, v in symbols.items():
         if k.startswith("STARTUP_ACTION_"):
