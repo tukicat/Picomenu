@@ -42,8 +42,9 @@ Picomenu can be used to:
 
 The NMI button: a short press opens the menu; a **double press** saves the screen as a screen grab (green border: saved, red: not); holding it for one second resets into the Spectrum's own ROM. See `CHANGELOG.md` for what changed and `Docs/Instructions.txt` for the details and test notes. Features have been tested in simulation; check anything important on your own hardware.
 
+![Browse Games](images/2-browse-games.png)
 
-
+![View Screem](images/3-view-screen.png)
 
 ## Related repositories
 
