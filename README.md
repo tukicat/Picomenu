@@ -2,7 +2,7 @@
 
 PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardware and the original firmware are his, and the menu and file features here are added on top. It keeps the GPL v3 licence (see `LICENSE` and `THIRD-PARTY-NOTICES.txt`). The picoFace is an inexpensive device for the ZX Spectrum that uses a Raspberry Pi Pico to provide Multiface style functionality.
 
-Pico Menu has been build using Brian Apps original code, with a small amount of code from me - most of the code built on Brian's has come from an AI (Claude). My main input to this project was to decide on functionality, layout, feature set and testing.
+Pico Menu has been built using Brian Apps original code, an AI (Claude) has then developed on this with my input. My main input to this project was to decide on functionality, layout, feature set and testing.
 
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
