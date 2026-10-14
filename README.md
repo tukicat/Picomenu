@@ -49,7 +49,6 @@ The NMI button: a short press opens the menu; a **double press** saves the scree
 ## Related repositories
 
 * The KiCad circuit design is held in https://github.com/brianapps/picoface_kicad
-* The Android Studio project for the phone loading application is held in https://github.com/brianapps/picoface_phone
 
 
 ## Building the pico firmware
