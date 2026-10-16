@@ -1,3 +1,19 @@
+/*
+This file is part of picoFace.
+
+picoFace is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with picoFace. If
+not, see <https://www.gnu.org/licenses/>.
+*/
+
+
 // The controls and instructions of a game: the file "Instructions.txt" (or "Instructions") in
 // the folder "Scraper" of the SD card (the root if there is none there), and the screen that shows them (V on a game, and I on the menu).
 // Nothing here touches the hardware, so it is tested on a PC.
@@ -60,6 +76,7 @@ static const int MORE_ROWS = 22;                // lines on the pages after the 
 
 static const uint8_t ATTR_BANNER = 0x4F, ATTR_TEXT = 0x47, ATTR_HEADING = 0x46, ATTR_KEYS = 0x45;
 static const uint8_t ATTR_DIM = 0x41;
+static const char TAPE_YELLOW = '\x01';        // at the start of a line of the tape summary: yellow
 
 inline const char* skip_blanks(const char* s) {
     while (*s == ' ' || *s == '\t') {
@@ -1015,7 +1032,9 @@ void draw_text(const Info& info, int page, Put put) {
         give("Tape", ATTR_HEADING);
         Wrap w(info.tape, TEXT_WIDTH);
         while (w.next(line)) {
-            give(line, ATTR_TEXT);
+            // a line starting TAPE_YELLOW is shown in yellow (the C-Convert prompt)
+            if (line[0] == TAPE_YELLOW) give(line + 1, ATTR_HEADING);
+            else give(line, ATTR_TEXT);
         }
     }
     if (info.nnotes > 0) {

@@ -1,0 +1,23 @@
+# 128K: no Scraper folder on the card; it is made, and the loading screen saved in it
+sd /128-0.rom {ROM128_0}
+sd /128-1.rom {ROM128_1}
+flash /48.rom {ROM48}
+sd /Games/Ren128.tzx {TAPES}/Renegade_1987Imagine128KSpeedLock_3.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key c
+wait 10
+key a
+wait 1500
+expect Saved Ren128.z80
+ls sd /Scraper/Screen Grabs
+get sd /Scraper/Screen Grabs/Ren128.scr {OUT}/Ren128.scr

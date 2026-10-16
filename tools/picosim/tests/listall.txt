@@ -1,0 +1,46 @@
+# L-All in Browse Games: hidden folders, Poke List, Screen Grabs and .scr files are listed only
+# while it is on; ENTER (or V then ENTER) on a .scr says what it is instead of loading it
+sd /48.rom {ROM48}
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Games/Picture.scr {OUT}/dummy.scr
+sd /Hidden Stuff/Old.pok {OUT}/test.pok
+sd /Poke List/Green.pok {OUT}/test.pok
+sd /Screen Grabs/Green.scr {OUT}/dummy.scr
+hide /Hidden Stuff
+boot
+nmi
+wait 30
+key b
+wait 50
+expect L-All
+expectnot Hidden Stuff
+expectnot Poke List
+expectnot Screen Grabs
+key l
+wait 50
+expect Hidden Stuff
+expect Poke List
+expect Screen Grabs
+# into Games: the .scr is listed
+key 1
+wait 50
+expect Picture
+key 2
+wait 30
+expect A screen picture
+key x
+wait 50
+key v
+wait 10
+key 2
+wait 50
+key ENTER
+wait 30
+expect A screen picture
+key x
+wait 50
+# L again: the .scr is not listed
+key l
+wait 50
+expectnot Picture
+expect Green

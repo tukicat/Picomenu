@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 1.8
+THIRD-PARTY NOTICES - PicoMenu Rev 1.9
 ==================================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
@@ -18,15 +18,25 @@ Summary
  FatFs_SPI SD driver        pico/FatFs_SPI/sd_driver,    Apache 2.0
    (Carl John Kugler III)     src (incl. parts derived
                               from Neil Thiessen and
-                              Arm Limited: crc.c/h, sd_card.c)
+                              Arm Limited: crc.c/h, sd_card.c),
+                              and pico/sd_config.c (its
+                              example hw_config.c, changed)
  littlefs (Arm, lurk101)    pico/littlefs-lib            BSD 3-clause
  LZ4 (Yann Collet)          pico/lz4.c, lz4.h            BSD 2-clause
- Raspberry Pi Pico SDK      linked into the firmware,    BSD 3-clause
-                            not in this source tree
+ Raspberry Pi Pico SDK      linked into the firmware;    BSD 3-clause
+                            only pico/pico_sdk_import.cmake
+                            (a copy) is in this source tree
  TinyUSB (hathach)          linked into the firmware,    MIT
                             not in this source tree
- usb_descriptors.c          pico/usb_descriptors.c       MIT (based on the
-                                                         Pico SDK file)
+ USB descriptors and        pico/usb_descriptors.c,      MIT (based on the
+   TinyUSB configuration    pico/tusb_config.h           Pico SDK's files,
+   (Raspberry Pi,                                        section 9)
+   Damien P. George)
+ Z80 CPU emulator           pico/z80 (Z80.c, API/Z80.h)  GNU LGPL v3 or later
+   (Manuel Sainz de Baranda y Goni)  for the tape converter
+ Zeta headers (same author) pico/z80/zeta               GNU LGPL v3
+ Unscii 8 font (Viznut)     nmirom/nmirom.asm            Public domain / CC0
+                            (charbank), pico/helptext.h  (section 10)
  C library / compiler       newlib (libc, libm,          BSD-style, plus
    runtime                  libnosys) and libgcc,        GCC Runtime Library
                             linked from the Arm GNU      Exception (GPL v3
@@ -37,7 +47,14 @@ disabled in this build). The sjasmplus assembler that builds the Z80 ROM is
 a separate tool you install yourself and is not part of the source or the firmware.
 
 The Spectrum ROM images and any games or snapshots you use with the
-Picoface are not covered by any licence here.
+Picoface are not covered by any licence here. None are in this source: the
+tape converter reads 48.rom and 128.rom (or 128-0.rom and 128-1.rom) that you
+put on the card or flash yourself.
+
+PC tools only (not in the firmware): tools/picosim/pico_hal_host.c is a copy
+of pico/littlefs-lib/pico_hal.c changed to run on a PC (BSD 3-clause, its
+notice kept); tools/tzxconv/bench/bench-run.ts runs on rp2040js
+(https://github.com/wokwi/rp2040js, MIT), which is not included.
 
 
 ================================================================
@@ -150,7 +167,9 @@ Licensed under the Apache License, Version 2.0; the full text is in
 pico/FatFs_SPI/LICENSE-Apache-2.0.txt. Unless required by applicable law
 or agreed to in writing, the software is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Files carry their own
-notices and are unmodified in licence terms.
+notices and are unmodified in licence terms. pico/sd_config.c is the
+driver's example hw_config.c, changed for the Picoface (the SPI pins, the
+speed and the one card slot), as its header says.
 
 
 ================================================================
@@ -178,6 +197,9 @@ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PRO
 SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+pico/pico_sdk_import.cmake is a copy of the SDK's external/pico_sdk_import.cmake
+(the build uses it to find the SDK), under the licence above.
 
 ================================================================
 6. TinyUSB (linked into the firmware)
@@ -215,3 +237,235 @@ newlib is under mixed BSD-style licences; libgcc is GPL v3 with the GCC
 Runtime Library Exception, which allows it to be linked into programs under
 other licences. Full texts: https://sourceware.org/newlib/ and
 https://www.gnu.org/licenses/gcc-exception-3.1.html
+
+
+================================================================
+8. Z80 CPU emulator - Copyright (C) 1999-2026 Manuel Sainz de Baranda y Goni
+   Zeta headers - Copyright (C) 2006-2025 Manuel Sainz de Baranda y Goni
+================================================================
+
+Used by the tape converter (C on a tape's information). Source:
+https://github.com/redcode/Z80 (commit 1d5e1a2) and https://github.com/redcode/Zeta
+(commit 93ba5ab), unchanged, in pico/z80. The emulator is licensed under the GNU Lesser
+General Public License version 3 or (at your option) any later version, the Zeta headers
+under the GNU Lesser General Public License version 3; the text follows. The LGPL v3
+is the GPL v3 (see LICENSE) with the additional permissions below, so it can be part of
+the GPL v3 firmware. The complete source of the firmware, these files included, is
+provided with it, which is what the LGPL asks of a combined work.
+
+                   GNU LESSER GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+
+  This version of the GNU Lesser General Public License incorporates
+the terms and conditions of version 3 of the GNU General Public
+License, supplemented by the additional permissions listed below.
+
+  0. Additional Definitions.
+
+  As used herein, "this License" refers to version 3 of the GNU Lesser
+General Public License, and the "GNU GPL" refers to version 3 of the GNU
+General Public License.
+
+  "The Library" refers to a covered work governed by this License,
+other than an Application or a Combined Work as defined below.
+
+  An "Application" is any work that makes use of an interface provided
+by the Library, but which is not otherwise based on the Library.
+Defining a subclass of a class defined by the Library is deemed a mode
+of using an interface provided by the Library.
+
+  A "Combined Work" is a work produced by combining or linking an
+Application with the Library.  The particular version of the Library
+with which the Combined Work was made is also called the "Linked
+Version".
+
+  The "Minimal Corresponding Source" for a Combined Work means the
+Corresponding Source for the Combined Work, excluding any source code
+for portions of the Combined Work that, considered in isolation, are
+based on the Application, and not on the Linked Version.
+
+  The "Corresponding Application Code" for a Combined Work means the
+object code and/or source code for the Application, including any data
+and utility programs needed for reproducing the Combined Work from the
+Application, but excluding the System Libraries of the Combined Work.
+
+  1. Exception to Section 3 of the GNU GPL.
+
+  You may convey a covered work under sections 3 and 4 of this License
+without being bound by section 3 of the GNU GPL.
+
+  2. Conveying Modified Versions.
+
+  If you modify a copy of the Library, and, in your modifications, a
+facility refers to a function or data to be supplied by an Application
+that uses the facility (other than as an argument passed when the
+facility is invoked), then you may convey a copy of the modified
+version:
+
+   a) under this License, provided that you make a good faith effort to
+   ensure that, in the event an Application does not supply the
+   function or data, the facility still operates, and performs
+   whatever part of its purpose remains meaningful, or
+
+   b) under the GNU GPL, with none of the additional permissions of
+   this License applicable to that copy.
+
+  3. Object Code Incorporating Material from Library Header Files.
+
+  The object code form of an Application may incorporate material from
+a header file that is part of the Library.  You may convey such object
+code under terms of your choice, provided that, if the incorporated
+material is not limited to numerical parameters, data structure
+layouts and accessors, or small macros, inline functions and templates
+(ten or fewer lines in length), you do both of the following:
+
+   a) Give prominent notice with each copy of the object code that the
+   Library is used in it and that the Library and its use are
+   covered by this License.
+
+   b) Accompany the object code with a copy of the GNU GPL and this license
+   document.
+
+  4. Combined Works.
+
+  You may convey a Combined Work under terms of your choice that,
+taken together, effectively do not restrict modification of the
+portions of the Library contained in the Combined Work and reverse
+engineering for debugging such modifications, if you also do each of
+the following:
+
+   a) Give prominent notice with each copy of the Combined Work that
+   the Library is used in it and that the Library and its use are
+   covered by this License.
+
+   b) Accompany the Combined Work with a copy of the GNU GPL and this license
+   document.
+
+   c) For a Combined Work that displays copyright notices during
+   execution, include the copyright notice for the Library among
+   these notices, as well as a reference directing the user to the
+   copies of the GNU GPL and this license document.
+
+   d) Do one of the following:
+
+       0) Convey the Minimal Corresponding Source under the terms of this
+       License, and the Corresponding Application Code in a form
+       suitable for, and under terms that permit, the user to
+       recombine or relink the Application with a modified version of
+       the Linked Version to produce a modified Combined Work, in the
+       manner specified by section 6 of the GNU GPL for conveying
+       Corresponding Source.
+
+       1) Use a suitable shared library mechanism for linking with the
+       Library.  A suitable mechanism is one that (a) uses at run time
+       a copy of the Library already present on the user's computer
+       system, and (b) will operate properly with a modified version
+       of the Library that is interface-compatible with the Linked
+       Version.
+
+   e) Provide Installation Information, but only if you would otherwise
+   be required to provide such information under section 6 of the
+   GNU GPL, and only to the extent that such information is
+   necessary to install and execute a modified version of the
+   Combined Work produced by recombining or relinking the
+   Application with a modified version of the Linked Version. (If
+   you use option 4d0, the Installation Information must accompany
+   the Minimal Corresponding Source and Corresponding Application
+   Code. If you use option 4d1, you must provide the Installation
+   Information in the manner specified by section 6 of the GNU GPL
+   for conveying Corresponding Source.)
+
+  5. Combined Libraries.
+
+  You may place library facilities that are a work based on the
+Library side by side in a single library together with other library
+facilities that are not Applications and are not covered by this
+License, and convey such a combined library under terms of your
+choice, if you do both of the following:
+
+   a) Accompany the combined library with a copy of the same work based
+   on the Library, uncombined with any other library facilities,
+   conveyed under the terms of this License.
+
+   b) Give prominent notice with the combined library that part of it
+   is a work based on the Library, and explaining where to find the
+   accompanying uncombined form of the same work.
+
+  6. Revised Versions of the GNU Lesser General Public License.
+
+  The Free Software Foundation may publish revised and/or new versions
+of the GNU Lesser General Public License from time to time. Such new
+versions will be similar in spirit to the present version, but may
+differ in detail to address new problems or concerns.
+
+  Each version is given a distinguishing version number. If the
+Library as you received it specifies that a certain numbered version
+of the GNU Lesser General Public License "or any later version"
+applies to it, you have the option of following the terms and
+conditions either of that published version or of any later version
+published by the Free Software Foundation. If the Library as you
+received it does not specify a version number of the GNU Lesser
+General Public License, you may choose any version of the GNU Lesser
+General Public License ever published by the Free Software Foundation.
+
+  If the Library as you received it specifies that a proxy can decide
+whether future versions of the GNU Lesser General Public License shall
+apply, that proxy's public statement of acceptance of any version is
+permanent authorization for you to choose that version for the
+Library.
+
+
+================================================================
+9. USB descriptors and TinyUSB configuration (from the Pico SDK)
+================================================================
+
+pico/usb_descriptors.c is based on the Pico SDK's stdio_usb_descriptors.c
+(itself based on a file of the MicroPython project), and pico/tusb_config.h
+on the SDK's tusb_config.h for stdio over USB. Both were changed for the
+Picoface (a serial port and a drive) and carry these notices:
+
+The MIT License (MIT)
+
+Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+Copyright (c) 2019 Damien P. George   (stdio_usb_descriptors.c)
+Copyright (c) 2020 Damien P. George   (tusb_config.h)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+================================================================
+10. Unscii 8 font - Viznut
+================================================================
+
+The menu and Help screens use the 8x8 font Unscii 8 by Viznut
+(http://viznut.fi/unscii/, https://github.com/viznut/unscii, the file
+fontfiles/unscii-8.hex), converted with tools/make_font.py. Its README says:
+"You can consider it Public Domain (or CC-0) except for the files derived from
+or containing parts of Roman Czyborra's Unifont project (unifont.hex,
+hex2bdf.pl, unscii-16-full.*) which fall under GPL." Unscii 8 is not one of
+those files. No conditions apply; the credit is given here and in README.md.
+(Earlier releases used the Carton font from Damien Guard's ZX Origins. Its
+terms are informal rather than a licence, and forbid redistributing the font
+files; earlier source trees also held its download, nmirom/Carton.zip. Rev 1.9
+replaces the font and removes that file.)

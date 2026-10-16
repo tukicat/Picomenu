@@ -1,97 +1,172 @@
-@@ PicoMenu help
-# The NMI button
-Short press: open the menu.
-Double press: take a screen
-grab. The border goes green
-if it was saved, red if
-not. Hold for 1 second: reset
-into the Spectrum's own ROM
-(on a +2 that is the 128
-start-up menu).
+@@ PicoMenu 1.9 help
+This guide outlines how some of
+the more complex functions work.
+Copying, moving and erasing
+files are self explanatory.
 
-# Keys in these pages
-N or SPACE   next page
-P            previous page
-X         back to the menu
-BREAK        back to the menu
-@@ The menu
-S-Save snapshot
-   Saves the machine to a file
-Q-Quick save
-   Saves as "<game> Save Game"
-B-Browse Games
-   .sna .z80 .szx .tap .tzx
-R-Reload last game
-   Loads the last game again
-E-Recently played
-   Last 10: 1-0 load, V view
-C-Change ROM
-   Replaces the Spectrum's ROM
-P-Poke
-   Changes memory, poke lists
-4-Reset 48K  1-Reset 128K
-D-Set up SD card (see D page)
-I-Game Instructions
-G-Screen grab (see V page)
-U-Update PicoMenu (see Update)
-T-Test ROM (see Test ROM)
-H-Help (D for diagnostics)
-X-Exit (back to the game)
-@@ Quick save and reload
-# Q-Quick save
-Takes a quick snapshot as a
-save game:
-For example using Exolon makes
-a "Exolon Save
-Game" snapshot in /Save Games.
-If there is no /Save Games
-folder the snapshot will be
-written in the same folder as
-the game.
-If a file already exists, you
-will be asked if you want to
-overwrite it: Y
-overwrites it, N keeps it and
-saves as "... Save Game 2",
-"... Save Game 3", etc.
+N-Next page  P-Previous page
+D-Diagnostics  X-Exit
 
-# R-Reload last game
-Loads again the last game
-picked in Browse Games, this is
-kept after power off.
-@@ Reset: 4 and 1
-4-Reset to 48K restarts the
-Spectrum in 48K BASIC mode.
-1-Reset to 128K restarts it in
-128K mode (the 128 menu on a
-+2).
+@@ The NMI button
+The NMI button (top right of the
+Picoface) has three functions:
 
-PicoMenu cannot see the RESET
-key, so only use options or
-the NMI button to reset.
-@@ Browse Games: B
-Ten entries a page. Press the
-number of an entry to load it,
-or a letter for a command.
-N-Next page, P-Prev page.
-S-SD Card, I-Internal Flash
-(the drive you are in is blue).
-O-Info: Type, Size and Mode
-columns, with yellow titles.
-X-Exit. Keys are in groups:
-File, Game, Find, Disk, Go.
+1) A short press takes you
+   into the NMI menu.
+2) Holding it for one second
+   resets the Spectrum.
+3) A double press takes a
+   quick screen grab and puts
+   it in the /Screen Grabs
+   folder.
 
-# Folders (SD and flash)
-Folders end in / . Press the
-number to go in, U to go up.
-Folders come first, then the
-files, each A to Z.
-Names over 28 letters are
-shortened or scroll. Names
-starting with . are hidden.
-Each drive remembers its
-folder until power off.
-.rom files are listed too.
+@@ Setting up the SD card
+On first start of PicoMenu you
+can choose D - Set up SD card
+(the card needs to be exFAT or
+FAT32). This puts the folders on
+the card that some functions
+need. For instance it makes a
+/Favourites folder, which you
+can use to add favourite games
+to quickly. It also makes a
+sample Instructions.txt, which
+you can use to add the game
+information shown on the Game
+View screen.
+
+@@ Setting up the SD card (2)
+You can also make the folders
+yourself. They need to be in the
+root of the SD card and named:
+
+/Favourites
+/Save Games
+/Screen Grabs
+/Scraper
+/Game Notes
+/Poke List
+
+@@ Convert .tap/.tzx to .z80
+.tap/.tzx files that use speed
+or turbo loaders, or similar
+techniques, will not always load
+on the Picoface. PicoMenu can
+convert a .tap/.tzx file into a
+.z80.
+
+Enter the NMI menu and press
+B - Browse Games. Press V - View
+and choose a .tap/.tzx file. The
+tape information comes after the
+game information, so the last
+two pages of the View screen say
+whether PicoMenu can load the
+.tap/.tzx, then give the tape
+details.
+
+@@ Convert .tap/.tzx (2)
+Press C to convert the .tap/.tzx
+file to a .z80. The .z80 is
+written in the same folder. Then
+choose:
+
+A Auto: on a 128K Spectrum a
+  128K .z80, and if that
+  fails a 48K one
+4 a 48K .z80
+1 a 128K .z80
+
+A progress bar and the time
+taken are shown in the bottom
+left corner. You can press BREAK
+at any time to stop. When it has
+finished it tells you if it has
+saved or failed.
+
+@@ Convert: loading screens
+The conversion also takes a
+screen grab (.scr) of the
+loading screen by itself and
+puts it in the
+/Scraper/Screen Grabs folder.
+The top of the screen then says
+"Loading screen saved". If you
+press BREAK to stop, this file
+is deleted.
+
+You can also take screen grabs
+by hand by pressing S. These are
+kept even if you press BREAK, so
+you can grab a loading screen
+without going through the whole
+conversion.
+
+@@ Convert: the ROMs
+To convert you need 48.rom, and
+128.rom (or 128-0.rom and
+128-1.rom), in the root of the
+SD card or the flash.
+
+48.rom   16384 bytes
+128.rom  32768 bytes
+128-0.rom, 128-1.rom
+         16384 bytes each
+
+@@ Diagnostic and other ROMs
+For convenience you can press T
+on the NMI menu to go straight
+to the diagnostic ROMs.
+testrom.rom and/or DiagROM.rom
+must be in the root of the
+flash.
+
+You can also change the ROM with
+C - Change ROM. If you run a ROM
+(from the Test ROM or Change ROM
+screen) and want to go back to
+the internal ROM, press the NMI
+button, choose C - Change ROM
+and then press 1 - Internal Rom.
+
+@@ Change ROM: Writable
+W-Writable [ ] on the Change ROM
+screen makes the ROM area above
+address 63 writable, for
+programs that patch it.
+
+@@ Quick save
+Quick save saves a snapshot
+straight to the /Save Games
+folder. If there is already a
+file for that game, it asks if
+you want to overwrite it. If you
+say no, it saves under the next
+free number (<game> Save Game 2,
+3 and so on).
+
+@@ Hidden folders
+You can use Windows to hide
+folders on the SD card. In
+B - Browse Games, press L - All
+to show the hidden folders.
+L-All is highlighted in blue
+while they are shown, and you
+can then move, erase, copy and
+so on the hidden folders and
+their files. Hiding little used
+folders keeps the screen clean.
+
+@@ Search function
+You can search in
+B - Browse Games with F - Find.
+You can search inside a folder,
+or from higher up (these
+searches take longer). You can
+move, copy and so on the files
+you find. Press F again to clear
+the search.
+
 @@ File types
 .sna  48K and 128K snapshots
 .z80  all versions, 48K and
@@ -101,356 +176,90 @@ folder until power off.
 .szx  48K, 128K and +2 (from
       Fuse, Spectaculator).
       Packed or not. Not +2A/+3.
-.tap  .tzx  tapes, see the
-      tape pages
-.pok  poke lists; .rom  ROMs.
-      Listed to copy, rename
+.tap/ tape images
+.tzx
+.pok  poke lists
+.rom  ROM files
+.scr  screen grabs
+      .pok, .rom and .scr are
+      listed to copy, rename
       and so on, not loaded.
 
-@@ Tapes: 48.rom
-# 48.rom
-For 48K .tap and .tzx support
-an original 48K ROM needs to be
-in the root of the internal
-flash or the SD card, named
-48.rom. It must be 16384 bytes
-in size.
+@@ File types: limits
+.tap/.tzx: turbo and custom
+loaders that time the signal
+themselves do not load directly
+(see Convert .tap/.tzx to .z80),
+nor games that load parts
+without the ROM loader.
 
-# Limits
-Turbo and custom loaders that
-time the signal themselves do
-not work, nor games that load
-parts without the ROM loader.
+@@ Edit game info and notes
+On the V - View screen you can
+edit the game's details and make
+your own notes. Press M, then:
 
-@@ Tape summary
-Press V on a .tap or .tzx in
-the load list, then N for the
-Tape page. It counts:
-  Data blocks, standard ones
-  Turbo blocks
-  Pure data blocks
-  Pulse/direct recording
-  Loops, Jumps, Calls (.tzx)
-A message says if PicoMenu can
-load it:
-# Yes
-Standard blocks only.
-# Maybe
-Turbo or pure data blocks: it
-works only if the game loads
-them with the ROM's loader.
-# Probably not
-Pulses or direct recording:
-the game times the signal.
-# No
-Damaged, or no data blocks.
-
-@@ Seeing a game: V
-In the load list press V and
-then the entry number. A small
-copy of the game's screen is
-shown, with its controls and
-instructions if you have
-provided them (next page). If
-available the first screen
-comes from a .sna or .z80, or
-the SCREEN$ block of a tape.
-G on the menu or a double
-press of the NMI button while
-in game saves the screen as a
-grab in /Screen Grabs on the
-SD card (<game name>.scr).
-N and P turn pages. ENTER
-loads, X goes back. D deletes
-the grab shown (Y to confirm).
-F shows the picture full
-screen, F again goes back (the
-pictures still cycle). Add your
-own notes: Edit and notes: M
-@@ Set up SD card
-# D-Set up SD card
-Place a blank fat32 formatted
-card in the PicoMenu and select
-this option.
-It will make the folders and the
-example file a new SD card
-needs:
-  Scraper (Instructions.txt)
-  Game Notes
-  Save Games
-  Screen Grabs
-  Favourites
-  Poke List
-C shows the list. D asks Set
-up this card?
-If the card has already been set
-up the PicoMenu then it will not
-overwrite the files.
-@@ Instructions file
-The controls and instructions
-come from a text file called
-Instructions.txt (or
-Instructions) in the folder
-/Scraper on the SD card (the
-root if there is none there).
-For example
-  Skool Daze
-  Software house: Microsphere
-  Year: 1985
-  Controls
-  Q up  A down ...
-  Instructions
-  Hit all the shields ...
-The name needs to match the game
-name without .sna, .tap and
-so on.
-Details typed in on the
-Spectrum (M) win over this file.
-The scraper's loading screens
-are read from /Scraper/Screen
-Grabs too (V shows them first).
-
-@@ Edit and notes: M
-In Browse Games (V) or on the
-menu (I) press M to change what
-is shown about the game. It
-needs the Game Notes folder.
-H  software house
-Y  year
-C  controls (512 letters)
-I  instructions (2048 letters)
+H  the software house
+Y  the release year
+C  the controls (512 letters)
+I  the instructions (2048
+   letters)
 N  your own notes
 R  take back all you typed in
-In a box: letters, ENTER,
-DELETE, cursor keys or CAPS+5-8.
-BREAK finishes, then Y saves
-and N does not.
-# Where it is kept
-Details: <game name>.info.txt,
-notes: <game name>.txt, both in
-/Game Notes on the SD card.
-Details you type in are shown
-instead of the same part of the
-Instructions file, which stays
-as it is. Save Games share them.
-@@ Finding files: F
-F asks for up to 12 letters.
-ENTER searches, BREAK cancels,
-DELETE deletes.
 
-It finds names that contain
-the text and looks the search
-folder and up to 7 levels
-below. Results appear as they
-are found, then go A to Z when
-the search ends. BREAK stops.
-Found folders can be entered.
+@@ Edit info: where kept
+What you type in does not change
+the Instructions.txt file. It is
+kept in the /Game Notes folder:
+the details as
+<game name>.info.txt and your
+notes as <game name>.txt.
 
-Pressing F again clears the
-search.
-@@ Commands
-1-0 choose a directory or file
-to load.
+What you type in is shown
+instead of what Instructions.txt
+says, without changing or
+deleting it. If you delete what
+you typed in, the information
+comes from Instructions.txt
+again (if it has any).
 
-M-Move: pick the file, browse
- to the new folder (on either
- drive, S or I), press M (Move
- here), then Y to confirm.
-C-Copy: the same steps (a
- folder too, on one drive).
-Q forgets the picked file.
-R-Rename: a file or folder,
- 28 letters at most. A
- file's extension stays.
-E-Erase: asks Y or N.
-D-New folder: made in the
- folder you are looking at.
-A-Add fav: copies the file to
- the Favourites folder of its
- drive.
-@@ Commands: more
-# Erasing a folder or ROM
-E on a folder or .rom file
-shows a warning. Type ok and
-ENTER to go on. Anything else,
-or BREAK, erases nothing. A
-folder's contents go too, to
-8 levels deep.
+@@ Pokes
+Poke lists are kept in
+/Poke List as .pok files. When
+you load a game, PicoMenu looks
+for a .pok file with exactly the
+same name. For example
+Exolon.z80, .sna, .szx, .tap or
+.tzx needs a file called
+Exolon.pok.
 
-# Moving or copying a folder
-Pick it with M or C, browse to
-where it should go (the same
-drive) and press M or C. It
-asks "Are you sure you want
-to", and you type ok and
-ENTER. Anything else does
-nothing.
-A copy shows a bar. BREAK stops
-it and removes what was copied.
-The original is never changed.
+If it finds one, its pokes are
+shown in the poke list
+(P - Poke, then L). A poke that
+needs a number asks for it
+(0-255).
 
-@@ Saving: S
-Type a name of up to 28
-letters. ENTER saves, BREAK
-leaves. DELETE deletes.
-CAPS SHIFT+1 to 8 sets the
-border colour of the saved game.
-SYMB SHIFT + T or R changes
-file type.
+@@ SD card on a PC
+It is strongly recommended that
+you only use a PC to view the SD
+card through the Pico while the
+Spectrum is off.
 
-# File type
-Type: auto saves a 48K game as
-a .sna and a 128K game as a
-.z80 (with the sound chip).
-SYMBOL SHIFT+R or +T changes
-Type: auto, .sna, .z80, .szx.
-A 128K .sna keeps no sound chip
-registers. A 48K .z80 is fine.
-.szx is not packed: 49K/131K.
+With the Spectrum off, plug the
+Pico's USB cable into a PC. The
+SD card appears as a USB drive
+and you can add, remove and edit
+folders and files.
 
-If the file exists you are
-asked "Overwrite this file?".
+@@ SD card on a PC (2)
+If you hide a folder in Windows
+it is hidden in PicoMenu too.
+You can show hidden folders in
+PicoMenu with L - All (see
+Hidden folders).
 
-@@ Saving:
-# Where it goes
-"Save to:" shows the folder
-(SD card or flash, any folder).
-CAPS SHIFT+9 opens the folder
-browser: H-Save here, X leaves.
-Kept after power off. With
-no SD card in, it saves to
-flash.
-
-# Saving over a game
-The name offered is the game
-last loaded or saved, and the
-folder it came from. ENTER
-then Y saves over it.
-
-@@ Change ROM: R
-Lists "Internal Rom" and every
-.rom file (a 16384 byte ROM
-image) in the internal flash.
-Pick one by its number.
-
-W-Writable [ ] makes the ROM
-area above address 63 writable,
-for programs that patch it.
-
-The new ROM starts when you
-leave the menu and stays until
-you pick another ROM.
-You can also power off the
-Spectrum.
-
-ROM files are only looked for
-in the root of the
-internal flash.
-
-@@ Test ROM: T
-T runs a hardware test ROM:
-1 zx-diagnostics (Brendan
-  Alford): testrom.rom, the
-  image testrom.bin
-2 DiagROM (Phil Ruston):
-  DiagROM.rom
-
-# Setting it up
-You need to put the test ROMs
-in the root of Internal Flash
-using the filenames above for
-this function to work.
-
-# Using it
-Press T and then choose the
-test rom. To revert back to
-the Spectrum press the NMI
-button, choose Change ROM, then
-Internal Rom.
-@@ Poke: P
-Changes one byte at once.
-
-A  then type the address
-   (decimal, 16384 to 65535)
-V  then type the value, 0-255
-P  does the poke
-L  the poke list (next page)
-X  goes back
-
-DELETE deletes a digit.
-The byte now at the address
-is shown in ( ).
-
-Nothing undoes a poke, and it
-is not remembered: poke again
-after loading another game.
-Use addresses from 16384 up.
-Below that is the ROM.
-@@ Poke lists: .pok files
-Keep .pok files in a folder
-called /Poke List in the root
-of the SD card, named like the
-game: for example
-Poke List/Exolon.pok for
-Exolon.z80. The game can be
-loaded from the SD card or
-the flash.
-
-The poke lists the Pokes,
-a poke that needs a
-number asks for it (0-255).
-
-@@ Update PicoMenu
-# U-Update PicoMenu
-Put the new .uf2 in the root
-of the SD card (only one
-.uf2 there). The update menu
-shows this version and the
-file's. Y installs, N cancels.
-
-# While it runs
-A bar shows the copy, then the
-install. Do not switch off
-during the update. At the end
-the screen says Update
-complete: switch the Spectrum
-off and on again.
-
-# If it goes wrong
-It may say Update failed. Hold
-BOOTSEL while plugging in USB
-and copy the .uf2 to the
-RPI-RP2 drive.
-
-@@ View the SD card on a PC
-With the Spectrum off, plug
-the Pico's USB cable into a
-PC. The SD card appears as a
-drive. The flash is not shown.
 Before unplugging, use Safely
-Remove (eject) on the PC, so
-that it has written
-everything.
-
-It is strongly recommended
-that you only use the PC mode
-while the Spectrum is off.
-
-If you do have both switched
-on then the Spectrum will not
-be able to access the card and
-a message will say "SD in use
-by the PC" and only the
-internal flash works. Eject
-the drive from the PC to make
-it viewable again on the
-Spectrum.
-
-@@ Things to know
-PicoMenu cannot see the
-Spectrum's RESET key. So use
-the NMI button and the menu
-to reset.
+Remove (eject) on the PC, to
+avoid damaging the SD card.
 
 @@ Diagnostics
 # Firmware

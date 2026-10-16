@@ -1,0 +1,48 @@
+# 128K Spectrum, ROMs as two files on the SD card, 48.rom in the flash
+flash /48.rom {ROM48}
+sd /128-0.rom {ROM128_0}
+sd /128-1.rom {ROM128_1}
+sd /Games/Ren128.tzx {TAPES}/Renegade_1987Imagine128KSpeedLock_3.tzx
+sd /Games/Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+text
+key v
+wait 10
+key 2
+wait 50
+key c
+wait 10
+expect Convert: A-Auto 4-48K 1-128K
+key a
+wait 3
+shot {OUT}/r1.scr
+wait 600
+shot {OUT}/r2.scr
+expect Saved Ren128.z80
+# Mikie: Auto tries a 128K, which resets, then a 48K
+key x
+wait 30
+key v
+wait 10
+key 1
+wait 50
+key c
+wait 10
+key a
+wait 600
+expect Saved Mikie.z80
+# again: the name is taken
+key c
+wait 10
+key 4
+wait 600
+expect Saved Mikie 2.z80
+ls sd /Games
+get sd /Games/Ren128.z80 {OUT}/Ren128-sim.z80
+get sd /Games/Mikie.z80 {OUT}/Mikie-auto.z80

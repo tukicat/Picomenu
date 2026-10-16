@@ -1,3 +1,19 @@
+/*
+This file is part of picoFace.
+
+picoFace is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with picoFace. If
+not, see <https://www.gnu.org/licenses/>.
+*/
+
+
 // The SD card as a USB drive for a PC: who has the card, and what to tell the PC.
 //
 // This part does not use TinyUSB, so it can be tested on a PC (usb_msc.cxx connects it to

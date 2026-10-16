@@ -630,13 +630,19 @@ bool write_z80_128(Sink& sink, uint8_t* buf, uint8_t* iobuf, uint32_t iosize) {
 // Writes a 48K snapshot, as the NMI rom sent it (a .sna: the 27 byte header and the
 // 48K, with the PC on the stack), as a version 3 .z80 file for a 48K machine.
 // buf is SNA48_SIZE bytes. iobuf is a work area.
+// pc: -1 when the PC is on the stack (as the NMI rom sends it); otherwise the PC, and SP in
+// the header is the real one (the tape converter knows the PC, so nothing is pushed).
 template <class Sink>
-bool write_z80_48(Sink& sink, const uint8_t* buf, uint8_t* iobuf, uint32_t iosize) {
+bool write_z80_48(Sink& sink, const uint8_t* buf, uint8_t* iobuf, uint32_t iosize, int32_t pc = -1) {
     detail::Buffered<Sink> out(sink, iobuf, iosize);
     const uint8_t* ram = buf + 27;              // address 0x4000
     uint16_t sp = (uint16_t) (buf[23] | (buf[24] << 8));
     uint8_t pcLow = 0, pcHigh = 0;
-    if (sp >= 0x4000 && sp <= 0xFFFE) {         // the PC is on the stack: take it off
+    if (pc >= 0) {
+        pcLow = (uint8_t) (pc & 0xFF);
+        pcHigh = (uint8_t) ((pc >> 8) & 0xFF);
+    }
+    else if (sp >= 0x4000 && sp <= 0xFFFE) {    // the PC is on the stack: take it off
         pcLow = ram[sp - 0x4000];
         pcHigh = ram[sp - 0x4000 + 1];
         sp = (uint16_t) (sp + 2);

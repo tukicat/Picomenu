@@ -1,0 +1,28 @@
+flash /48.rom {ROM48}
+sd /Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key n
+wait 20
+text
+key c
+wait 20
+expect Convert: A-Auto 4-48K 1-128K
+key a
+wait 3
+shot {OUT}/conv1.scr
+text
+wait 40
+shot {OUT}/conv2.scr
+wait 400
+expect Saved Mikie.z80
+shot {OUT}/done.scr
+ls sd /
+get sd /Mikie.z80 {OUT}/Mikie-sim.z80

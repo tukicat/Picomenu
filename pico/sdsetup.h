@@ -1,3 +1,19 @@
+/*
+This file is part of picoFace.
+
+picoFace is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with picoFace. If
+not, see <https://www.gnu.org/licenses/>.
+*/
+
+
 // C on the NMI menu: set up the SD card. It makes the folders the Picoface uses and, if there
 // is no Instructions file yet, a small example one in the folder Scraper. Nothing that is
 // already there is changed. The tables and the text are here, so they are tested on a PC;

@@ -1,0 +1,63 @@
+# 48K Spectrum: tape on the flash, 48.rom on the SD card; no 128K ROM anywhere
+sd /48.rom {ROM48}
+flash /Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+flash /Snap.sna {ROM48}
+boot
+nmi
+wait 30
+key b
+wait 50
+key i
+wait 50
+text
+key v
+wait 10
+key 1
+wait 50
+# 128K asked for with no 128K ROM
+key c
+wait 10
+expect Convert: A-Auto 4-48K 1-128K
+key 1
+wait 30
+expect No 128.rom
+# a key that is not a mode
+key c
+wait 10
+key z
+wait 20
+expect Not converted
+# BREAK straight away
+key c
+wait 10
+key 4
+key BREAK
+wait 30
+expect Stopped: nothing was saved
+ls flash /
+# now for real
+key c
+wait 10
+key a
+wait 800
+expect Saved Green.z80
+ls flash /
+# back to Browse from the information: the folder is read again, so Green.z80 is listed
+key x
+wait 50
+expect 2-Green                   .z80
+# C on a file that is not a tape (Browse read again: Green.tzx, Green.z80, Snap.sna)
+key x
+wait 30
+key b
+wait 50
+key i
+wait 50
+expect 2-Green                   .z80
+key v
+wait 10
+key 3
+wait 50
+key c
+wait 20
+expect C converts a tape

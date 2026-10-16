@@ -1,0 +1,31 @@
+# 48K: the conversion's screens. A scraper screen of the game is already there (Green.scr), so
+# S early on saves Green1.scr, and the loading screen, saved by itself, is Green2.scr
+sd /48.rom {ROM48}
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Scraper/Screen Grabs/Green.scr {OUT}/dummy.scr
+slice 2
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key c
+wait 10
+key a
+wait 10
+expect S-Screen BREAK-Stop
+key s
+wait 2
+expect Screen saved: Green1
+shot {OUT}/s1.scr
+slice 0
+wait 1500
+expect Saved Green.z80
+ls sd /Scraper/Screen Grabs
+get sd /Scraper/Screen Grabs/Green2.scr {OUT}/Green2.scr

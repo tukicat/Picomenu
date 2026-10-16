@@ -1,0 +1,30 @@
+# 48K: S saves a screen, the loading screen is saved by itself, then BREAK: only the S one is kept
+slice 2
+sd /48.rom {ROM48}
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key c
+wait 10
+key a
+wait 10
+key s
+wait 2
+expect Screen saved: Green
+slice 50
+wait 150
+expect Loading screen saved: Green1
+key x
+wait 20
+expect Stopped: only S screens kept
+ls sd /Scraper/Screen Grabs
+ls sd /Games

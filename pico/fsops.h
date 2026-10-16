@@ -1,7 +1,23 @@
+/*
+This file is part of picoFace.
+
+picoFace is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with picoFace. If
+not, see <https://www.gnu.org/licenses/>.
+*/
+
+
 // File operations that work the same on the SD card (FatFs) and the internal flash
 // (littlefs): used by the NMI menu's file keys.  A path is in the form of sd_cwd,
 // "/dir/name.ext", relative to the root of its drive.  Nothing here overwrites a file
-// that is already there.  Tested on a PC against both file systems (Docs/Instructions.txt).
+// that is already there.  Tested on a PC against both file systems.
 #pragma once
 
 #include <stdint.h>

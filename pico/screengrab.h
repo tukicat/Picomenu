@@ -1,3 +1,19 @@
+/*
+This file is part of picoFace.
+
+picoFace is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+picoFace is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with picoFace. If
+not, see <https://www.gnu.org/licenses/>.
+*/
+
+
 // Screen grabs: the screen of a running game saved in the folder "Screen Grabs" in
 // the root of the SD card, as <game>.scr (the 6912 bytes of the Spectrum screen, which V
 // in Browse Games shows). A second grab of the same game is <game>1.scr, then <game>2.scr

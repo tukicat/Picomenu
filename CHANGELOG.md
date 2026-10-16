@@ -2,6 +2,39 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 1.9 (2026-10-16)
+New: convert a `.tap` or `.tzx` to a `.z80` snapshot on the Pico, for turbo and protected loaders too. Development notes: `Docs/Tape-converter-notes.md`.
+- **C on a tape's information** (V in Browse Games) asks `Convert: A-Auto 4-48K 1-128K`. A (Auto) converts as a 128K if this Spectrum can page memory, and as a 48K if that doesn't load it; 4 and 1 choose. The tape is played into an emulated Spectrum (the redcode Z80 emulator) running the tape's own loader, from `LOAD ""` (48K) or the 128K menu's Tape Loader, and the memory and registers are saved beside the tape as `<name>.z80` (`<name> 2.z80` ... if taken). While it runs the screen is the emulated Spectrum's, with a title row and `<bar> 1:23 S-Screen BREAK-Stop`; BREAK or X stops it.
+- **ROMs** (not included): `48.rom`, and `128.rom` (32K) or `128-0.rom` and `128-1.rom`, in the root of the flash or the SD card.
+- **When it is done:** the tape's data is no longer being loaded, or the tape has ended and the game has run 2 s. It reports a tape loading error, a damaged tape, a loader that stopped, a BASIC error, a reset (the tape needs the other machine) or a loader that went into SAVE. A conversion that may still be waiting for the tape says "(check it)".
+- **Speed:** a loader's wait-for-an-edge and delay loops are skipped exactly (the snapshot is the same byte for byte), and standard-speed blocks loaded by the ROM are flash-loaded, as Fuse does. A conversion takes about half the tape's playing time (Green Beret about 1¾ minutes, estimated).
+- **Screens:** the tape's loading screen is saved by itself once it has loaded, and S saves the screen at any time, in `/Scraper/Screen Grabs` on the SD card as `<name>.scr` or the next free number (never over a scraper's screen). The top row says "Loading screen saved" or "Screen saved" for 3 s. BREAK keeps only the ones saved with S.
+- The game information keeps the result on the key row while its pictures change, until a key is pressed.
+- **Tested:** 13 commercial tapes (Speedlock 1-7, Power-Load, Firebird SoftLock, Erbe, New Generation, Ocean 128K), on 48K and 128K, and 15 made-up tapes of every block type; the firmware and the real NMI ROM in a PC simulator (`tools/picosim`).
+- **Licences:** the Z80 emulator and Zeta headers are GNU LGPL v3 (`pico/z80`, full text in THIRD-PARTY-NOTICES.txt section 8). The new PC tools and tests carry the project's GPL v3 header.
+- **Build:** `picoface.cxx` is built with `-Os` (it was `-O3`) to make room; the converter and Z80.c with `-O2`. Firmware 214 KB of 248 KB.
+
+Fixes:
+- **A long software house scrolls** on the game information (it ran off the screen): the ROM scrolls it in its 15 letters, as the Reload item does on the menu. The Pico writes the whole name at `INFO_HOUSE` in the ROM's spare space when the first page shows; the menu's scroll code is shared (about 60 bytes of ROM).
+- **The Convert prompt fits the key row** (it was `Convert: A-Auto(128K) 4-48K 1-128K`), and so do "Not loaded: SAVE (try 48K)" and "Saved <name>.z80" with a long name.
+- **Browse Games reads the folder again** when you go back from a game's information, so a new `.z80` shows at once.
+
+New in Browse Games:
+- **L-All** lists what is normally left out: folders that are hidden (on Windows) or system or start with `.`, the `Poke List` and `Screen Grabs` folders in the root of the card, and `.scr` files, so they can be moved, copied, renamed and erased. While it is on, `L-All` is white on blue, as the drive being browsed is. L again hides them. It stays on until power off. ROM: `.allhandler` toggles `.showall` (4), which is ORed into the list request's flags; the key rows colour it like the drive. Pico: `list_all` changes `is_listable_dir` (never `.` or `..`), the root folder names, and `is_listed_ext` (`.scr`), and reads the folder again when it changes.
+- **A .scr is not loaded:** a number (or V then ENTER) on a `.scr` says "A screen picture", as `.rom` and `.pok` say what they are for. V on a `.scr` shows the picture. The three checks share one table and routine (`.notgames`, `.isext`), and V's ENTER now goes through them too (before, V then ENTER on a `.rom` or `.pok` tried to load it). ROM `spare_size` 0x880, exactly what the buffers need.
+
+Help and docs:
+- **Help rewritten** as a user guide (`Docs/Help.txt`, 21 pages): the NMI button, setting up the SD card, converting tapes and the loading screens, the ROMs, diagnostic and other ROMs, quick save, hidden folders, search, file types, editing game details and notes, pokes, the SD card on a PC, and Diagnostics (still the last page, which D goes to).
+- `Docs/Instructions.txt` (the long development notes) is removed: what changed is in this file, and how to use it is in Help. `Docs/Instructions-example.txt` (an example Instructions.txt) stays.
+
+Licences:
+- **New font: Unscii 8** by Viznut, public domain / CC0, for the menu and Help screens. It replaces the Carton font (Damien Guard's ZX Origins), whose terms are informal rather than a licence and forbid redistributing the font files; `nmirom/Carton.zip` (its download, in the source since before 1.8) is removed. `tools/make_font.py` makes the ROM's font from `unscii-8.hex`; the Help font comes from the ROM's as before.
+- `pico/sd_config.c` has its Apache 2.0 notice back (it is the SD driver's example `hw_config.c`, changed for the Picoface). `pico/usb_descriptors.c` and `pico/tusb_config.h` carry the MIT notices of the Pico SDK files they are based on (Raspberry Pi, Damien P. George).
+- THIRD-PARTY-NOTICES.txt lists all of these (sections 9 and 10), and `pico/pico_sdk_import.cmake` (a copy of an SDK file, BSD 3-clause).
+- The fork's own files that had no header now have the GPL v3 one: `extras.h`, `fsops.h`, `fwupdate.h`, `gameinfo.h`, `notes.h`, `screengrab.h`, `sdsetup.h`, the `usb_msc` files, `make_help.py` (and the `helptext.h` it writes) and `scripts/upload.py`.
+
+`FIRMWARE_ID` is `Rev 1.9 (tapeloader v109)`.
+
 ## Rev 1.8 (2026-10-14)
 Fix: V did not show the pictures the scraper downloads when the Instructions file is in the folder Scraper.
 - The scraper program saves a game's loading screens in a `Screen Grabs` folder beside the Instructions file, so with `Instructions.txt` in `/Scraper` they are in `/Scraper/Screen Grabs`; V only looked in `/Screen Grabs` in the root of the card. It now looks in both: `/Scraper/Screen Grabs` first (the loading screens), then `/Screen Grabs` (the grabs made on the Spectrum). With the Instructions file in the root, nothing changes.

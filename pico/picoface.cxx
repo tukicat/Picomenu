@@ -52,6 +52,7 @@ not, see <https://www.gnu.org/licenses/>.
 #include "picoface.h"
 #include "file_wrapper.h"
 #include "snapload.h"
+#include "tzxconv_pico.h"
 #include "helptext.h"
 #include "extras.h"
 #include "fsops.h"
@@ -713,7 +714,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 1.8 (tapeloader v108)";
+static const char FIRMWARE_ID[] = "Rev 1.9 (tapeloader v109)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -994,8 +995,13 @@ inline bool is_snapshot_ext(const char* extension) {
 
 // The files the browser lists: snapshots, tapes, ROM images and poke lists (which are copied,
 // moved and so on like the rest; a ROM is used with Change ROM, a poke list with Poke)
+// L-All in Browse Games: hidden folders, the Poke List and Screen Grabs folders and .scr files
+// are listed too (the ROM asks with bit 2 of the list request's flags)
+static bool list_all = false;
+
 inline bool is_listed_ext(const char* extension) {
-    return is_snapshot_ext(extension) || strcasecmp(extension, "rom") == 0 || strcasecmp(extension, "pok") == 0;
+    return is_snapshot_ext(extension) || strcasecmp(extension, "rom") == 0 || strcasecmp(extension, "pok") == 0 ||
+        (list_all && strcasecmp(extension, "scr") == 0);
 }
 
 const char* split_filename_and_get_ext(char* name) {
@@ -1088,9 +1094,12 @@ static bool matches_snap_filter(const char* name, const char* filter) {
     return false;
 }
 
-// Sub directories that are shown.  Hidden ones are not.
+// Sub directories that are shown.  Hidden ones (and names starting with '.') are not, unless
+// L-All is on; "." and ".." never are.
 static bool is_listable_dir(DirHandle& dir) {
-    return dir.isDirectory() && !dir.isHidden() && dir.fileName()[0] != '.';
+    const char* n = dir.fileName();
+    if (!dir.isDirectory() || strcmp(n, ".") == 0 || strcmp(n, "..") == 0) return false;
+    return list_all || (!dir.isHidden() && n[0] != '.');
 }
 
 // A directory is returned with a '/' on the end of its name and an empty
@@ -1583,7 +1592,7 @@ static WalkResult walk_next(char* fname, const char** dir, uint64_t deadline) {
         if ((walk.mode == WALK_DIRS_THEN_FILES && walk.phase == 1) || !is_listable_dir(d)) {
             continue;
         }
-        if (walk.drive == 1 && (*dir)[0] == '\0' &&
+        if (walk.drive == 1 && (*dir)[0] == '\0' && !list_all &&
                 (strcasecmp(fname, "Poke List") == 0 || strcasecmp(fname, "Screen Grabs") == 0)) {
             continue;           // Poke List: only a PC puts files there; Screen Grabs: V shows them. Browse Games does not list either
         }
@@ -1699,6 +1708,11 @@ void nmi_action_list_sna() {
     uint16_t destoffset =  (nmi_rom_data[6] << 8) |  nmi_rom_data[5];
     bool stop = (nmi_rom_data[7] & 1) != 0;
     list_details = (nmi_rom_data[7] & 2) != 0;
+    bool all = (nmi_rom_data[7] & 4) != 0;
+    if (all != list_all) {
+        list_all = all;
+        walk_stop();                // what is listed has changed: read the folder again
+    }
     list_drive = drive == 1 ? 1 : 0;
     uint16_t stringoffset = destoffset + SNAPLIST_STRINGS;
     uint64_t deadline = time_us_64() + LIST_TIME_LIMIT_US;
@@ -3283,6 +3297,15 @@ static const uint8_t* preview_screen = nullptr;
 // The game ACTION_SNAP_PREVIEW was asked about (its name without the extension) and the
 // screen it found, which ACTION_GAME_INFO shows a small copy of
 static char info_name[gameinfo::GAME_MAX + 1] = "";
+// The file of the game information (mode 0): its drive and full path, as find_preview opened
+// it. C on its information converts it if it is a tape.
+static char info_path[BROWSE_PATH_MAX] = "";
+static uint8_t info_drive = 0;
+
+// While a tape is converted (C), the screen sent to the Spectrum is the emulated one with
+// the top and bottom rows drawn over it (conv_overlay)
+static bool conv_overlay_on = false;
+static void conv_overlay(uint8_t* dest, uint32_t at, uint32_t length);
 static const uint8_t* info_source = nullptr;
 
 enum ScreenOp { SCREEN_STASH, SCREEN_RESTORE, SCREEN_PREVIEW };
@@ -3310,6 +3333,9 @@ static void nmi_action_screen(ScreenOp op) {
         }
     } else if (preview_screen != nullptr) {
         memcpy(nmi_rom_data + buffer, preview_screen + at, length);
+        if (conv_overlay_on) {
+            conv_overlay(nmi_rom_data + buffer, at, length);
+        }
     }
 }
 
@@ -3421,6 +3447,7 @@ __attribute__((noinline)) static void tape_text(char* out, size_t max, const cha
         add("Data blocks: %u\n", s.standard, 0, 0);
     }
     if (n < max) n += snprintf(out + n, max - n, "PicoMenu can load: %s\n%s\n", *say, reason);
+    if (n < max) n += snprintf(out + n, max - n, "\n\x01Press C to convert this .tzx or\n\x01.tap into a .z80\n");
     if (n >= max) {
         n = max - 1;
     }
@@ -3435,6 +3462,8 @@ static uint8_t find_preview(uint8_t drive, const char* filename, const char* ext
     uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
     FileHandle file;
     tape_sum_valid = false;
+    info_drive = drive;
+    snprintf(info_path, sizeof(info_path), "%s", filename);
     if (!file.open(drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, filename, true)) {
         LOG("Preview: could not open %s\n", filename);
         return 2;
@@ -3469,6 +3498,10 @@ static uint8_t find_preview(uint8_t drive, const char* filename, const char* ext
             screen_next = false;
             if (!tap_skip(file, payload + 1)) break;
         }
+    } else if (strcasecmp(ext, "scr") == 0) {
+        // a screen (L-All lists them): V shows it
+        status = file.read(buf, 6912) == 6912 ? 0 : 2;
+        preview_screen = buf;
     } else {
         snapload::Kind kind;
         int32_t fileSize = file.size();
@@ -3667,7 +3700,9 @@ static void nmi_action_help_page() {
 
 // The poke lists: the .pok file in the Poke List folder of the SD card, named like the game
 // last loaded (or like its name without " Save Game"), read when the list is first asked for
-static extras::PokFile pok_file;
+// Also the converter's working space while a tape is converted (C): see conv_state. It is
+// read again whenever the poke list is opened.
+alignas(8) static extras::PokFile pok_file;
 
 static const char POKE_LIST_DIR[] = "/Poke List";     // in the root of the SD card
 
@@ -4495,6 +4530,12 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     int keylen = (int) strlen(keys);
     help_put_text(screen, 23, keylen >= 32 ? 0 : 1, keys, keylen, gameinfo::ATTR_KEYS);
+    // a software house too long for its place on the first page: the ROM scrolls it there
+    static_assert(INFO_HOUSE_WIDTH == gameinfo::CTRL_WIDTH, "the ROM scrolls the software house in its column");
+    static_assert(gameinfo::HOUSE_MAX < INFO_HOUSE_SIZE, "INFO_HOUSE holds the whole name");
+    if (page == 0 && info->any() && strlen(info->house) > (size_t) INFO_HOUSE_WIDTH) {
+        snprintf(reinterpret_cast<char*>(nmi_rom_data) + INFO_HOUSE, INFO_HOUSE_SIZE, "%s", info->house);
+    }
     preview_screen = screen;
     nmi_rom_data[1] = asking ? 1 : 0;       // the ROM then waits for Y or N
     nmi_rom_data[3] = (uint8_t) page;       // the page as it was kept to the pages there are
@@ -4658,8 +4699,19 @@ NOTES_FUNC static void nmi_sd_setup(int op) {
 // editor. While it is going byte 1 of the mailbox is 3 and the screen is the editor's.
 // The editor's step is done here, ahead of the drawing function, which has a big stack
 // frame: the SD card's file calls need the stack that is left, and core 0 has only 2K.
+static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep);
+static bool conv_result_shown = false;      // conv_msg is on the key row (see below)
+static uint8_t conv_result_pic = 0;         // the picture shown with it
+static uint32_t conv_result_game = 0;       // a hash of the tape's path
+static uint32_t conv_path_hash(const char* p) {
+    uint32_t h = 0x811C9DC5u;
+    while (*p) h = (h ^ (uint8_t) *p++) * 0x01000193u;
+    return h;
+}
+static char conv_msg[40];                   // the message on the key row afterwards
 static void nmi_action_game_info() {
     uint8_t* nmi_rom_data = rom_data + 16384;
+    nmi_rom_data[INFO_HOUSE] = 0;       // no software house to scroll, unless the first page says so
     int op = nmi_rom_data[5];
     if (nmi_rom_data[2] == 2) {         // C on the menu: set up the SD card
         notes_editing = notes_edit = false;
@@ -4668,6 +4720,29 @@ static void nmi_action_game_info() {
     }
     bool ended = false;
     notes_message = nullptr;
+    // The result of a conversion stays on the key row while the first page's pictures change
+    // by themselves (op 0, page 0: the converter may have just saved some), until a key
+    // (and the same game: a new visit also asks with op 0, page 0, but picture 0)
+    if (conv_result_shown) {
+        uint8_t pic = nmi_rom_data[4];
+        if (op == 0 && nmi_rom_data[3] == 0 && pic != conv_result_pic && conv_result_game == conv_path_hash(info_path)) {
+            notes_message = conv_msg;
+            conv_result_pic = pic;
+        }
+        else conv_result_shown = false;
+    }
+    if (op == 6) {
+        // C: convert the tape. The converter shows its own screen while it runs (and says
+        // 6 in byte 1, so the ROM asks again), or the normal page with a message
+        notes_editing = notes_edit = false;
+        uint8_t keep = 0;
+        if (conv_op(nmi_rom_data[2], nmi_rom_data[6], keep)) {
+            return;
+        }
+        nmi_game_info_show(false);
+        nmi_rom_data[1] = keep;         // 7: the ROM waits for a key for the converter
+        return;
+    }
     if (op != 3 && op != 4) {
         // the ROM is not in the notes screen (it asks for op 3 and then op 4 for every key
         // in it): a new visit, or the NMI was left while the notes were up
@@ -5779,6 +5854,440 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
 //#define PIO_DEBUGGING
 
 
+// ---- C on a tape's information: convert the tape to a .z80 snapshot ----
+// The tape is loaded on an emulated Spectrum (tzxconv.h, through tzxconv_pico.h), so its own
+// loader runs, turbo and protected ones too, and the memory and registers are saved beside
+// the tape as <name>.z80 (or "<name> 2.z80" ... if that is taken). The ROM asks for it with
+// op 6 of ACTION_GAME_INFO and goes on asking (op 6, key 0) while byte 1 says 6; each time a
+// slice of about 120 ms is run and the emulated screen is sent with a title row and a status
+// row over it (a live view of the loading). Modes: A Auto (a 128K first if the machine can
+// page memory, then a 48K if that fails), 4 a 48K, 1 a 128K.
+//
+// Memory: the 48K or the eight 128K banks are in snap_load_buffer (as a snapshot would be);
+// the 48K ROM at snap_load_buffer + 65536 (as for the tape ROM trap), the two 128K ROMs in
+// list_pool (so the Browse list is read again afterwards); the machine, the tape's file and
+// the two overlay rows in pok_file (read again when the poke list is next opened).
+// The ROMs are 48.rom, and 128.rom (32K: the editor ROM then the 48K BASIC ROM) or
+// 128-0.rom and 128-1.rom, in the root of the flash or the SD card.
+
+enum ConvPhase : uint8_t { CONV_IDLE, CONV_CHOOSE, CONV_RUN };
+enum ConvMode : uint8_t { CONV_AUTO, CONV_48, CONV_128 };
+static uint8_t conv_phase = CONV_IDLE;
+static uint8_t conv_mode = CONV_AUTO;
+static bool conv_machine128 = false;        // the ROM found the machine can page memory
+static bool conv_as128 = false;             // the attempt running is a 128K one
+static bool conv_retried = false;           // Auto: the 128K attempt failed, this is the 48K one
+static uint32_t conv_size = 0;              // of the tape file
+static uint64_t conv_started = 0;           // time_us_64() at the start
+static bool conv_file_open = false;         // conv_scratch().file is the tape, open
+
+struct ConvScratch {
+    alignas(8) uint8_t machine[pconv::STATE_SIZE];
+    FileHandle file;
+    uint8_t pix[2][8][32];                  // the overlay rows: 0 (top) and 23 (bottom)
+    uint8_t attr[2][32];
+};
+static_assert(sizeof(ConvScratch) <= sizeof(extras::PokFile), "the converter does not fit in pok_file");
+static ConvScratch& conv_scratch() { return *reinterpret_cast<ConvScratch*>(&pok_file); }
+
+static void conv_overlay(uint8_t* dest, uint32_t at, uint32_t length) {
+    ConvScratch& c = conv_scratch();
+    for (uint32_t i = 0; i < length; i++) {
+        uint32_t o = at + i;
+        if (o < 6144) {
+            uint32_t row = ((o >> 11) << 3) | ((o >> 5) & 7);
+            if (row == 0 || row == 23) dest[i] = c.pix[row == 23][(o >> 8) & 7][o & 31];
+        } else {
+            uint32_t row = (o - 6144) >> 5;
+            if (row == 0 || row == 23) dest[i] = c.attr[row == 23][o & 31];
+        }
+    }
+}
+
+// A row of the overlay (0 top, 1 bottom): blank in attr, then the text from col
+static void conv_row(int r, uint8_t attr, int col, const char* text) {
+    ConvScratch& c = conv_scratch();
+    memset(c.pix[r], 0, sizeof(c.pix[r]));
+    memset(c.attr[r], attr, sizeof(c.attr[r]));
+    for (int i = 0; text[i] != '\0' && col + i < 32; i++) {
+        unsigned char ch = (unsigned char) text[i];
+        const uint8_t* glyph = help_font[(ch >= 32 && ch < 128 ? ch : '?') - 32];
+        for (int line = 0; line < 8; line++) c.pix[r][line][col + i] = glyph[line];
+    }
+}
+
+// Reads a ROM file of exactly `size` bytes from the root of the flash, else the SD card
+static bool conv_read_rom(const char* name, uint8_t* dest, uint32_t size) {
+    FileHandle& f = conv_scratch().file;
+    for (int d = 0; d < 2; d++) {
+        if (d == 1 && !sd_card_mounted) break;
+        if (!f.open(d == 0 ? Drive::INTERNAL_FLASH : Drive::EXTERNAL_SD_CARD, name, true)) continue;
+        bool ok = f.size() == (int) size && f.read(dest, size) == (int) size;
+        f.close();
+        if (ok) return true;
+    }
+    return false;
+}
+
+static bool conv_is_tape(const char* path, bool* tzx) {
+    size_t n = strlen(path);
+    if (n < 4) return false;
+    *tzx = strcasecmp(path + n - 4, ".tzx") == 0;
+    return *tzx || strcasecmp(path + n - 4, ".tap") == 0;
+}
+
+static void conv_titles() {
+    char t[48];
+    snprintf(t, sizeof(t), "Converting (%s): %s", conv_as128 ? "128K" : conv_retried ? "48K, 2nd go" : "48K", info_name);
+    conv_row(0, gameinfo::ATTR_BANNER, 0, t);
+}
+
+// ---- screens during a conversion ----
+// The tape's loading screen is saved by itself once it has loaded (tzxconv: loading_screen),
+// and S saves the screen as it is then. Both go in the scraper's folder, /Scraper/Screen
+// Grabs on the SD card, as <name>.scr or the next free <name>1.scr, <name>2.scr ..., so V
+// shows them with the ones the scraper downloaded. The top row says what happened for 3 s.
+static const uint8_t CONV_ATTR_DONE = 0x60;     // black on bright green
+static const uint8_t CONV_ATTR_FAIL = 0x57;     // white on bright red
+static void conv_close_tape();
+static bool conv_scr_folder = false;            // the folder is there (made at the start)
+static bool conv_auto_saved = false;            // the loading screen has been saved
+static int conv_auto_number = -1;               // its number (<name><n>.scr), -1 none: BREAK removes it
+static bool conv_manual_saved = false;          // S saved a screen in this conversion
+static uint64_t conv_note_until = 0;            // the top row shows a note until then
+
+static void conv_note(const char* text, uint8_t attr) {
+    conv_row(0, attr, 0, text);
+    conv_note_until = time_us_64() + 3000000;
+}
+
+// Makes the folder if it isn't there. Done before the ROMs are read, as making a folder
+// borrows list_pool, which holds the 128K ROMs during a conversion.
+static void conv_scr_prepare() {
+    conv_scr_folder = false;
+    if (!sd_card_mounted) return;
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, screengrab::SCRAPER_FOLDER) != fsops::KIND_DIR) {
+        uint8_t made = make_sd_folder("/Scraper");
+        if (made == fsops::OK || made == fsops::NAME_IN_USE) made = make_sd_folder(screengrab::SCRAPER_FOLDER);
+        if (made != fsops::OK && made != fsops::NAME_IN_USE) return;
+    }
+    conv_scr_folder = true;
+}
+
+// Saves scr (6912 bytes). The tape's file handle is used, so the tape is closed meanwhile and
+// opened again where it was: false if it can't be (the conversion has to stop).
+static bool conv_save_screen(const uint8_t* scr, bool automatic) {
+    ConvScratch& c = conv_scratch();
+    if (!sd_card_mounted || !conv_scr_folder) {
+        conv_note(sd_card_mounted ? "Screen not saved (no folder)" : "No SD card: screen not saved", CONV_ATTR_FAIL);
+        return true;
+    }
+    char base[screengrab::NAME_MAX + 1];
+    if (screengrab::base_name(info_name, base) == 0) snprintf(base, sizeof(base), "Screen");
+    int number = -1;
+    for (int i = 0; i < screengrab::MAX_SCAN && number < 0; i++) {
+        screengrab::path_in(screengrab::SCRAPER_FOLDER, base, i, ".scr", grab_path, sizeof(grab_path));
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE) number = i;
+    }
+    if (number < 0) {
+        conv_note("Screen not saved: too many", CONV_ATTR_FAIL);
+        return true;
+    }
+    uint32_t pos = c.file.tell();
+    conv_close_tape();
+    bool ok = false;
+    if (c.file.open(Drive::EXTERNAL_SD_CARD, grab_path, false)) {
+        ok = c.file.write(scr, screengrab::SCR_SIZE) == (int) screengrab::SCR_SIZE;
+        ok = c.file.close() && ok;
+    }
+    if (!ok) fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+    else if (automatic) conv_auto_number = number;
+    else conv_manual_saved = true;
+    LOG("Convert: screen %s %s\n", grab_path, ok ? "saved" : "not saved");
+    if (!c.file.open(info_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, info_path, true)) return false;
+    conv_file_open = true;
+    if (!c.file.seek(pos)) return false;
+    // "Loading screen saved: <name>" or "Screen saved: <name>", the end kept if it is long
+    char name[screengrab::NAME_MAX + 8], t[40];
+    if (number == 0) snprintf(name, sizeof(name), "%s", base);
+    else snprintf(name, sizeof(name), "%s%d", base, number);
+    const char* lead = !ok ? "Screen not saved: " : automatic ? "Loading screen saved: " : "Screen saved: ";
+    size_t room = 32 - strlen(lead), n = strlen(name);
+    if (!ok) snprintf(t, sizeof(t), "Screen not saved (SD card)");
+    else if (n > room) snprintf(t, sizeof(t), "%s..%s", lead, name + n - (room - 2));
+    else snprintf(t, sizeof(t), "%s%s", lead, name);
+    conv_note(t, ok ? CONV_ATTR_DONE : CONV_ATTR_FAIL);
+    return true;
+}
+
+// Starts an attempt. False, with conv_msg set, if it can't.
+static bool conv_start(bool as128) {
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    ConvScratch& c = conv_scratch();
+    conv_as128 = as128;
+    if (as128) {
+        uint8_t* roms = reinterpret_cast<uint8_t*>(list_pool);
+        if (!conv_read_rom("128.rom", roms, 32768) &&
+            !(conv_read_rom("128-0.rom", roms, 16384) && conv_read_rom("128-1.rom", roms + 16384, 16384))) {
+            snprintf(conv_msg, sizeof(conv_msg), "No 128.rom (see Help: Convert)");
+            return false;
+        }
+    } else if (!conv_read_rom(TAPE_ROM_NAME, buf + 65536, 16384)) {
+        snprintf(conv_msg, sizeof(conv_msg), "No 48.rom (see Help: Convert)");
+        return false;
+    }
+    bool tzx = false;
+    conv_is_tape(info_path, &tzx);
+    if (!c.file.open(info_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, info_path, true)) {
+        snprintf(conv_msg, sizeof(conv_msg), "Cannot open the tape");
+        return false;
+    }
+    conv_file_open = true;
+    conv_size = (uint32_t) c.file.size();
+    if (as128) {
+        uint8_t* banks[8];
+        for (uint32_t i = 0; i < 8; i++) banks[i] = snapload::bank_memory(buf, i);
+        memset(buf, 0, snapload::HEADER_AREA);
+        const uint8_t* roms = reinterpret_cast<const uint8_t*>(list_pool);
+        pconv::begin128(c.machine, roms, roms + 16384, banks, &c.file, tzx);
+    } else {
+        pconv::begin48(c.machine, buf + 65536, buf + SNA_HEADER_SIZE, &c.file, tzx);
+    }
+    conv_titles();
+    LOG("Convert %s as %s\n", info_path, as128 ? "128K" : "48K");
+    return true;
+}
+
+struct ConvSink {
+    FileHandle* f;
+    bool write(const uint8_t* p, uint32_t n) { return f->write(p, n) == (int) n; }
+};
+
+// Saves the snapshot beside the tape. False if it could not.
+static bool conv_save(char* saved, size_t savedsize) {
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    ConvScratch& c = conv_scratch();
+    Drive drive = info_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH;
+    static char out[BROWSE_PATH_MAX];
+    const char* slash = strrchr(info_path, '/');
+    int dirlen = slash != nullptr ? (int) (slash - info_path) : 0;
+    bool found = false;
+    for (int k = 1; k <= 9 && !found; k++) {
+        char suffix[4] = "";
+        if (k > 1) snprintf(suffix, sizeof(suffix), " %d", k);
+        int n = snprintf(out, sizeof(out), "%.*s/%s%s.z80", dirlen, info_path, info_name, suffix);
+        if (n < 0 || n >= (int) sizeof(out)) return false;
+        found = fsops::kind(drive, out) == fsops::KIND_NONE;
+        if (found) snprintf(saved, savedsize, "%s%s.z80", info_name, suffix);
+    }
+    if (!found) return false;
+    uint8_t h[27];
+    uint16_t pc;
+    pconv::sna_header(c.machine, h, pc);
+    if (!c.file.open(drive, out, false)) return false;
+    ConvSink sink{ &c.file };
+    bool ok;
+    if (conv_as128) {
+        snapload::sna_to_z80_header(h, (uint8_t) pc, (uint8_t) (pc >> 8), buf);
+        buf[snapload::X_7FFD] = pconv::port_7ffd(c.machine);
+        buf[snapload::X_AYFLAG] = 1;
+        buf[snapload::X_AYSEL] = pconv::ay_selected(c.machine);
+        memcpy(buf + snapload::X_AYREGS, pconv::ay_registers(c.machine), 16);
+        ok = snapload::write_z80_128(sink, buf, snap_io_buffer, sizeof(snap_io_buffer));
+    } else {
+        memcpy(buf, h, sizeof(h));
+        ok = snapload::write_z80_48(sink, buf, snap_io_buffer, sizeof(snap_io_buffer), pc);
+    }
+    ok = c.file.close() && ok;
+    if (!ok) fsops::remove_path(drive, out);
+    LOG("Converted to %s: %s\n", out, ok ? "saved" : "not saved");
+    return ok;
+}
+
+static void conv_close_tape() {
+    if (conv_file_open) {
+        conv_scratch().file.close();
+        conv_file_open = false;
+    }
+}
+
+// The end of a conversion, whatever happened: the buffers it borrowed are given back
+static void conv_end() {
+    conv_close_tape();
+    conv_phase = CONV_IDLE;
+    conv_overlay_on = false;
+    pok_file.clear();
+    walk_stop();                    // list_pool held the 128K ROMs: the list is read again
+    info_loaded = false;            // snap_load_buffer held the Spectrum: read the page again
+    info_source = nullptr;
+    preview_screen = nullptr;
+    notes_message = conv_msg;
+    conv_result_shown = conv_msg[0] != '\0';
+    conv_result_pic = rom_data[16384 + 4];
+    conv_result_game = conv_path_hash(info_path);
+}
+
+// Why a conversion did not load, for the key row (at most 32 letters)
+static const char* conv_why(pconv::Status st) {
+    switch (st) {
+    case pconv::TAPE_ERROR: return "Not loaded: tape loading error";
+    case pconv::BAD_TAPE: return "Not loaded: damaged tape";
+    case pconv::TOO_LONG: return "Not loaded: over 30 minutes";
+    case pconv::STOPPED: return "Not loaded: the loader stopped";
+    case pconv::BASIC_ERROR: return "Not loaded: BASIC error";
+    case pconv::RESET: return conv_as128 ? "Not loaded: reset (try 48K)" : "Not loaded: reset (try 128K)";
+    case pconv::SAVE: return conv_as128 ? "Not loaded: SAVE (try 48K)" : "Not loaded: went to SAVE";
+    default: return "Not loaded";
+    }
+}
+
+// ACTION_GAME_INFO op 6. True if the converter's screen was sent (byte 1 is 6); false for the
+// normal page with notes_message, keep being byte 1 (7: the ROM waits for a key for it).
+#ifdef PICOFACE_HOST
+extern "C" int host_conv_slice_frames;
+#endif
+static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    keep = 0;
+    if (conv_phase == CONV_IDLE) {
+        // C was pressed: key is 1 if the ROM found the machine can page memory
+        bool tzx;
+        if (mode != 0 || !conv_is_tape(info_path, &tzx)) {
+            notes_message = "C converts a tape (.tap .tzx)";
+            return false;
+        }
+        conv_machine128 = key == 1;
+        conv_phase = CONV_CHOOSE;
+        notes_message = "Convert: A-Auto 4-48K 1-128K";   // (Auto: a 128K first if it can page)
+        keep = 7;
+        return false;
+    }
+    if (conv_phase == CONV_CHOOSE) {
+        conv_phase = CONV_IDLE;
+        if (key == 'a') conv_mode = CONV_AUTO;
+        else if (key == '4') conv_mode = CONV_48;
+        else if (key == '1') conv_mode = CONV_128;
+        else {
+            notes_message = "Not converted";
+            return false;
+        }
+        tape_service_stop();        // its ROM is in rom_data, not in the buffers used here
+        conv_retried = false;
+        conv_msg[0] = '\0';
+        conv_auto_saved = false;
+        conv_auto_number = -1;
+        conv_manual_saved = false;
+        conv_note_until = 0;
+        conv_scr_prepare();         // before the ROMs are read (see there)
+        bool as128 = conv_mode == CONV_128 || (conv_mode == CONV_AUTO && conv_machine128);
+        if (!conv_start(as128)) {
+            conv_end();
+            return false;
+        }
+        conv_phase = CONV_RUN;
+        conv_started = time_us_64();
+        key = 0;
+    }
+    // CONV_RUN
+    ConvScratch& c = conv_scratch();
+    if (key == 0x18 || key == 'x') {            // BREAK or X
+        // the loading screen it saved by itself goes too; the ones saved with S are kept
+        bool kept = conv_manual_saved;
+        if (conv_auto_number >= 0) {
+            char base[screengrab::NAME_MAX + 1];
+            if (screengrab::base_name(info_name, base) == 0) snprintf(base, sizeof(base), "Screen");
+            screengrab::path_in(screengrab::SCRAPER_FOLDER, base, conv_auto_number, ".scr", grab_path, sizeof(grab_path));
+            fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+            LOG("Convert stopped: %s removed\n", grab_path);
+            conv_auto_number = -1;
+        }
+        snprintf(conv_msg, sizeof(conv_msg), kept ? "Stopped: only S screens kept" : "Stopped: nothing was saved");
+        conv_end();
+        return false;
+    }
+    bool tape_ok = true;
+    if (key == 's' || key == 'S') {             // S: the screen as it is now
+        tape_ok = conv_save_screen(pconv::screen(c.machine), false);
+    }
+    pconv::Status st = pconv::RUNNING;
+    uint64_t until = time_us_64() + 120000;
+#ifdef PICOFACE_HOST
+    uint32_t slice_frames = 0;      // the simulator's "slice": so many frames, not 120 ms
+#endif
+    while (tape_ok && st == pconv::RUNNING && time_us_64() < until) {
+#ifdef PICOFACE_HOST
+        if (host_conv_slice_frames != 0 && ++slice_frames > (uint32_t) host_conv_slice_frames) break;
+#endif
+        st = pconv::run(c.machine, 1);
+        if (pconv::loading_screen(c.machine)) {
+            conv_auto_saved = true;
+            tape_ok = conv_save_screen(pconv::screen_data(c.machine), true);
+        }
+    }
+    if (!tape_ok) {
+        snprintf(conv_msg, sizeof(conv_msg), "Stopped: cannot read the tape");
+        conv_end();
+        return false;
+    }
+    if (st != pconv::RUNNING && st != pconv::LOADED && conv_mode == CONV_AUTO && conv_as128 &&
+        st != pconv::BAD_TAPE) {
+        // Auto: a 128K did not load it, so a 48K
+        conv_close_tape();
+        conv_retried = true;
+        LOG("Convert: the 128K did not load it (%d), now a 48K\n", (int) st);
+        if (!conv_start(false)) {
+            conv_end();
+            return false;
+        }
+        if (conv_auto_saved) pconv::no_screen_watch(c.machine);    // it has been saved once
+        conv_note_until = 0;
+        st = pconv::RUNNING;
+    }
+    if (st != pconv::RUNNING) {
+        conv_close_tape();
+        if (st == pconv::LOADED) {
+            char saved[gameinfo::GAME_MAX + 8];         // "<name> 9.z80"
+            if (conv_save(saved, sizeof(saved))) {
+                // "Saved <name>.z80", and " (check it)" if it may still be waiting for the
+                // tape; a long name loses its start so that it fits the 31 letters of the row
+                const char* tail = pconv::suspect(c.machine) != pconv::NONE ? " (check it)" : "";
+                size_t room = 31 - 6 - strlen(tail), n = strlen(saved);
+                if (n > room) snprintf(conv_msg, sizeof(conv_msg), "Saved ..%s%s", saved + n - (room - 2), tail);
+                else snprintf(conv_msg, sizeof(conv_msg), "Saved %s%s", saved, tail);
+            } else {
+                snprintf(conv_msg, sizeof(conv_msg), "Could not save the snapshot");
+            }
+        } else {
+            snprintf(conv_msg, sizeof(conv_msg), "%s", conv_why(st));
+        }
+        conv_end();
+        return false;
+    }
+    // still going: the bar, the percentage of the file read and the time taken
+    uint32_t pos = c.file.tell();
+    uint32_t pct = conv_size > 0 ? (uint32_t) ((uint64_t) pos * 100 / conv_size) : 0;
+    if (pct > 99) pct = 99;
+    uint32_t secs = (uint32_t) ((time_us_64() - conv_started) / 1000000);
+    char t[40];
+    int tn = snprintf(t, sizeof(t), "%u:%02u S-Screen BREAK-Stop", (unsigned) (secs / 60), (unsigned) (secs % 60));
+    int cells = 31 - tn;                        // the bar fills the rest (8 cells, 7 from 10 minutes)
+    conv_row(1, gameinfo::ATTR_KEYS, cells + 1, t);
+    ConvScratch& cs = conv_scratch();
+    for (int i = 0; i < cells; i++) {
+        cs.attr[1][i] = (uint32_t) i * 100 < pct * (uint32_t) cells ? 0x20 : 0x08;   // green or blue paper
+    }
+    if (conv_note_until != 0 && time_us_64() >= conv_note_until) {
+        conv_note_until = 0;
+        conv_titles();
+    }
+    preview_screen = pconv::screen(c.machine);
+    conv_overlay_on = true;
+    nmi_rom_data[1] = 6;
+    nmi_rom_data[0] = 1;            // one page, no pictures
+    return true;
+}
+
+
 #ifdef PIO_DEBUGGING
 
 void setup_pios() {
@@ -5796,6 +6305,7 @@ void setup_pios() {
     pio_sm_set_enabled(pio, SM_OUTDATA, true);
 
 }
+
 
 void run_pio_test() {
 

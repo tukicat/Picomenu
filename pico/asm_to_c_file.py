@@ -86,6 +86,9 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define STARTUP_PARAM2_OFFSET 0x{startup_param2:x}\n") 
     fp.write(f"#define STARTUP_SDCARD_PRESENT 0x{symbols['start_up_sdcard_present']:x}\n") 
     fp.write(f"#define STARTUP_RELOAD_LABEL 0x{symbols['start_up_reload_label']:x}\n")
+    fp.write(f"#define INFO_HOUSE 0x{symbols['INFO_HOUSE']:x}\n")
+    fp.write(f"#define INFO_HOUSE_SIZE {symbols['INFO_HOUSE_SIZE']}\n")
+    fp.write(f"#define INFO_HOUSE_WIDTH {symbols['INFO_HOUSE_WIDTH']}\n")
 
     for k, v in symbols.items():
         if k.startswith("STARTUP_ACTION_"):

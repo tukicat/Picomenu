@@ -50,10 +50,8 @@ endif()
 
 project(picoface C CXX ASM)
 
-# Size. The libraries (FatFs, littlefs, the SD driver, TinyUSB, the SDK) are built for size, -Os,
-# which is about 45 KB smaller than the SDK's usual -O3 for a Release build. picoface.cxx stays
-# at -O3: the stack it uses (core 0 has only 2 KB) was measured with that, and its code is
-# not helped by the libraries' being fast. The Z80 bus is served by piohandler.S, which is assembly.
+# Size. Everything is built for size, -Os, which is much smaller than the SDK's usual -O3 for a
+# Release build (about 45 KB for the libraries, about 55 KB for picoface.cxx). The Z80 bus is served by piohandler.S, which is assembly.
 set(CMAKE_C_FLAGS_RELEASE "-Os -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-Os -DNDEBUG")
 set(CMAKE_ASM_FLAGS_RELEASE "-Os -DNDEBUG")
@@ -90,6 +88,8 @@ add_executable(picoface
         usb_descriptors.c
         file_wrapper.cxx
         sd_config.c
+        tzxconv_pico.cxx
+        z80/Z80.c
         piohandler.S
 	${CMAKE_CURRENT_BINARY_DIR}/nmi.c
 )
@@ -112,6 +112,8 @@ target_link_libraries(picoface
 # Add the standard include files to the build
 target_include_directories(picoface PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/z80/API       # the Z80 emulator of the tape converter
+  ${CMAKE_CURRENT_LIST_DIR}/z80/zeta
   ${CMAKE_CURRENT_BINARY_DIR} # 🌟 CRITICAL: Allows C++ files to find generated nmi headers naturally!
   ${CMAKE_CURRENT_LIST_DIR}/.. # for our common lwipopts or any other standard includes, if required
 )
@@ -123,6 +125,7 @@ endif()
 
 
 target_compile_definitions(picoface PRIVATE
+        Z80_STATIC
         WIFI_SSID=\"${WIFI_SSID}\"
         WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
         )
@@ -144,7 +147,12 @@ target_link_libraries(picoface littlefs-lib)
 set_source_files_properties(piohandler.S picoface.cxx PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/nmi.h"
 )
-set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-O3")
+# picoface.cxx is built for size like the rest (it was -O3): about 55 KB smaller, room for the
+# tape converter. Its stack was measured again for this (see Docs/Tape-converter-notes.md).
+set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-Os")
+# The tape converter's emulation (tzxconv.h and the Z80 emulator) is built for speed: -O2 is
+# about 30% faster than -Os on the Pico and hardly bigger (see Docs/Tape-converter-notes.md)
+set_source_files_properties(tzxconv_pico.cxx z80/Z80.c PROPERTIES COMPILE_OPTIONS "-O2")
 
 pico_add_extra_outputs(picoface)
 

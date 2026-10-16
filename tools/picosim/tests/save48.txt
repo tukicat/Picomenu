@@ -1,0 +1,15 @@
+flash /48.rom {ROM48}
+boot
+nmi
+wait 30
+key s
+wait 30
+key t
+key e
+key s
+key t
+key ENTER
+wait 200
+ls flash /
+ls sd /
+get flash /test.sna {OUT}/test48.sna

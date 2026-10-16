@@ -1,0 +1,35 @@
+sd /128.rom {ROM128}
+sd /Ren128.tzx {TAPES}/Renegade_1987Imagine128KSpeedLock_3.tzx
+flash /48.rom {ROM48}
+boot
+nmi
+wait 30
+key b
+wait 50
+key v
+wait 10
+key 2
+wait 50
+key c
+wait 10
+key 1
+wait 900
+expect Saved Ren128.z80
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+
+key 3
+wait 300
+shot {OUT}/ren-loaded.scr
+nmi
+wait 30
+key s
+wait 30
+
+key ENTER
+wait 200
+ls sd /

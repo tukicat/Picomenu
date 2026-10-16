@@ -1,0 +1,20 @@
+# The game information: a software house longer than its 15 letters scrolls in its place
+sd /48.rom {ROM48}
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Scraper/Instructions.txt {OUT}/Instructions.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 5
+expect Imagine Softwar
+wait 160
+expect Software (
+wait 160
+expect Software Ltd
