@@ -1,0 +1,87 @@
+# .txt files: L-All lists them in Browse Games. ENTER on one shows it a page at a time (N, P);
+# E edits a small one on the SD card (tests/short.txt, \r\n kept); a file with lines over 30
+# letters (tests/long.txt) can only be looked at; on the flash nothing can be edited. A .txt can
+# be erased like any file.
+sd /48.rom {ROM48}
+sd /Docs/long.txt {HERE}/long.txt
+sd /Docs/short.txt {HERE}/short.txt
+flash /readme.txt {HERE}/short.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expectnot long
+key l
+wait 50
+expect 1-long
+expect 2-short
+# the long one: pages, and it can't be edited
+key 1
+wait 50
+expect long.txt
+expect Pg 1
+expect Line 1: 
+expect N-Next P-Prev E-Edit X-Exit
+key n
+wait 30
+expect Pg 2
+expectnot Line 1: 
+key p
+wait 30
+expect Pg 1
+expect Line 1: 
+key e
+wait 30
+expect Lines too long to edit here
+key x
+wait 50
+expect 2-short
+# the short one: edit it
+key 2
+wait 50
+expect Second line
+key e
+wait 30
+expect Edit: short.txt
+key a
+wait 30
+key b
+wait 30
+key c
+wait 30
+key BREAK
+wait 40
+expect Y-Save
+key y
+wait 30
+expect Saved
+expect Second lineabc
+key x
+wait 50
+get sd /Docs/short.txt {OUT}/short-edited.txt
+# erase it
+key e
+wait 20
+key 2
+wait 40
+expect Y-Yes, erase it
+key y
+wait 60
+nofile sd /Docs/short.txt
+get sd /Docs/long.txt {OUT}/long.txt
+# the flash: shown, not edited
+key i
+wait 50
+expect readme
+key 1
+wait 50
+expect Second line
+expect N-Next P-Prev X-Exit
+key e
+wait 30
+expect Only files on the SD card
+key x
+wait 50

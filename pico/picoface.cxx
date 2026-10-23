@@ -32,6 +32,11 @@ not, see <https://www.gnu.org/licenses/>.
 #include "usb_msc.h"
 #include "gameinfo.h"
 #include "screengrab.h"
+#include "settings.h"
+#include "slots.h"
+#include "options.h"
+#include "menushot.h"
+#include "z80tap.h"
 #include "notes.h"
 #include "sdsetup.h"
 #include <new>
@@ -46,6 +51,7 @@ not, see <https://www.gnu.org/licenses/>.
 
 #include "f_util.h"
 #include "ff.h"
+#include "diskio.h"
 #include "hw_config.h"
 
 #include "nmi.h"
@@ -70,6 +76,8 @@ not, see <https://www.gnu.org/licenses/>.
 
 bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2);
 static void tape_service_stop();
+static bool tape_in = false;        // the tape being played was put in with T (tape in, see tape_in_start)
+static void tape_in_hook_to_rom();
 
 // NMI_ROM / NMI_ROM_SIZE are already declared by nmi.h
 
@@ -108,12 +116,28 @@ struct MYSTATE {
     // means we are serving a ROM
     uint32_t writableStartAddress;
     uint32_t flags_on_nmi_exit;
+    // Tape in (piohandler.S): what the bus handler looks for once the NMI ROM has exited.
+    // exit_after_nmi is the tape-in hook's exit (shifted, as the handler compares it) while
+    // the hook runs, else 1; the handler sets it. tape_entry is the hook's entry (shifted) when
+    // a tape is in, else 1; the firmware sets it while the NMI menu is up.
+    uint32_t exit_after_nmi;
+    uint32_t tape_entry;
+    uint32_t tape_exit;         // the watched hook's last byte (shifted, as exit_after_nmi)
 };
 
 volatile struct MYSTATE rom_state = {
-    .flags = 0,  .nmi_active=0, .writableStartAddress=32768, .flags_on_nmi_exit= 0
+    .flags = 0,  .nmi_active=0, .writableStartAddress=32768, .flags_on_nmi_exit= 0,
+    .exit_after_nmi = 1, .tape_entry = 1, .tape_exit = 1
 };
+static_assert(offsetof(MYSTATE, exit_after_nmi) == 16 && offsetof(MYSTATE, tape_entry) == 20 &&
+    offsetof(MYSTATE, tape_exit) == 24,
+    "piohandler.S reads rom_state at these offsets");
 uint8_t rom_data[32768];
+// The menus' font (96 letters of 8 bytes from space): the NMI ROM's own, in rom_data (helptext.h
+// has a copy for the PC tools; the firmware uses the ROM's and leaves that out)
+static inline const uint8_t (*menu_font())[8] {
+    return reinterpret_cast<const uint8_t (*)[8]>(rom_data + 16384 + NMI_CHARBANK);
+}
 
 // HIGH-SPEED TAPE ENGINE GLOBAL STATE
 extern "C" {
@@ -122,6 +146,9 @@ extern "C" {
 
 static bool enable_logging = true;
 
+// The messages on the USB serial port (for finding faults with a PC). Left out of the firmware
+// unless it is built with -DPICOMENU_LOG=1 (their text was about 5 KB of it); the simulator has them.
+#if defined(PICOFACE_HOST) || (defined(PICOMENU_LOG) && PICOMENU_LOG)
 void LOG(const char* format, ...) {
     if (enable_logging) {
         va_list args;
@@ -129,6 +156,9 @@ void LOG(const char* format, ...) {
         vprintf(format, args);
     }
 }
+#else
+#define LOG(...) do { } while (0)
+#endif
 
 
 extern "C" {
@@ -194,6 +224,8 @@ static bool snap_is_paged = false;
 // a 128K one, which is saved as a .z80 file.  save128_info is the header it sent.
 static bool save_is_128k = false;
 static uint8_t save128_info[snapload::SAVE128_HEADER];
+static bool nmi_menu_open = false;      // the NMI menu (not a grab, a load ...): see ayswap in nmirom.asm
+static_assert(SAVE128_AY_AT + 16 <= snapload::SAVE128_HEADER, "the sound chip registers are in the save header");
 
 // The paging port value of the last 128K snapshot loaded, and the byte it had where the
 // 128K ROM keeps its copy of that value (BANK_M).  The NMI rom can only read BANK_M,
@@ -231,6 +263,10 @@ static bool sd_card_mounted = false;
 // e.g. "/GAMES/ARCADE".  It is kept between visits to the NMI menu.  The internal
 // flash has folders too and is browsed the same way, with its own directory.
 static char sd_cwd[128] = "";
+// In the Waste Bin (or it), on the SD card: erasing there is for good
+static bool in_waste_bin(uint8_t drive, const char* path) {
+    return drive == 1 && (strcasecmp(path, "/Waste Bin") == 0 || strncasecmp(path, "/Waste Bin/", 11) == 0);
+}
 static char flash_cwd[sizeof(sd_cwd)] = "";
 
 // The directory being browsed on a drive (0 internal flash, 1 SD card)
@@ -240,6 +276,21 @@ static char* cwd_of(uint8_t drive) {
 
 // The drive the last ACTION_SNAP_LIST was for
 static uint8_t list_drive = 0;
+
+// Picomenu.ini (settings.h): read at power on, when the PC gives the card back (cfg_stale) and
+// when it is saved on the Spectrum. Its start_folder is used at power on and when the card
+// comes back from the PC (cfg_folder_due), not each time it is read.
+static settings::Settings cfg;
+static bool cfg_stale = false;          // read it again before it is next used
+static bool cfg_folder_due = true;
+static void settings_fresh();
+// SD card trouble put right since power on (Help > Diagnostics): reads tried again and failed
+// (FatFs_SPI/src/glue.c), and times the card was mounted again (sd_check)
+extern "C" unsigned long sd_read_retries, sd_read_failures;
+static uint32_t sd_remounts = 0;
+// A colour of the pico's own screens (not of a picture) as Picomenu.ini's theme shows it
+static inline uint8_t ui_attr(uint8_t a) { return settings::theme_attr(a, cfg.light); }
+static size_t slot_game_now(char* out);     // save slots: the game being played
 
 // Big enough for sd_cwd, a slash and the longest file name
 static const size_t BROWSE_PATH_MAX = sizeof(sd_cwd) + 260;
@@ -631,6 +682,12 @@ static bool build_snapshot_from_tap(uint8_t drive, const char* filename) {
     int entry = -1;
     int first_code = -1;
     bool clean = true;
+    // The places the blocks went: a block that lands on one loaded before is a multi-load
+    // tape (Gauntlet's 31 levels all go to 49152), which needs the real tape (the ROM trap)
+    // for its later loads, so it is not a clean conversion.
+    static const int PLACED_MAX = 16;
+    uint32_t placed_lo[PLACED_MAX], placed_hi[PLACED_MAX];
+    int placed = 0;
 
     FileHandle file;
     const bool tzx = tape_is_tzx(filename);
@@ -679,6 +736,19 @@ static bool build_snapshot_from_tap(uint8_t drive, const char* filename) {
             have_header = false;
 
             if (dest != nullptr) {
+                uint32_t lo = 16384u + (uint32_t) (dest - ram), hi = lo + toread;
+                for (int i = 0; i < placed; i++) {
+                    if (clean && lo < placed_hi[i] && placed_lo[i] < hi) {
+                        LOG("Tape Loader: a block loads over another (a multi-load tape)\n");
+                        clean = false;
+                    }
+                }
+                if (placed < PLACED_MAX) {
+                    placed_lo[placed] = lo;
+                    placed_hi[placed++] = hi;
+                } else {
+                    clean = false;                // more blocks than a simple tape has
+                }
                 if (!tap_read_exact(file, dest, toread)) break;
                 if (is_basic) {
                     int a = tap_find_usr_address(dest, toread);
@@ -692,6 +762,7 @@ static bool build_snapshot_from_tap(uint8_t drive, const char* filename) {
         }
         file.close();
     } else {
+        file.close();               // (opened, but not a .tzx: not left open)
         LOG("Tape Loader: could not open %s\n", filename);
     }
 
@@ -714,7 +785,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 1.9 (tapeloader v109)";
+static const char FIRMWARE_ID[] = "Rev 2.0 (tapeloader v200)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -791,8 +862,13 @@ static const char LASTGAME_FILE[] = "lastgame.cfg";
 static uint8_t lastgame_stored[extras::LG_FILE_MAX];
 static size_t lastgame_stored_len = 0;
 
+// The last game's record and its file's bytes: one copy, for reading it at start up and writing
+// it after (the RAM is short: what is left of it is the heap, which littlefs needs)
+static extras::LastGame lastgame_g;
+static uint8_t lastgame_buf[extras::LG_FILE_MAX];
+
 static void persist_last_game() {
-    static extras::LastGame g;
+    extras::LastGame& g = lastgame_g;
     g = extras::LastGame();
     g.reload_known = reload_known;
     g.reload_drive = reload_drive;
@@ -807,7 +883,7 @@ static void persist_last_game() {
     snprintf(g.last_dir, sizeof(g.last_dir), "%s", last_game_dir);
     snprintf(g.last_name, sizeof(g.last_name), "%s", last_game_name);
     g.format = last_format;
-    static uint8_t buf[extras::LG_FILE_MAX];
+    uint8_t* buf = lastgame_buf;
     size_t len = extras::lastgame_encode(g, buf);
     if (len == lastgame_stored_len && memcmp(buf, lastgame_stored, len) == 0) {
         return;
@@ -824,14 +900,14 @@ static void persist_last_game() {
 }
 
 static void load_last_game() {
-    static uint8_t buf[extras::LG_FILE_MAX];
+    uint8_t* buf = lastgame_buf;
     int file = pico_open(LASTGAME_FILE, LFS_O_RDONLY);
     if (file < 0) {
         return;
     }
-    int n = pico_read(file, buf, sizeof(buf));
+    int n = pico_read(file, buf, sizeof(lastgame_buf));
     pico_close(file);
-    static extras::LastGame g;
+    extras::LastGame& g = lastgame_g;
     if (n > 0 && extras::lastgame_decode(buf, (size_t) n, g)) {
         reload_known = g.reload_known;
         reload_drive = g.reload_drive;
@@ -885,6 +961,13 @@ static void recent_note(uint8_t drive, const char* dir, const char* name, const 
         pico_close(file);
     }
 }
+
+// The tape position kept with a snapshot: see tape_note_write
+static void tape_note_resume(uint8_t drive, const char* snap, bool paged, uint8_t port_7ffd);
+static void tape_note_after_save(uint8_t drive, const char* snap);
+static void tape_note_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool keep);
+static void tape_notes_follow_folder(uint8_t drive, const char* from, const char* to, bool keep);
+static void tape_notes_retarget(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir);
 
 void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt) {
     game_running = true;
@@ -973,6 +1056,8 @@ void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt) 
     current_snap_size = kind == snapload::KIND_Z80V1 ? Z80_FILE_SIZE :
         kind == snapload::KIND_PAGED ? snapload::IMAGE128_SIZE : SNA_FILE_SIZE;
     current_snap_data = snap_load_buffer;
+    // a tape position kept with the snapshot: the tape trap carries on from there
+    tape_note_resume(drive, filename, kind == snapload::KIND_PAGED, buf[snapload::X_7FFD]);
 }
 
 bool stringendswith(const char* str, const char* suffix) {
@@ -995,13 +1080,30 @@ inline bool is_snapshot_ext(const char* extension) {
 
 // The files the browser lists: snapshots, tapes, ROM images and poke lists (which are copied,
 // moved and so on like the rest; a ROM is used with Change ROM, a poke list with Poke)
-// L-All in Browse Games: hidden folders, the Poke List and Screen Grabs folders and .scr files
-// are listed too (the ROM asks with bit 2 of the list request's flags)
+// L-All in Browse Games: hidden files and folders are listed too, dimmed (the ROM asks with bit 2
+// of the list request's flags). Hidden are: those hidden with H (on the SD card the hidden
+// attribute, as Windows sets it; on the flash a littlefs attribute), and always the ones that
+// cannot be loaded (.scr and .txt files; the Poke List, Tape Files and old Screen Grabs folders),
+// system ones and names starting with a dot.
 static bool list_all = false;
 
 inline bool is_listed_ext(const char* extension) {
     return is_snapshot_ext(extension) || strcasecmp(extension, "rom") == 0 || strcasecmp(extension, "pok") == 0 ||
-        (list_all && strcasecmp(extension, "scr") == 0);
+        strcasecmp(extension, "scr") == 0 || strcasecmp(extension, "txt") == 0 || strcasecmp(extension, "ini") == 0;
+}
+
+// A list entry is the name and the extension as two strings, then a byte of these flags
+static const uint8_t ENTRY_HIDDEN = 1;          // shown dimmed, and only with L-All
+static const uint8_t ENTRY_HIDDEN_SET = 2;      // hidden with H (or by Windows): H shows it again
+static const uint8_t ENTRY_ALWAYS = 4;          // hidden whatever is set: H can't show it
+static const uint8_t FLASH_HIDDEN_ATTR = 'H';   // the littlefs attribute of a file hidden on the flash
+// The bytes of an entry's two strings (without the flags)
+static size_t entry_len(const char* nameAndExt) {
+    size_t n = strlen(nameAndExt) + 1;
+    return n + strlen(nameAndExt + n) + 1;
+}
+static uint8_t entry_flags(const char* nameAndExt) {
+    return (uint8_t) nameAndExt[entry_len(nameAndExt)];
 }
 
 const char* split_filename_and_get_ext(char* name) {
@@ -1018,7 +1120,7 @@ const char* split_filename_and_get_ext(char* name) {
     return ext + 1;
 }
 
-bool add_file_to_list(const char* name, const uint16_t destoffset, uint16_t& stringoffset) {
+bool add_file_to_list(const char* name, const uint16_t destoffset, uint16_t& stringoffset, bool hidden = false) {
     uint8_t* nmi_rom_data = rom_data + 16384;
     int index = nmi_rom_data[destoffset];
     if (index >= 10) {
@@ -1028,6 +1130,9 @@ bool add_file_to_list(const char* name, const uint16_t destoffset, uint16_t& str
     nmi_rom_data[destoffset] = index + 1;
     nmi_rom_data[destoffset + 2 + 2 * index] = stringoffset & 0xFF;
     nmi_rom_data[destoffset + 2 + 2 * index + 1] = (stringoffset >> 8) & 0xFF;
+    if (hidden) {
+        nmi_rom_data[destoffset + SNAPLIST_HIDDEN + index / 8] |= (uint8_t) (1 << (index % 8));
+    }
     int filenamelen = strlen(name) + 1;
     filenamelen += strlen(name + filenamelen) + 1;
     memcpy(nmi_rom_data + stringoffset, name, filenamelen);
@@ -1094,12 +1199,20 @@ static bool matches_snap_filter(const char* name, const char* filter) {
     return false;
 }
 
-// Sub directories that are shown.  Hidden ones (and names starting with '.') are not, unless
-// L-All is on; "." and ".." never are.
+// Sub directories that can be listed ("." and ".." never are; hidden ones only with L-All, which
+// walk_next sees to)
 static bool is_listable_dir(DirHandle& dir) {
     const char* n = dir.fileName();
-    if (!dir.isDirectory() || strcmp(n, ".") == 0 || strcmp(n, "..") == 0) return false;
-    return list_all || (!dir.isHidden() && n[0] != '.');
+    return dir.isDirectory() && strcmp(n, ".") != 0 && strcmp(n, "..") != 0;
+}
+
+static char list_path[BROWSE_PATH_MAX];
+// A file or folder on the flash hidden with H. dir is in the form of sd_cwd
+static bool flash_hidden(const char* dir, const char* name) {
+    int n = snprintf(list_path, sizeof(list_path), "%s/%s", dir, name);
+    if (n < 0 || n >= (int) sizeof(list_path)) return false;
+    uint8_t v = 0;
+    return pico_getattr(list_path, FLASH_HIDDEN_ATTR, &v, 1) == 1 && v != 0;
 }
 
 // A directory is returned with a '/' on the end of its name and an empty
@@ -1111,7 +1224,7 @@ static void make_dir_entry(char* fname) {
     fname[len + 2] = '\0';
 }
 
-// Room for a name, a '/' and two terminators
+// Room for a name, a '/', two terminators and the flags
 static char list_fname[260];
 
 
@@ -1131,7 +1244,10 @@ static char list_fname[260];
 // pool too, once each time the directory changes.
 static const size_t LIST_POOL_SIZE = 32 * 1024;
 static const int LIST_CACHE_MAX = 1500;
-static char list_pool[LIST_POOL_SIZE];
+// aligned: FatFs is lent this memory (ff_pool) for its long name buffer, which it reads and writes
+// 16 bits at a time, and the Pico's Cortex-M0+ stops (a HardFault) on a 16-bit access at an odd
+// address. A char array may be put anywhere: in a test build it was at 0x2002c855
+static char list_pool[LIST_POOL_SIZE] __attribute__((aligned(8)));
 static size_t list_pool_used = 0;
 static uint16_t list_cache[LIST_CACHE_MAX];    // pool offset of each record
 static int list_cached = 0;                    // results 0..list_cached-1 are cached
@@ -1151,8 +1267,7 @@ static void list_cache_add(const char* nameAndExt, const char* dir) {
     if (list_cache_full) {
         return;
     }
-    size_t namelen = strlen(nameAndExt) + 1;
-    namelen += strlen(nameAndExt + namelen) + 1;
+    size_t namelen = entry_len(nameAndExt) + 1;      // and the flags
     size_t dirlen = strlen(dir) + 1;
     bool newdir = list_last_dir < 0 || strcmp(list_pool + list_last_dir, dir) != 0;
     size_t need = (newdir ? dirlen : 0) + 2 + namelen;
@@ -1294,24 +1409,26 @@ static bool is_dir_entry_name(const char* name) {
     return len > 0 && name[len - 1] == '/';
 }
 
+// Picomenu.ini's sort and folders change this (settings::compare_names)
 static int compare_entry_names(const char* a, const char* b) {
-    bool da = is_dir_entry_name(a), db = is_dir_entry_name(b);
-    if (da != db) {
-        return da ? -1 : 1;
-    }
-    int c = strcasecmp(a, b);
-    if (c == 0) {
-        c = strcmp(a, b);
-    }
-    if (c == 0) {
-        const char* ea = a + strlen(a) + 1;
-        const char* eb = b + strlen(b) + 1;
-        c = strcasecmp(ea, eb);
-        if (c == 0) {
-            c = strcmp(ea, eb);
+    return settings::compare_names(a, b, cfg.sort, cfg.folders);
+}
+
+// Sorts n 16-bit entries (a shell sort: the C library's qsort was 1.5 KB of the firmware)
+static void sort_u16(uint16_t* a, size_t n, int (*cmp)(const void*, const void*)) {
+    size_t gap = 1;
+    while (gap < n / 3) gap = gap * 3 + 1;
+    for (; gap > 0; gap /= 3) {
+        for (size_t i = gap; i < n; i++) {
+            uint16_t v = a[i];
+            size_t j = i;
+            while (j >= gap && cmp(&a[j - gap], &v) > 0) {
+                a[j] = a[j - gap];
+                j -= gap;
+            }
+            a[j] = v;
         }
     }
-    return c;
 }
 
 static int compare_cached(const void* x, const void* y) {
@@ -1332,7 +1449,7 @@ static int compare_cached(const void* x, const void* y) {
 }
 
 static void list_cache_sort() {
-    qsort(list_cache, list_cached, sizeof(list_cache[0]), compare_cached);
+    sort_u16(list_cache, list_cached, compare_cached);
 }
 
 static WalkResult walk_next(char* fname, const char** dir, uint64_t deadline);
@@ -1376,9 +1493,7 @@ static const char* big_entry(int i) {      // i counts from the start of the win
 }
 
 static void copy_entry_name(char* to, const char* nameAndExt) {
-    size_t len = strlen(nameAndExt) + 1;
-    len += strlen(nameAndExt + len) + 1;
-    memcpy(to, nameAndExt, len);
+    memcpy(to, nameAndExt, entry_len(nameAndExt) + 1);      // and the flags
 }
 
 // Puts name in the window at its place, which must be < big_count when full
@@ -1579,12 +1694,24 @@ static WalkResult walk_next(char* fname, const char** dir, uint64_t deadline) {
 
         strcpy(fname, d.fileName());
         *dir = walk.path + 3;
+        // hidden with H: on the SD card its attribute; on the flash a littlefs attribute
+        uint8_t flags = 0;
+        if (fname[0] == '.' || d.isSystem()) {
+            flags = ENTRY_HIDDEN | ENTRY_ALWAYS;
+        } else if (walk.drive == 1 ? d.isHiddenSet() : flash_hidden(walk.path + 3, fname)) {
+            flags = ENTRY_HIDDEN | ENTRY_HIDDEN_SET;
+        }
         if (!d.isDirectory()) {
             if (walk.mode == WALK_DIRS_THEN_FILES && walk.phase == 0) {
                 continue;
             }
-            if (is_listed_ext(split_filename_and_get_ext(fname)) &&
+            const char* ext = split_filename_and_get_ext(fname);
+            if (strcasecmp(ext, "scr") == 0 || strcasecmp(ext, "txt") == 0 || strcasecmp(ext, "ini") == 0) {
+                flags |= ENTRY_HIDDEN | ENTRY_ALWAYS;       // pictures and text (Picomenu.ini too): not loaded
+            }
+            if (is_listed_ext(ext) && (list_all || !(flags & ENTRY_HIDDEN)) &&
                 matches_snap_filter(fname, walk.filter)) {
+                fname[entry_len(fname)] = (char) flags;
                 return WALK_FOUND;
             }
             continue;
@@ -1592,9 +1719,15 @@ static WalkResult walk_next(char* fname, const char** dir, uint64_t deadline) {
         if ((walk.mode == WALK_DIRS_THEN_FILES && walk.phase == 1) || !is_listable_dir(d)) {
             continue;
         }
-        if (walk.drive == 1 && (*dir)[0] == '\0' && !list_all &&
-                (strcasecmp(fname, "Poke List") == 0 || strcasecmp(fname, "Screen Grabs") == 0)) {
-            continue;           // Poke List: only a PC puts files there; Screen Grabs: V shows them. Browse Games does not list either
+        if ((*dir)[0] == '\0' &&
+                ((walk.drive == 1 && (strcasecmp(fname, "Poke List") == 0 || strcasecmp(fname, "Screen Grabs") == 0)) ||
+                 strcasecmp(fname, "Tape Files") == 0)) {
+            // Poke List: only a PC puts files there; Screen Grabs: V shows them (grabs saved before
+            // a test build); Tape Files: the tape positions of snapshots (either drive)
+            flags |= ENTRY_HIDDEN | ENTRY_ALWAYS;
+        }
+        if ((flags & ENTRY_HIDDEN) && !list_all) {
+            continue;
         }
         if (walk.mode == WALK_FIND) {
             walk.descend = true;    // look inside it before moving on
@@ -1603,6 +1736,7 @@ static WalkResult walk_next(char* fname, const char** dir, uint64_t deadline) {
             }
         }
         make_dir_entry(fname);
+        fname[entry_len(fname)] = (char) flags;
         return WALK_FOUND;
     }
     return WALK_END;
@@ -1659,8 +1793,8 @@ static bool list_details = false;
 // The size and 128K flag of a file, as extras::describe_file makes them
 static void read_file_details(uint8_t drive, const char* dir, const char* nameAndExt, char out[9]) {
     const char* ext = nameAndExt + strlen(nameAndExt) + 1;
-    static char path[BROWSE_PATH_MAX];
-    snprintf(path, sizeof(path), "%s/%s.%s", dir, nameAndExt, ext);
+    char* path = list_path;
+    snprintf(path, sizeof(list_path), "%s/%s.%s", dir, nameAndExt, ext);
     FileHandle f;
     if (!f.open(drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, path, true)) {
         snprintf(out, 9, "%s", "   ?    ");
@@ -1678,20 +1812,28 @@ static bool list_out(const char* nameAndExt, const char* dir, uint16_t destoffse
     char shown[SHOWN_NAME_MAX + 1 + 260];
     make_shown_name(nameAndExt, shown);
     uint16_t offset = stringoffset;
-    if (!add_file_to_list(shown, destoffset, stringoffset)) {
+    if (!add_file_to_list(shown, destoffset, stringoffset, (entry_flags(nameAndExt) & ENTRY_HIDDEN) != 0)) {
         return false;
     }
+    // the details mean opening each file: not while a search is still going, as the results
+    // found so far are sent again with each request, and opening them all took all the time a
+    // request has, so the search never got any further (it hung until BREAK). The finished
+    // search's page is sent again, with them.
+    bool searching = walk.order == ORDER_FOUND && walk.depth >= 0;
     if (list_details && nameAndExt[strlen(nameAndExt) + 1] != '\0') {
+        // the ROM reads a third string for each file while the details are shown, so one is
+        // always sent: while a search goes on, "..." in its place (a test build sent none, and the
+        // list was read out of step: garbled until the search was over)
         char info[9];
-        read_file_details(list_drive, dir, nameAndExt, info);
+        if (searching) snprintf(info, sizeof(info), "   ...  ");
+        else read_file_details(list_drive, dir, nameAndExt, info);
         memcpy(reinterpret_cast<char*>(rom_data + 16384) + stringoffset, info, strlen(info) + 1);
         stringoffset += strlen(info) + 1;
     }
     if (list_entry_count < SNAP_LIST_MAX) {
         list_entry_offset[list_entry_count] = offset;
         snprintf(list_entry_dir[list_entry_count], sizeof(list_entry_dir[0]), "%s", dir);
-        size_t len = strlen(nameAndExt) + 1;
-        len += strlen(nameAndExt + len) + 1;
+        size_t len = entry_len(nameAndExt) + 1;      // and the flags (H looks at them)
         if (len <= sizeof(list_entry_name[0])) {
             memcpy(list_entry_name[list_entry_count], nameAndExt, len);
         }
@@ -1722,6 +1864,8 @@ void nmi_action_list_sna() {
 
     nmi_rom_data[destoffset] = 0;
     nmi_rom_data[destoffset + 1] = 0;
+    nmi_rom_data[destoffset + SNAPLIST_HIDDEN] = 0;
+    nmi_rom_data[destoffset + SNAPLIST_HIDDEN + 1] = 0;
     list_entry_count = 0;
 
     if (!walk_is_for(drive)) {
@@ -1733,6 +1877,7 @@ void nmi_action_list_sna() {
         walk.stopped = true;
     }
     bool busy = false;
+    bool was_searching = walk.order == ORDER_FOUND && walk.depth >= 0;     // (list_out: no details then)
 
     // A page is SNAP_LIST_MAX results, and one more tells us there is a next page
     int need = start + SNAP_LIST_MAX + 1;
@@ -1744,7 +1889,7 @@ void nmi_action_list_sna() {
         for (; out < need && out < big_start + big_count; out++) {
             list_out(big_entry(out - big_start), dir, destoffset, stringoffset);
         }
-        nmi_rom_data[destoffset + SNAPLIST_HASPARENT] = cwd_of(drive)[0] != '\0' ? 1 : 0;
+        nmi_rom_data[destoffset + SNAPLIST_HASPARENT] = (cwd_of(drive)[0] != '\0' ? 1 : 0) | (in_waste_bin(drive, cwd_of(drive)) ? 2 : 0);
         nmi_rom_data[destoffset + SNAPLIST_BUSY] = 0;
         write_browse_path(nmi_rom_data + destoffset + SNAPLIST_PATH, drive);
         return;
@@ -1784,9 +1929,7 @@ void nmi_action_list_sna() {
             list_cache_add(list_fname, dir);
         }
         if (index >= list_cached) {
-            size_t len = strlen(list_fname) + 1;
-            len += strlen(list_fname + len) + 1;
-            memcpy(walk_last_name, list_fname, len);
+            memcpy(walk_last_name, list_fname, entry_len(list_fname) + 1);
             snprintf(walk_last_dir, sizeof(walk_last_dir), "%s", dir);
             walk_last_index = index;
         }
@@ -1798,12 +1941,21 @@ void nmi_action_list_sna() {
 
     // A search that has finished (or been stopped) with all its results in the
     // cache: sort them, and send this page again in that order
+    bool resend = false;
     if (!busy && walk.order == ORDER_FOUND && walk.depth < 0 && !walk.sorted &&
         !list_cache_full && walk.produced == list_cached) {
         list_cache_sort();
         walk.sorted = true;
+        resend = true;
+    } else if (!busy && list_details && was_searching && walk.depth < 0 &&
+               (need <= list_cached || walk.produced == list_cached)) {
+        resend = true;      // the search has just finished, and the page is in the cache: again, with the details
+    }
+    if (resend) {
         nmi_rom_data[destoffset] = 0;
         nmi_rom_data[destoffset + 1] = 0;
+        nmi_rom_data[destoffset + SNAPLIST_HIDDEN] = 0;
+        nmi_rom_data[destoffset + SNAPLIST_HIDDEN + 1] = 0;
         list_entry_count = 0;
         stringoffset = destoffset + SNAPLIST_STRINGS;
         for (out = start; out < need && out < list_cached; out++) {
@@ -1811,7 +1963,7 @@ void nmi_action_list_sna() {
         }
     }
 
-    nmi_rom_data[destoffset + SNAPLIST_HASPARENT] = cwd_of(drive)[0] != '\0' ? 1 : 0;
+    nmi_rom_data[destoffset + SNAPLIST_HASPARENT] = (cwd_of(drive)[0] != '\0' ? 1 : 0) | (in_waste_bin(drive, cwd_of(drive)) ? 2 : 0);
     nmi_rom_data[destoffset + SNAPLIST_BUSY] = busy ? 1 : 0;
     write_browse_path(nmi_rom_data + destoffset + SNAPLIST_PATH, drive);
 }
@@ -1873,10 +2025,91 @@ static char move_name[260];     // name and extension, as two strings
 
 // Status returned by ACTION_SNAP_MOVE and ACTION_SNAP_MKDIR (the first three are
 // the values in fsops.h)
+// A tape being played (the tape trap's) has its file open, which FatFs won't let be erased,
+// moved or renamed: before that is done to it, or to a folder it is in, it is ejected
+static void tape_eject_if_in(uint8_t drive, const char* path);
+
 static const uint8_t FILEOP_OK = fsops::OK;
 static const uint8_t FILEOP_NAME_IN_USE = fsops::NAME_IN_USE;
 static const uint8_t FILEOP_FAILED = fsops::FAILED;
 static const uint8_t FILEOP_SAME_DIRECTORY = 3;
+// ---- The Waste Bin: /Waste Bin, a hidden folder in the root of the SD card ----
+// Erasing a file or folder in Browse Games (or a screen grab with D on V) moves it here instead,
+// a file on the internal flash being copied here (a folder on the flash is erased, as folders
+// don't change drive). Erasing one in the Waste Bin removes it for good; W on the menu opens
+// Browse Games in it, where B empties it.
+static const char WASTE_BIN[] = "/Waste Bin";
+// The folder Browse Games was in on the SD card when W opened the bin: it goes back there when
+// the bin is left (op 2, or the next time the menu opens), so B doesn't show the bin
+static char bin_return_cwd[sizeof(sd_cwd)];
+static bool bin_open = false;
+static void bin_leave() {
+    if (bin_open) {
+        bin_open = false;
+        if (in_waste_bin(1, sd_cwd)) {          // still in it (else the user has gone elsewhere)
+            snprintf(sd_cwd, sizeof(sd_cwd), "%s", bin_return_cwd);
+            snap_filter[0] = '\0';
+        }
+    }
+}
+// The paths erasing (and emptying the Waste Bin) works with (static: core 0's stack is small)
+static char erase_path[BROWSE_PATH_MAX];
+static char erase_scratch[BROWSE_PATH_MAX + 8];
+static uint8_t make_sd_folder(const char* path);
+static uint8_t copy_file(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to);
+
+// Makes the Waste Bin (hidden) if it is not there. False if it can't be
+static bool waste_bin_make() {
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, WASTE_BIN) == fsops::KIND_DIR) {
+        return true;
+    }
+    uint8_t made = make_sd_folder(WASTE_BIN);
+    if (made == fsops::OK) {
+        f_chmod(WASTE_BIN, AM_HID, AM_HID);
+    }
+    return made == fsops::OK || made == fsops::NAME_IN_USE;
+}
+
+enum BinResult { BIN_OK, BIN_NONE, BIN_FAILED };   // BIN_NONE: there is no bin for it, erase it
+
+// Moves path (a file or folder, on drive) into the Waste Bin, as its name or, if that is taken
+// there, "<name> (2)" ... "<name> (99)" (before the extension). target gets its new path.
+static BinResult to_waste_bin(uint8_t drive, const char* path, bool is_dir, char* target, size_t tsize) {
+    if (!cfg.waste_bin || !sd_card_mounted || (drive != 1 && is_dir)) {     // waste_bin = off: erased for good
+        return BIN_NONE;
+    }
+    const char* name = strrchr(path, '/');
+    name = name != nullptr ? name + 1 : path;
+    const char* dot = is_dir ? nullptr : strrchr(name, '.');
+    int baselen = dot != nullptr ? (int) (dot - name) : (int) strlen(name);
+    const char* ext = dot != nullptr ? dot : "";
+    const char* from = path;                        // (not target's buffer)
+    if (!waste_bin_make()) {
+        return BIN_FAILED;
+    }
+    bool found = false;
+    for (int n = 1; n < 100 && !found; n++) {
+        int len = n == 1 ? snprintf(target, tsize, "%s/%.*s%s", WASTE_BIN, baselen, name, ext) :
+            snprintf(target, tsize, "%s/%.*s (%d)%s", WASTE_BIN, baselen, name, n, ext);
+        found = len > 0 && len < (int) tsize && fsops::kind(Drive::EXTERNAL_SD_CARD, target) == fsops::KIND_NONE;
+    }
+    if (!found) {
+        return BIN_FAILED;
+    }
+    uint8_t r;
+    if (drive == 1) {
+        r = fsops::rename_path(Drive::EXTERNAL_SD_CARD, from, target);
+    } else {
+        r = copy_file(0, from, 1, target);
+        if (r == fsops::OK && !fsops::remove_path(Drive::INTERNAL_FLASH, from)) {
+            fsops::remove_path(Drive::EXTERNAL_SD_CARD, target);
+            r = fsops::FAILED;
+        }
+    }
+    LOG("Waste Bin: %s (drive %d) to %s: %d\n", from, drive, target, r);
+    return r == fsops::OK ? BIN_OK : BIN_FAILED;
+}
+
 // ACTION_SNAP_ERASE: the entry is a directory, which is erased only if the user types "ok"
 static const uint8_t FILEOP_IS_DIRECTORY = 4;
 static const uint8_t FILEOP_NOT_CONFIRMED = 5;
@@ -2136,6 +2369,7 @@ void nmi_action_snap_move() {
                 walk_stop();        // directories change, and none may be open; the list's memory is the buffer
                 status = copy_folder(drive, from, sizeof(from), to, sizeof(to));
                 if (status == FILEOP_OK) {
+                    tape_notes_follow_folder(drive, from, to, true);
                     move_picked = false;
                 }
                 else if (status == FILEOP_FAILED) {
@@ -2144,9 +2378,12 @@ void nmi_action_snap_move() {
             }
             else {
                 walk_stop();        // directories change, and none may be open
+                tape_eject_if_in(drive, from);
                 status = fsops::rename_path(fsops::drive_of(drive), from, to);
                 LOG("Move folder %s to %s (drive %d): %d\n", from, to, drive, status);
                 if (status == FILEOP_OK) {
+                    tape_notes_follow_folder(drive, from, to, false);
+                    tape_notes_retarget(drive, from, drive, to, true);
                     move_picked = false;
                 }
                 else if (status == FILEOP_FAILED) {
@@ -2162,13 +2399,19 @@ void nmi_action_snap_move() {
             move_full_path(here, to, sizeof(to));
             walk_stop();        // directories change, and none may be open; the cache's memory is used for the copy
             if (op == ACTION_SNAP_MOVE_OP_DO) {
+                tape_eject_if_in(move_from_drive, from);
                 status = fsops::move_file(fsops::drive_of(move_from_drive), from, fsops::drive_of(drive), to,
                     reinterpret_cast<uint8_t*>(list_pool), sizeof(list_pool));
                 LOG("Move %s (drive %d) to %s (drive %d): %d\n", from, move_from_drive, to, drive, status);
+                if (status == FILEOP_OK) {
+                    tape_note_follow(move_from_drive, from, drive, to, false);
+                    tape_notes_retarget(move_from_drive, from, drive, to, false);
+                }
             }
             else {
                 status = copy_file(move_from_drive, from, drive, to);
                 LOG("Copy %s (drive %d) to %s (drive %d): %d\n", from, move_from_drive, to, drive, status);
+                if (status == FILEOP_OK) tape_note_follow(move_from_drive, from, drive, to, true);
             }
             if (status == FILEOP_OK) {
                 move_picked = false;
@@ -2205,6 +2448,7 @@ void nmi_action_snap_move() {
                 }
                 status = copy_file(drive, from, drive, to);
                 LOG("Copy %s to %s: %d\n", from, to, status);
+                if (status == FILEOP_OK) tape_note_follow(drive, from, drive, to, true);
             }
         }
     }
@@ -2352,8 +2596,13 @@ void nmi_action_snap_rename() {
                 }
                 else {
                     walk_stop();
+                    tape_eject_if_in(drive, from);
                     status = fsops::rename_path(fsops::drive_of(drive), from, to);
                     LOG("Rename folder %s to %s: %d\n", from, to, status);
+                    if (status == FILEOP_OK) {
+                        tape_notes_follow_folder(drive, from, to, false);
+                        tape_notes_retarget(drive, from, drive, to, true);
+                    }
                     if (status == FILEOP_FAILED) {
                         set_last_error("Cannot rename", bare);
                     }
@@ -2363,8 +2612,13 @@ void nmi_action_snap_rename() {
                 entry_path(i, nullptr, from, sizeof(from));
                 entry_path(i, newname, to, sizeof(to));
                 walk_stop();
+                tape_eject_if_in(drive, from);
                 status = fsops::rename_path(fsops::drive_of(drive), from, to);
                 LOG("Rename %s to %s: %d\n", from, to, status);
+                if (status == FILEOP_OK) {
+                    tape_note_follow(drive, from, drive, to, false);
+                    tape_notes_retarget(drive, from, drive, to, false);
+                }
                 if (status == FILEOP_FAILED) {
                     set_last_error("Cannot rename", list_entry_name[i]);
                 }
@@ -2440,18 +2694,32 @@ void nmi_action_snap_erase() {
         }
     }
     else if (i >= 0 && op == ACTION_SNAP_ERASE_OP_DO) {
-        static char path[BROWSE_PATH_MAX];
+        char* path = erase_path;
+        const size_t path_size = sizeof(erase_path);
         const char* typed = reinterpret_cast<const char*>(nmi_rom_data) + param;
         if (is_rom && strcasecmp(typed, "ok") != 0) {
             status = FILEOP_NOT_CONFIRMED;      // a ROM file needs "ok" as a folder does
         }
         else if (!is_dir) {
-            entry_path(i, nullptr, path, sizeof(path));
+            entry_path(i, nullptr, path, path_size);
             walk_stop();
-            status = fsops::remove_path(fsops::drive_of(drive), path) ? FILEOP_OK : FILEOP_FAILED;
-            LOG("Erase %s: %d\n", path, status);
-            if (status != FILEOP_OK) {
-                set_last_error("Cannot erase", list_entry_name[i]);
+            tape_eject_if_in(drive, path);
+            char* target = erase_scratch;
+            BinResult bin = in_waste_bin(drive, path) ? BIN_NONE : to_waste_bin(drive, path, false, target, sizeof(erase_scratch));
+            if (bin == BIN_OK) {
+                status = FILEOP_OK;
+                tape_note_follow(drive, path, 1, target, false);
+                tape_notes_retarget(drive, path, 1, target, false);
+            } else if (bin == BIN_FAILED) {
+                status = FILEOP_FAILED;
+                set_last_error("Cannot move to", "the Waste Bin");
+            } else {
+                status = fsops::remove_path(fsops::drive_of(drive), path) ? FILEOP_OK : FILEOP_FAILED;
+                LOG("Erase %s: %d\n", path, status);
+                if (status == FILEOP_OK) tape_note_follow(drive, path, drive, nullptr, false);
+                if (status != FILEOP_OK) {
+                    set_last_error("Cannot erase", list_entry_name[i]);
+                }
             }
         }
         else {
@@ -2460,16 +2728,31 @@ void nmi_action_snap_erase() {
                 status = FILEOP_NOT_CONFIRMED;
             }
             else {
-                dir_entry_path(i, path, sizeof(path));
+                dir_entry_path(i, path, path_size);
                 walk_stop();        // none of the directories may be open, and the list's memory is free
-                static char scratch[BROWSE_PATH_MAX + 8];
-                bool ok = fsops::remove_tree(fsops::drive_of(drive), path, sizeof(path), find_dirs, 0, ERASE_MAX_DEPTH,
-                    scratch, sizeof(scratch));
-                LOG("Erase directory %s: %d\n", path, ok);
-                status = ok ? FILEOP_OK : FILEOP_FAILED;
-                if (!ok) {
-                    set_last_error("Cannot erase", list_entry_name[i]);
+                tape_eject_if_in(drive, path);
+                char* scratch = erase_scratch;
+                const size_t scratch_size = sizeof(erase_scratch);
+                BinResult bin = in_waste_bin(drive, path) ? BIN_NONE : to_waste_bin(drive, path, true, scratch, scratch_size);
+                bool ok;
+                if (bin == BIN_OK) {
+                    ok = true;
+                    tape_notes_follow_folder(drive, path, scratch, false);     // the notes go with it
+                    tape_notes_retarget(drive, path, 1, scratch, true);
+                } else if (bin == BIN_FAILED) {
+                    ok = false;
+                    set_last_error("Cannot move to", "the Waste Bin");
+                } else {
+                    ok = fsops::remove_tree(fsops::drive_of(drive), path, path_size, find_dirs, 0, ERASE_MAX_DEPTH,
+                        scratch, scratch_size);
+                    LOG("Erase directory %s: %d\n", path, ok);
+                    if (ok) {
+                        tape_notes_follow_folder(drive, path, nullptr, false);
+                    } else {
+                        set_last_error("Cannot erase", list_entry_name[i]);
+                    }
                 }
+                status = ok ? FILEOP_OK : FILEOP_FAILED;
             }
         }
     }
@@ -2675,7 +2958,10 @@ void nmi_action_sna_save_dir() {
         // "<game> Save Game", in the game's folder, if the game is known and its folder is there
         char quick[SAVE_NAME_MAX + 1];
         // no game loaded since the Spectrum started or was reset: status 254, the ROM says so
-        size_t len = !game_running ? 0 : last_game_usable() ? extras::quick_save_name(last_game_name, SAVE_NAME_MAX, quick) : 0;
+        // (a slot, "/Save Games/Exolon/Slot 2", is "Exolon Save Game"; Q puts it in the slot, though)
+        char game[screengrab::NAME_MAX + 1];
+        const char* named = slots::folder_game(last_game_dir) != nullptr && slot_game_now(game) > 0 ? game : last_game_name;
+        size_t len = !game_running ? 0 : last_game_usable() ? extras::quick_save_name(named, SAVE_NAME_MAX, quick) : 0;
         if (len > 0) {
             memcpy(nmi_rom_data + destoffset, quick, len + 1);
             status = (uint8_t) len;
@@ -2759,7 +3045,153 @@ static bool write_snapshot_file(Sink& sink, uint8_t format) {
     return sink.write(buf, SNA_FILE_SIZE);
 }
 
+// ---- Save slots (slots.h): nine saves of each game in /Save Games/<game> on the SD card ----
+
+// The name a game's grabs and slots go by: a file in a slot folder ("/Save Games/Exolon/Slot 2")
+// is the folder's game, anything else its own name without " Save Game" (screengrab::base_name)
+static size_t game_base(const char* dir, const char* name, char* out) {
+    const char* folder = slots::folder_game(dir);
+    if (folder != nullptr && slots::parse(name, nullptr, 0) != 0) {
+        return screengrab::base_name(folder, out);
+    }
+    return screengrab::base_name(name, out);
+}
+
+// The game being played, for its slots: 0 if none is known
+static size_t slot_game_now(char* out) {
+    out[0] = '\0';
+    if (!last_game_known || !game_running) return 0;
+    return game_base(last_game_dir, last_game_name, out);
+}
+
+struct SlotEntry {
+    bool used;
+    char label[slots::LABEL_MAX + 1];
+    char ext[4];
+};
+
+// The SD calls here use the static grab_dir and no FileHandle: core 0's stack is small, and
+// a save's snapshot is in snap_load_buffer. The slot used last is the name of an empty folder,
+// ".last3" (a dot name: never listed), so it is changed with a rename, not a file.
+static DirHandle grab_dir;          // (also the screen grabs' folder being looked through)
+
+// Reads a game's slot folder: e[0..8] for slots 1 to 9. Returns the slot used last (0 none).
+__attribute__((noinline)) static int slots_scan(const char* game, SlotEntry* e) {
+    for (int i = 0; i < slots::COUNT; i++) e[i] = SlotEntry();
+    if (!sd_card_mounted) return 0;
+    char path[sizeof(sd_cwd) + 8];
+    snprintf(path, sizeof(path), "/sd%s/%s", slots::FOLDER, game);
+    int last = 0;
+    DirHandle& d = grab_dir;
+    if (d.open(path)) {
+        while (!d.atEnd()) {
+            const char* fn = d.fileName();
+            if (d.isDirectory()) {
+                if (strncasecmp(fn, slots::LAST_FILE, sizeof(slots::LAST_FILE) - 1) == 0) {
+                    int n = slots::parse_last(fn + sizeof(slots::LAST_FILE) - 1, strlen(fn + sizeof(slots::LAST_FILE) - 1));
+                    if (n > 0 && fn[sizeof(slots::LAST_FILE)] == '\0') last = n;
+                }
+            } else {
+                char name[80];
+                snprintf(name, sizeof(name), "%s", fn);
+                char* dot = strrchr(name, '.');
+                if (dot != nullptr && (strcasecmp(dot + 1, "sna") == 0 || strcasecmp(dot + 1, "z80") == 0 ||
+                        strcasecmp(dot + 1, "szx") == 0)) {
+                    *dot = '\0';
+                    char label[slots::LABEL_MAX + 1];
+                    int n = slots::parse(name, label, sizeof(label));
+                    if (n > 0 && !e[n - 1].used) {
+                        e[n - 1].used = true;
+                        snprintf(e[n - 1].label, sizeof(e[n - 1].label), "%s", label);
+                        snprintf(e[n - 1].ext, sizeof(e[n - 1].ext), "%s", dot + 1);
+                    }
+                }
+            }
+            if (!d.next()) break;
+        }
+        d.close();
+    }
+    return last;
+}
+
+// Marks slot n as the one used last: renames the ".lastN" folder (or makes one)
+static void slots_write_last(const char* game, int n, int was) {
+    if (n == was) return;
+    char to[sizeof(sd_cwd) + 16];
+    snprintf(to, sizeof(to), "%s/%s/%s%d", slots::FOLDER, game, slots::LAST_FILE, n);
+    uint8_t r;
+    if (was > 0) {
+        snprintf(erase_scratch, sizeof(erase_scratch), "%s/%s/%s%d", slots::FOLDER, game, slots::LAST_FILE, was);
+        r = fsops::rename_path(Drive::EXTERNAL_SD_CARD, erase_scratch, to);
+    } else {
+        walk_stop();
+        ff_pool = reinterpret_cast<unsigned char*>(list_pool);
+        ff_pool_size = sizeof(list_pool);
+        r = fsops::make_dir(Drive::EXTERNAL_SD_CARD, to);
+        ff_pool = nullptr;
+        ff_pool_size = 0;
+    }
+    LOG("Slots: %s is the last (%d)\n", to, r);
+}
+
+// Makes /Save Games and /Save Games/<game>: true if the folder is there
+static bool slots_folder_make(const char* game, char* path, size_t size) {
+    snprintf(path, size, "%s/%s", slots::FOLDER, game);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_DIR) return true;
+    walk_stop();
+    ff_pool = reinterpret_cast<unsigned char*>(list_pool);
+    ff_pool_size = sizeof(list_pool);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, slots::FOLDER) != fsops::KIND_DIR) {
+        fsops::make_dir(Drive::EXTERNAL_SD_CARD, slots::FOLDER);
+    }
+    uint8_t made = fsops::make_dir(Drive::EXTERNAL_SD_CARD, path);
+    ff_pool = nullptr;
+    ff_pool_size = 0;
+    if (made != FILEOP_OK) set_last_error("Cannot make", path);
+    return made == FILEOP_OK;
+}
+
+// What ACTION_SNA_SAVE's slot save (param3 = 3, or Q on a game with a slot used) saves to
+static uint8_t slot_target = 0;
+static char slot_target_label[slots::LABEL_MAX + 1];
+
+// After slot n of game was saved as name.ext: any other file of that slot (another label or
+// type) is removed, and n is the slot used last
+static void slots_after_save(const char* game, int n, const char* name, const char* ext) {
+    char path[sizeof(sd_cwd) + 8];
+    snprintf(path, sizeof(path), "/sd%s/%s", slots::FOLDER, game);
+    DirHandle& d = grab_dir;
+    for (int round = 0; round < slots::COUNT && d.open(path); round++) {
+        bool removed = false;
+        while (!d.atEnd()) {
+            char f[80];
+            snprintf(f, sizeof(f), "%s", d.fileName());
+            char* dot = strrchr(f, '.');
+            if (!d.isDirectory() && dot != nullptr) {
+                *dot = '\0';
+                if (slots::parse(f, nullptr, 0) == n && !(strcmp(f, name) == 0 && strcasecmp(dot + 1, ext) == 0)) {
+                    *dot = '.';
+                    d.close();
+                    snprintf(erase_scratch, sizeof(erase_scratch), "%s/%s/%s", slots::FOLDER, game, f);
+                    fsops::remove_path(Drive::EXTERNAL_SD_CARD, erase_scratch);
+                    tape_note_follow(1, erase_scratch, 1, nullptr, false);
+                    removed = true;
+                    break;
+                }
+            }
+            if (!d.next()) break;
+        }
+        if (!removed) {
+            d.close();
+            break;
+        }
+    }
+    SlotEntry e[slots::COUNT];
+    slots_write_last(game, n, slots_scan(game, e));
+}
+
 // Saves the snapshot sent by the NMI rom (in snap_load_buffer) in the place
+
 // chosen with ACTION_SNA_SAVE_DIR, as a .sna file or a .z80 file.  Left to
 // itself it is a .sna file for a 48K machine and a .z80 file for a 128K one.
 // WORD param1 = pointer to file name to save, without its extension
@@ -2768,18 +3200,48 @@ static bool write_snapshot_file(Sink& sink, uint8_t format) {
 // BYTE param3 = 1 to save in the last game's folder (see
 //               ACTION_SNA_SAVE_DIR_OP_LAST) instead of the chosen one; 2 for a quick save,
 //               which goes in the Save Games folder of the SD card (made if it is not there)
+//               3 for a save slot: slot_target of the game being played (the name is not used)
 // BYTE param4 = the file type: ACTION_SNA_SAVE_TYPE_AUTO, _SNA, _Z80 or _SZX
 // status is 0 for success, 1 if the file exists, 2 for any other error
+// A quick save (Q) of a game with a slot used goes in the slot used last, over what is there.
 void nmi_action_sna_save() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint16_t nameoffset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
     uint8_t overwrite = nmi_rom_data[4];
     bool over_last = nmi_rom_data[5] != 0;
     bool quick = nmi_rom_data[5] == 2;
+    bool slot_save = nmi_rom_data[5] == 3;
     uint8_t type = nmi_rom_data[6];
     const char* dir;
     uint8_t drive;
-    if (quick) {
+    char slot_game[screengrab::NAME_MAX + 1] = "";
+    if ((quick || slot_save) && sd_card_mounted && slot_game_now(slot_game) > 0) {
+        if (quick) {
+            SlotEntry e[slots::COUNT];
+            int last = slots_scan(slot_game, e);
+            if (last > 0) {
+                slot_save = true;
+                slot_target = (uint8_t) last;
+                snprintf(slot_target_label, sizeof(slot_target_label), "%s", e[last - 1].label);
+            }
+        }
+    } else if (slot_save) {
+        nmi_rom_data[0] = FILEOP_FAILED;
+        return;
+    }
+    if (slot_save) {
+        quick = false;
+        over_last = false;
+        if (slot_target < 1 || slot_target > slots::COUNT || !slots_folder_make(slot_game, erase_path, sizeof(erase_path))) {
+            nmi_rom_data[0] = FILEOP_FAILED;
+            return;
+        }
+        drive = 1;
+        dir = erase_path;
+        overwrite = 1;
+        type = cfg.save_type;
+    }
+    else if (quick) {
         drive = quick_save_place(&dir);
         if (drive == 1) {
             walk_stop();
@@ -2826,10 +3288,26 @@ void nmi_action_sna_save() {
     const char* extension = format == ACTION_SNA_SAVE_TYPE_SZX ? "szx" :
         format == ACTION_SNA_SAVE_TYPE_Z80 ? "z80" : "sna";
     LOG("Saving %s with name: %s, overwrite=%d, drive %d, %s/\n",
-        extension, nmi_rom_data + nameoffset, overwrite, drive, dir);
+        extension, slot_save ? "(slot)" : (const char*) nmi_rom_data + nameoffset, overwrite, drive, dir);
     char name[64];
-    snprintf(name, sizeof(name), "%s", reinterpret_cast<const char*>(nmi_rom_data) + nameoffset);
+    if (slot_save) {
+        slots::name(slot_target, slot_target_label, name, sizeof(name));
+    } else {
+        snprintf(name, sizeof(name), "%s", reinterpret_cast<const char*>(nmi_rom_data) + nameoffset);
+    }
 
+    // Picomenu.ini's quick_save: a quick save over one already there overwrites it, or is the
+    // next number, with no question
+    if (quick && overwrite == 0 && cfg.quick_save != settings::QUICK_ASK) {
+        char probe[sizeof(name)];
+        snprintf(probe, sizeof(probe), "%s", name);
+        if (tidy_new_name(probe)) {
+            snprintf(grab_path, sizeof(grab_path), "%s/%s.%s", dir, probe, extension);
+            if (fsops::kind(fsops::drive_of(drive), grab_path) != fsops::KIND_NONE) {
+                overwrite = cfg.quick_save == settings::QUICK_OVERWRITE ? 1 : 2;
+            }
+        }
+    }
     if (overwrite == 2) {
         // keep the earlier save: use the first number from 2 that is not taken
         overwrite = 0;
@@ -2885,6 +3363,7 @@ void nmi_action_sna_save() {
         }
 
         if (ok) {
+            tape_note_after_save(0, filename);
             static char saved_dir[sizeof(last_game_dir)];
             snprintf(saved_dir, sizeof(saved_dir), "%s", dir);     // dir may be last_game_dir
             remember_last_game(0, saved_dir, name);
@@ -2918,7 +3397,11 @@ void nmi_action_sna_save() {
         }
         LOG("Save %s: %d\n", path, fr);
         status = fr == FR_OK ? FILEOP_OK : fr == FR_EXIST ? FILEOP_NAME_IN_USE : FILEOP_FAILED;
+        if (fr == FR_OK && slot_save) {
+            slots_after_save(slot_game, slot_target, name, extension);
+        }
         if (fr == FR_OK) {
+            tape_note_after_save(1, path);
             static char saved_dir[sizeof(last_game_dir)];
             snprintf(saved_dir, sizeof(saved_dir), "%s", dir);     // dir may be last_game_dir
             remember_last_game(1, saved_dir, name);
@@ -2945,38 +3428,78 @@ void nmi_action_snap_find() {
 
 
 
+static const char ROMS_FOLDER[] = "/ROMS";     // on the SD card: ROM files (Set up SD card makes it, hidden)
+static FileHandle* notes_handle();
+
+// C - Change ROM lists the .rom files of one place: the root of the internal flash, or the SD
+// card's ROMS folder. The list starts with Internal Rom and an entry that shows the other place
+// (choosing it lists that place: the ROM reads the list again when a choice does not leave).
+static uint8_t rom_source = 0;              // 0 the flash, 1 the SD card's ROMS folder
+static const char ROM_SHOW_SD[] = "Show SD card /ROMS";
+static const char ROM_SHOW_FLASH[] = "Show internal flash";
+
 void nmi_action_list_rom() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint16_t start =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
     uint16_t destoffset =  (nmi_rom_data[5] << 8) |  nmi_rom_data[4];
     uint16_t stringoffset = destoffset + 22;
+    if (rom_source == 1 && !sd_card_mounted) rom_source = 0;
 
-    LOG("List roms starting at %d and storing at %X\n", start, destoffset);
-
-    int dir = pico_dir_open("/");
-    struct lfs_info info;
+    LOG("List roms (%s) starting at %d and storing at %X\n", rom_source ? "SD /ROMS" : "flash", start, destoffset);
 
     nmi_rom_data[destoffset] = 0;
     nmi_rom_data[destoffset + 1] = 0;
-    int16_t foundsofar = 1;
-
-    if (start == 0) {
-        add_file_to_list("Internal Rom\0int", destoffset, stringoffset);
+    int index = 0;
+    bool room = true;
+    auto out = [&](const char* nameAndExt) {
+        if (room && index >= start) room = add_file_to_list(nameAndExt, destoffset, stringoffset);
+        index++;
+    };
+    char entry[40];
+    out("Internal Rom\0int");
+    if (rom_source == 1 || sd_card_mounted) {
+        snprintf(entry, sizeof(entry), "%s", rom_source == 0 ? ROM_SHOW_SD : ROM_SHOW_FLASH);
+        entry[strlen(entry) + 1] = '\0';
+        memcpy(entry + strlen(entry) + 1, "src", 4);
+        out(entry);
     }
-
-    while (pico_dir_read(dir, &info) > 0) {
-        if (info.type == LFS_TYPE_REG) {
-            const char* ext = split_filename_and_get_ext(info.name);
-            if (strcasecmp(ext, "rom") == 0) {
-                if (foundsofar >= start) {
-                    if (!add_file_to_list(info.name, destoffset, stringoffset))
-                        break;
-                }
-                foundsofar++;
+    // the .rom files, gathered in list_pool ("name", "rom") and put in order
+    walk_stop();
+    uint16_t* offs = reinterpret_cast<uint16_t*>(list_pool);
+    const int MAX = 300;
+    int count = 0;
+    size_t used = MAX * sizeof(uint16_t);
+    auto keep = [&](const char* n) {
+        size_t len = strlen(n);
+        if (len <= 4 || len >= 64 || n[0] == '.' || strcasecmp(n + len - 4, ".rom") != 0) return;
+        if (count >= MAX || used + len + 1 > LIST_POOL_SIZE) return;
+        memcpy(list_pool + used, n, len + 1);
+        list_pool[used + len - 4] = '\0';         // "name\0rom"
+        offs[count++] = (uint16_t) used;
+        used += len + 1;
+    };
+    if (rom_source == 0) {
+        int dir = pico_dir_open("/");
+        struct lfs_info info;
+        while (dir >= 0 && pico_dir_read(dir, &info) > 0) {
+            if (info.type == LFS_TYPE_REG) keep(info.name);
+        }
+        if (dir >= 0) pico_dir_close(dir);
+    } else {
+        DirHandle& d = find_dirs[0];
+        if (d.open("/sd/ROMS")) {
+            while (!d.atEnd()) {
+                if (!d.isDirectory() && !d.isSystem()) keep(d.fileName());
+                if (!d.next()) break;
             }
+            d.close();
         }
     }
-    pico_dir_close(dir);
+    sort_u16(offs, (size_t) count, [](const void* x, const void* y) {
+        return strcasecmp(list_pool + *(const uint16_t*) x, list_pool + *(const uint16_t*) y);
+    });
+    for (int i = 0; i < count && room; i++) out(list_pool + offs[i]);
+    walk_stop();                    // (list_pool was used)
 }
 
 void nmi_action_change_rom() {
@@ -2996,11 +3519,32 @@ void nmi_action_change_rom() {
     LOG("Rom File name and extension: %s\n", filename);
     LOG("Writable: %d\n", makeWritable);
 
+    if (strcmp(ext, "src") == 0) {
+        // the other place's .rom files: status 2, the ROM lists them
+        rom_source = rom_source == 0 && sd_card_mounted ? 1 : 0;
+        nmi_rom_data[0] = 2;
+        return;
+    }
     if (strcmp(filename, "Internal Rom.int") == 0) {
          // disable PICO from supplying its own rom when the nmi routine exits
          // and thereby return to the Spectrum internal ROM
         rom_state.flags_on_nmi_exit = 0;
         rom_state.writableStartAddress = 32768;
+        nmi_rom_data[0] = 0;
+    }
+    else if (rom_source == 1) {
+        // the SD card's ROMS folder
+        char path[160];
+        snprintf(path, sizeof(path), "%s/%s", ROMS_FOLDER, filename);
+        FileHandle& f = *notes_handle();
+        if (!f.open(Drive::EXTERNAL_SD_CARD, path, true)) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        f.read(rom_data, 16384);
+        f.close();
+        rom_state.flags_on_nmi_exit = 1;
+        rom_state.writableStartAddress = makeWritable ? 64 : 32768;
         nmi_rom_data[0] = 0;
     }
     else {
@@ -3073,12 +3617,16 @@ static bool running_48k = false;
 static const uint8_t PORT_7FFD_48K = 0x10;              // bank 0, 48K ROM
 static const uint8_t PORT_7FFD_48K_LOCKED = 0x30;
 
-// Lock the paging port for a tape loaded through the ROM trap, as "48 BASIC" does?  A
-// locked port ignores all writes until the Spectrum is really reset, so a long press of
-// the button could not then get back to the 128K start up (ROM 0).  Off: the tape runs
-// with bank 0 and the 48K ROM paged in but the port unlocked.  Turn it on if a 48K
-// game that writes to ports it should not misbehaves on a 128K machine.
-static const bool TAPE_LOCK_PAGING = false;
+// Lock the paging port for a 48K program, as "48 BASIC" does (lock_48k in Picomenu.ini):
+// tapes (the default) when a tape is being played by the trap (a tape loaded with its number,
+// or a 48K snapshot that carries on with its tape), always, or off. A 48K/128K game left
+// unlocked finds the 128's memory and acts as the 128K version: Out Run, converted as 48K,
+// then took its 48K stage for a 128K one and crashed. A locked port ignores all writes until
+// the Spectrum is really reset, so a long press of the button then gets to 48 BASIC, not the
+// 128's start up menu (the Spectrum's own reset button does).
+static bool lock_48k_now() {
+    return cfg.lock_48k == 2 || (cfg.lock_48k == 1 && tape_trap_running());
+}
 static const uint8_t PORT_7FFD_128K_ROM0 = 0x00;         // bank 0, the 128K editor ROM, not locked
 
 // Set by ACTION_PREPARE_LOAD: the snapshot is already in the buffer, so the next
@@ -3128,7 +3676,7 @@ void nmi_action_begin_snap_read() {
         LOG("Sending Z80 file header\n");
         nmi_rom_data[2] = 1;
         nmi_rom_data[3] = reset_to_128k_pending ? PORT_7FFD_128K_ROM0 :
-            (TAPE_LOCK_PAGING && tape_trap_running()) ? PORT_7FFD_48K_LOCKED : PORT_7FFD_48K;
+            lock_48k_now() ? PORT_7FFD_48K_LOCKED : PORT_7FFD_48K;
         memcpy(nmi_rom_data + headeroffset, current_snap_data, Z80_HEADER_SIZE);
         current_snap_offset = Z80_HEADER_SIZE;
     }
@@ -3136,7 +3684,7 @@ void nmi_action_begin_snap_read() {
         LOG("Sending SNA file header\n");
         nmi_rom_data[2] = 0;
         nmi_rom_data[3] = reset_to_128k_pending ? PORT_7FFD_128K_ROM0 :
-            (TAPE_LOCK_PAGING && tape_trap_running()) ? PORT_7FFD_48K_LOCKED : PORT_7FFD_48K;
+            lock_48k_now() ? PORT_7FFD_48K_LOCKED : PORT_7FFD_48K;
         memcpy(nmi_rom_data + headeroffset, current_snap_data, SNA_HEADER_SIZE);
         current_snap_offset = SNA_HEADER_SIZE;
     }
@@ -3157,12 +3705,14 @@ static const uint8_t PREPARE_LOAD_RESET_128K = 2;
 static const uint8_t PREPARE_LOAD_DIAGNOSTIC = 3;
 static const uint8_t PREPARE_LOAD_RECENT = 4;           // BYTE param2 = the game from 0 (ACTION_RECENT_LIST)
 
-// The diagnostic ROMs, kept in the top folder of the internal flash so that Browse Games can
+// The diagnostic ROMs, kept in the top folder of the internal flash (or the SD card's ROMS folder)
+// so that Browse Games can
 // copy them there: Brendan Alford's zx-diagnostics testrom.bin as testrom.rom (which = 0)
 // and Phil Ruston's DiagROM as DiagROM.rom (which = 1).  The .bin name, and for DiagROM a
 // name with no extension, are found too, in any case.  The first 16384 bytes are put in place
 // of the Spectrum's ROM.
 // Returns 0, 1 if there is no such file, 2 if it is too short.
+static FileHandle* notes_handle();
 static uint8_t use_diagnostic_rom(uint8_t which) {
     static const char* const names[2][3] = {
         { "testrom.rom", "testrom.bin", nullptr },
@@ -3194,16 +3744,35 @@ static uint8_t use_diagnostic_rom(uint8_t which) {
         }
         pico_dir_close(dir);
     }
-    if (found[0] == '\0') {
-        return 1;
+    bool whole = false;
+    if (found[0] != '\0') {
+        int file = pico_open(found, LFS_O_RDONLY);
+        if (file < 0) {
+            return 1;
+        }
+        whole = pico_size(file) >= 16384 && pico_read(file, rom_data, 16384) == 16384;   // size first: rom_data is in use
+        pico_close(file);
+    } else {
+        // not on the flash: the SD card's ROMS folder (its names in any case, as the card has them)
+        FileHandle& f = *notes_handle();
+        for (int n = 0; n < 3 && found[0] == '\0'; n++) {
+            if (wanted[n] == nullptr || !sd_card_mounted) continue;
+            char path[48];
+            snprintf(path, sizeof(path), "/ROMS/%s", wanted[n]);
+            if (f.open(Drive::EXTERNAL_SD_CARD, path, true)) {
+                snprintf(found, sizeof(found), "%s", path);
+                whole = f.size() >= 16384 && f.read(rom_data, 16384) == 16384;
+                f.close();
+            }
+        }
+        if (found[0] == '\0') {
+            return 1;
+        }
     }
-    int file = pico_open(found, LFS_O_RDONLY);
-    if (file < 0) {
-        return 1;
-    }
-    bool whole = pico_size(file) >= 16384 && pico_read(file, rom_data, 16384) == 16384;   // size first: rom_data is in use
-    pico_close(file);
     if (!whole) {
+        if (tape_in) {
+            tape_in_hook_to_rom();      // a tape put in with T is still in: its hook was read over
+        }
         return 2;
     }
     LOG("Diagnostic ROM %s\n", found);
@@ -3272,10 +3841,12 @@ static void nmi_action_prepare_load() {
     }
     else {
         LOG("Reset into %s\n", what == PREPARE_LOAD_RESET_128K ? "128K" : "48K");
-        tape_service_stop();
+        if (!tape_in) {
+            tape_service_stop();        // a tape put in with T stays in (the Tape Loader, LOAD "")
+        }
         snap_is_paged = false;
         tap_make_reset_snapshot();
-        game_running = false;
+        game_running = tape_in;         // its game is still the one Q saves
         menu_reset_128k = what == PREPARE_LOAD_RESET_128K;
         reset_to_128k_pending = menu_reset_128k;
         snap_prepared = true;
@@ -3447,7 +4018,7 @@ __attribute__((noinline)) static void tape_text(char* out, size_t max, const cha
         add("Data blocks: %u\n", s.standard, 0, 0);
     }
     if (n < max) n += snprintf(out + n, max - n, "PicoMenu can load: %s\n%s\n", *say, reason);
-    if (n < max) n += snprintf(out + n, max - n, "\n\x01Press C to convert this .tzx or\n\x01.tap into a .z80\n");
+    if (n < max) n += snprintf(out + n, max - n, "\n\x01" "C converts this tape to a .z80\n");
     if (n >= max) {
         n = max - 1;
     }
@@ -3547,12 +4118,356 @@ static void nmi_action_snap_preview() {
     const char* fileAndExt = list_entry_name_for(nameoffset,
         reinterpret_cast<const char*>(nmi_rom_data + nameoffset));
     const char* ext = fileAndExt + strlen(fileAndExt) + 1;
+    if (!is_snapshot_ext(ext)) {
+        nmi_rom_data[0] = 3;        // V is for games only (.tap .tzx .sna .z80 .szx): the ROM says so
+        return;
+    }
     static char filename[BROWSE_PATH_MAX];
     snprintf(filename, sizeof(filename), "%s/%s.%s", list_entry_dir_for(nameoffset), fileAndExt, ext);
     nmi_rom_data[0] = find_preview(drive, filename, ext);
     snprintf(info_name, sizeof(info_name), "%s", fileAndExt);
     // a screen of nothing but zeros is no picture: only the screen grabs are cycled then
     info_source = (preview_screen != nullptr && !gameinfo::screen_is_blank(preview_screen)) ? preview_screen : nullptr;
+}
+
+static void help_put_text(uint8_t* screen, int row, int col, const char* text, int len, uint8_t attr);
+
+// ---- S on the menu: the save slots screen (ACTION_SLOTS), and the question when a game with
+// slots is loaded (ACTION_SLOT_ASK). Both are drawn by the pico and take the keys (picoscreen).
+enum SlotState : uint8_t { SLOT_LIST, SLOT_OVERWRITE, SLOT_PICK_LABEL, SLOT_TYPING, SLOT_PICK_VIEW, SLOT_VIEWING,
+    SLOT_PICK_ERASE, SLOT_ERASE };
+static SlotState slot_state = SLOT_LIST;
+static uint8_t slot_pick = 0;
+static char slot_typed[slots::LABEL_MAX + 1];
+static const char* slot_msg = nullptr;
+
+static bool is_key_break(uint8_t key) { return key == notes::KEY_BREAK; }
+
+// The slots, one on each of rows 2 to 10. only_used: the empty ones are left out (the question).
+static void slots_draw_list(uint8_t* screen, const SlotEntry* e, int last, bool only_used) {
+    int row = 2;
+    for (int i = 0; i < slots::COUNT; i++) {
+        if (only_used && !e[i].used) continue;
+        char t[40];
+        snprintf(t, sizeof(t), "%d", i + 1);
+        help_put_text(screen, row, 1, t, 1, gameinfo::ATTR_HEADING);
+        if (!e[i].used) {
+            help_put_text(screen, row, 3, "- empty -", 9, gameinfo::ATTR_DIM);
+        } else {
+            const char* label = e[i].label[0] != '\0' ? e[i].label : "Saved game";
+            help_put_text(screen, row, 3, label, (int) strlen(label), e[i].label[0] != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+            snprintf(t, sizeof(t), ".%s", e[i].ext);
+            help_put_text(screen, row, 21, t, (int) strlen(t), gameinfo::ATTR_DIM);
+            if (i + 1 == last) help_put_text(screen, row, 27, "last", 4, gameinfo::ATTR_HEADING);
+        }
+        row++;
+    }
+}
+
+static void slots_banner(uint8_t* screen, const char* lead, const char* game) {
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    char t[40];
+    snprintf(t, sizeof(t), "%s%s", lead, game);
+    help_put_text(screen, 0, 1, t, (int) strlen(t), gameinfo::ATTR_BANNER);
+}
+
+// ACTION_SLOTS: BYTE param1 = the key (0: opened). Status 0 the screen stays; 1 closed (back to
+// the menu); 2 the Save snapshot screen instead; 3 save now, to slot_target (the ROM sends the
+// snapshot, then ACTION_SNA_SAVE with param3 = 3). With save_screen = named in Picomenu.ini,
+// no SD card, or no game known, it is 2 straight away.
+__attribute__((noinline)) static void nmi_action_slots() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    char game[screengrab::NAME_MAX + 1];
+    if (key == 0) {
+        slot_state = SLOT_LIST;
+        slot_msg = nullptr;
+        if (!cfg.save_screen_slots || !sd_card_mounted || slot_game_now(game) == 0) {
+            nmi_rom_data[0] = 2;
+            return;
+        }
+    }
+    if (slot_game_now(game) == 0) {
+        nmi_rom_data[0] = 1;
+        return;
+    }
+    SlotEntry e[slots::COUNT];
+    int last = slots_scan(game, e);
+    const int n = key >= '1' && key <= '9' ? key - '0' : 0;
+    const bool back = is_key_break(key) || key == 'x' || key == 'X';
+    if (key != 0) slot_msg = nullptr;
+    switch (key == 0 ? SLOT_LIST : slot_state) {
+    case SLOT_LIST:
+        if (key == 0) break;
+        if (n > 0 && e[n - 1].used) {
+            slot_pick = (uint8_t) n;
+            slot_state = SLOT_OVERWRITE;
+        } else if (n > 0) {
+            slot_target = (uint8_t) n;
+            slot_target_label[0] = '\0';
+            nmi_rom_data[0] = 3;
+            return;
+        } else if (key == 'l' || key == 'L') {
+            slot_state = SLOT_PICK_LABEL;
+        } else if (key == 'v' || key == 'V') {
+            slot_state = SLOT_PICK_VIEW;
+        } else if (key == 'e' || key == 'E') {
+            slot_state = SLOT_PICK_ERASE;
+        } else if (key == 's' || key == 'S') {
+            nmi_rom_data[0] = 2;
+            return;
+        } else if (back) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        break;
+    case SLOT_OVERWRITE:
+        if (key == 'y' || key == 'Y') {
+            slot_target = slot_pick;
+            snprintf(slot_target_label, sizeof(slot_target_label), "%s", e[slot_pick - 1].label);
+            nmi_rom_data[0] = 3;
+            return;
+        }
+        slot_state = SLOT_LIST;
+        break;
+    case SLOT_PICK_LABEL:
+    case SLOT_PICK_VIEW:
+    case SLOT_PICK_ERASE:
+        if (back) {
+            slot_state = SLOT_LIST;
+        } else if (n > 0) {
+            slot_pick = (uint8_t) n;
+            if (slot_state == SLOT_PICK_LABEL) {
+                snprintf(slot_typed, sizeof(slot_typed), "%s", e[n - 1].label);
+                slot_state = SLOT_TYPING;
+            } else if (!e[n - 1].used) {
+                slot_msg = "That slot is empty";
+                slot_state = SLOT_LIST;
+            } else if (slot_state == SLOT_PICK_ERASE) {
+                slot_state = SLOT_ERASE;
+            } else {
+                char file[80];
+                slots::name(n, e[n - 1].label, file, sizeof(file));
+                snprintf(erase_path, sizeof(erase_path), "%s/%s/%s.%s", slots::FOLDER, game, file, e[n - 1].ext);
+                preview_screen = nullptr;
+                if (find_preview(1, erase_path, e[n - 1].ext) == 0 && preview_screen != nullptr) {
+                    slot_state = SLOT_VIEWING;
+                    nmi_rom_data[0] = 0;        // the slot's own screen until a key is pressed
+                    return;
+                }
+                slot_msg = "No picture in that slot";
+                slot_state = SLOT_LIST;
+            }
+        }
+        break;
+    case SLOT_TYPING: {
+        size_t len = strlen(slot_typed);
+        if (is_key_break(key)) {
+            slot_state = SLOT_LIST;
+        } else if (key == notes::KEY_DELETE) {
+            if (len > 0) slot_typed[len - 1] = '\0';
+        } else if (key == notes::KEY_ENTER || key == 13) {
+            slots::tidy_label(slot_typed);
+            slot_state = SLOT_LIST;
+            if (!e[slot_pick - 1].used) {
+                slot_target = slot_pick;            // an empty slot: saved now, with its label
+                snprintf(slot_target_label, sizeof(slot_target_label), "%s", slot_typed);
+                nmi_rom_data[0] = 3;
+                return;
+            }
+            char from[80], to[80];
+            slots::name(slot_pick, e[slot_pick - 1].label, from, sizeof(from));
+            slots::name(slot_pick, slot_typed, to, sizeof(to));
+            if (strcmp(from, to) != 0) {
+                snprintf(erase_path, sizeof(erase_path), "%s/%s/%s.%s", slots::FOLDER, game, from, e[slot_pick - 1].ext);
+                snprintf(erase_scratch, sizeof(erase_scratch), "%s/%s/%s.%s", slots::FOLDER, game, to, e[slot_pick - 1].ext);
+                walk_stop();
+                uint8_t r = fsops::rename_path(Drive::EXTERNAL_SD_CARD, erase_path, erase_scratch);
+                if (r == FILEOP_OK) {
+                    tape_note_follow(1, erase_path, 1, erase_scratch, false);
+                    slot_msg = "Label saved";
+                } else {
+                    slot_msg = "Could not change the label";
+                }
+                last = slots_scan(game, e);
+            }
+        } else if (slots::label_char(key) && len < slots::LABEL_MAX) {
+            slot_typed[len] = (char) key;
+            slot_typed[len + 1] = '\0';
+        }
+        break;
+    }
+    case SLOT_VIEWING:
+        slot_state = SLOT_LIST;
+        break;
+    case SLOT_ERASE:
+        if (key == 'y' || key == 'Y') {
+            char file[80];
+            slots::name(slot_pick, e[slot_pick - 1].label, file, sizeof(file));
+            snprintf(erase_path, sizeof(erase_path), "%s/%s/%s.%s", slots::FOLDER, game, file, e[slot_pick - 1].ext);
+            walk_stop();
+            BinResult bin = to_waste_bin(1, erase_path, false, erase_scratch, sizeof(erase_scratch));
+            bool ok = bin == BIN_OK || (bin == BIN_NONE && fsops::remove_path(Drive::EXTERNAL_SD_CARD, erase_path));
+            if (ok) tape_note_follow(1, erase_path, 1, bin == BIN_OK ? erase_scratch : nullptr, false);
+            slot_msg = !ok ? "Could not erase it" : bin == BIN_OK ? "Moved to the Waste Bin" : "Erased";
+            last = slots_scan(game, e);
+        }
+        slot_state = SLOT_LIST;
+        break;
+    }
+
+    slots_banner(screen, "Save slots: ", game);
+    slots_draw_list(screen, e, last, false);
+    help_put_text(screen, 13, 1, "1-9", 3, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 13, 5, "Save to a slot", 14, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 14, 1, "L-Label  V-View  E-Erase", 24, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 15, 1, "S-Save snapshot (own name)", 26, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 16, 1, "X-Exit", 6, gameinfo::ATTR_KEYS);
+    char t[48];
+    switch (slot_state) {
+    case SLOT_OVERWRITE:
+        snprintf(t, sizeof(t), "Save over slot %d?", slot_pick);
+        help_put_text(screen, 19, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, "Y-Yes  N-No", 11, gameinfo::ATTR_KEYS);
+        break;
+    case SLOT_PICK_LABEL:
+    case SLOT_PICK_VIEW:
+    case SLOT_PICK_ERASE: {
+        const char* what = slot_state == SLOT_PICK_LABEL ? "Label which slot? 1-9" :
+            slot_state == SLOT_PICK_VIEW ? "View which slot? 1-9" : "Erase which slot? 1-9";
+        help_put_text(screen, 19, 1, what, (int) strlen(what), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+        break;
+    }
+    case SLOT_TYPING:
+        snprintf(t, sizeof(t), "Label for slot %d:", slot_pick);
+        help_put_text(screen, 18, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
+        snprintf(t, sizeof(t), "%s_", slot_typed);
+        help_put_text(screen, 19, 1, t, (int) strlen(t), gameinfo::ATTR_TEXT);
+        help_put_text(screen, 20, 1, "ENTER-Done  BREAK-Back", 22, gameinfo::ATTR_KEYS);
+        break;
+    case SLOT_ERASE:
+        snprintf(t, sizeof(t), "Erase slot %d?", slot_pick);
+        help_put_text(screen, 19, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, "Y-Yes  N-No", 11, gameinfo::ATTR_KEYS);
+        break;
+    default:
+        break;
+    }
+    if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// Where the question's game is, kept from when it was opened (the list may change meanwhile)
+static uint8_t ask_drive = 0;
+// V on the question: 0 the list, 1 "View which slot?", 2 a slot's screen showing (any key goes back)
+static uint8_t ask_view = 0;
+
+// ACTION_SLOT_ASK: a game chosen in Browse Games has save slots. BYTE param1 = the key (0: the
+// game was chosen: WORD param2 = its list entry's name, BYTE param4 = the drive). Status 0 the
+// question stays; 1 load the game as chosen (there is no question: no slots, slots_on_load =
+// never, the game is itself a slot); 2 the game or a slot is ready in the pico (ACTION_PREPARE_LOAD,
+// load with no name); 3 back to the list.
+__attribute__((noinline)) static void nmi_action_slot_ask() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    // erase_path: the game's folder; erase_scratch: its name and extension (two strings)
+    char game[screengrab::NAME_MAX + 1];
+    if (key == 0) {
+        uint16_t nameoffset = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
+        ask_drive = nmi_rom_data[5] == 1 ? 1 : 0;
+        const char* fileAndExt = list_entry_name_for(nameoffset, reinterpret_cast<const char*>(nmi_rom_data + nameoffset));
+        const char* dir = list_entry_dir_for(nameoffset);
+        size_t nl = strlen(fileAndExt) + 1;
+        size_t el = strlen(fileAndExt + nl) + 1;
+        if (!cfg.slots_on_load || !sd_card_mounted || slots::is_slot_folder(dir) || nl + el > sizeof(erase_scratch) ||
+                strlen(dir) >= sizeof(erase_path) || screengrab::base_name(fileAndExt, game) == 0) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        snprintf(erase_path, sizeof(erase_path), "%s", dir);
+        memcpy(erase_scratch, fileAndExt, nl + el);
+        ask_view = 0;
+        slot_msg = nullptr;
+    } else if (screengrab::base_name(erase_scratch, game) == 0) {
+        nmi_rom_data[0] = 3;
+        return;
+    }
+    SlotEntry e[slots::COUNT];
+    int last = slots_scan(game, e);
+    bool any = false;
+    for (int i = 0; i < slots::COUNT; i++) any = any || e[i].used;
+    if (!any) {
+        nmi_rom_data[0] = key == 0 ? 1 : 3;
+        return;
+    }
+    const int n = key >= '1' && key <= '9' ? key - '0' : 0;
+    if (key != 0) slot_msg = nullptr;
+    const bool viewing = ask_view != 0;     // this key is for V's question or its picture
+    if (ask_view == 2) {
+        ask_view = 0;                       // the slot's screen: any key goes back to the list
+    } else if (ask_view == 1) {
+        // V, then a slot: its own screen, as on the save slots screen (the game's path stays in
+        // erase_path and erase_scratch)
+        ask_view = 0;
+        if (n > 0 && e[n - 1].used) {
+            char file[80];
+            slots::name(n, e[n - 1].label, file, sizeof(file));
+            snprintf(grab_path, sizeof(grab_path), "%s/%s/%s.%s", slots::FOLDER, game, file, e[n - 1].ext);
+            preview_screen = nullptr;
+            if (find_preview(1, grab_path, e[n - 1].ext) == 0 && preview_screen != nullptr) {
+                ask_view = 2;
+                nmi_rom_data[0] = 0;
+                return;
+            }
+            slot_msg = "No picture in that slot";
+        } else if (n > 0) {
+            slot_msg = "That slot is empty";
+        }
+    } else if (key == 'v' || key == 'V') {
+        ask_view = 1;
+    } else if (key == '0' || key == notes::KEY_ENTER || key == 13) {
+        load_snapshot_file(ask_drive, erase_path, erase_scratch);       // the game as chosen
+        snap_prepared = true;
+        nmi_rom_data[0] = 2;
+        return;
+    }
+    if (!viewing && ask_view == 0 && n > 0 && e[n - 1].used) {
+        // the slot's folder and its name and extension (two strings), in place of the game's
+        snprintf(erase_path, sizeof(erase_path), "%s/%s", slots::FOLDER, game);
+        slots::name(n, e[n - 1].label, erase_scratch, sizeof(erase_scratch));
+        size_t fl = strlen(erase_scratch) + 1;
+        snprintf(erase_scratch + fl, sizeof(erase_scratch) - fl, "%s", e[n - 1].ext);
+        load_snapshot_file(1, erase_path, erase_scratch);
+        snap_prepared = true;
+        nmi_rom_data[0] = 2;
+        return;
+    }
+    if (!viewing && (is_key_break(key) || key == 'x' || key == 'X')) {
+        nmi_rom_data[0] = 3;
+        return;
+    }
+    slots_banner(screen, "Saved games: ", game);
+    slots_draw_list(screen, e, last, true);
+    help_put_text(screen, 13, 1, "1-9", 3, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 13, 5, "Carry on from a slot", 20, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 14, 1, "0", 1, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 14, 5, "Start the game", 14, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 15, 1, "V", 1, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 15, 5, "View a slot's screen", 20, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 17, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    if (ask_view == 1) {
+        help_put_text(screen, 19, 1, "View which slot? 1-9", 20, gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    }
+    if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
 }
 
 // ACTION_HELP_PAGE: draws a page of the help text (Docs/Help.txt, helptext.h) as a
@@ -3565,11 +4480,11 @@ static void nmi_action_snap_preview() {
 static void help_put_text(uint8_t* screen, int row, int col, const char* text, int len, uint8_t attr) {
     for (int i = 0; i < len && col + i < 32; i++) {
         unsigned char ch = (unsigned char) text[i];
-        const uint8_t* glyph = help_font[(ch >= 32 && ch < 128 ? ch : '?') - 32];
+        const uint8_t* glyph = menu_font()[(ch >= 32 && ch < 128 ? ch : '?') - 32];
         for (int line = 0; line < 8; line++) {
             screen[((row >> 3) << 11) | (line << 8) | ((row & 7) << 5) | (col + i)] = glyph[line];
         }
-        screen[6144 + row * 32 + col + i] = attr;
+        screen[6144 + row * 32 + col + i] = ui_attr(attr);
     }
 }
 
@@ -3615,6 +4530,19 @@ static void help_token(const char* token, size_t len, char* out, size_t outsize)
             }
         }
     }
+    else if (is("sdfix")) {
+        // what was put right on the card since power on (nothing: the line is left out)
+        if (sd_read_retries != 0 || sd_read_failures != 0 || sd_remounts != 0) {
+            snprintf(out, outsize, "Retries %lu Fails %lu Mounts %lu", (unsigned long) sd_read_retries,
+                     (unsigned long) sd_read_failures, (unsigned long) sd_remounts);
+        }
+    }
+    else if (is("ini1")) {
+        settings::describe(cfg, out, outsize);
+    }
+    else if (is("ini2")) {
+        settings::describe_bad(cfg, out, outsize);
+    }
     else if (is("error1") || is("error2")) {
         // the last error over two lines of up to 30 characters
         size_t n = strlen(last_error);
@@ -3652,21 +4580,43 @@ static int help_expand(const char* line, int len, char* out, size_t outsize) {
     return (int) n;
 }
 
+static const uint32_t HELP_TEXT_OFFSET = 98304;     // in snap_load_buffer (Help is open: nothing else is there)
+static_assert(HELP_TEXT_OFFSET + HELP_TEXT_SIZE <= SNAP_LOAD_BUFFER_SIZE, "the Help text fits");
+static void help_draw_page(uint8_t* screen, int page);
 static void nmi_action_help_page() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     int page = nmi_rom_data[2];
     if (page >= HELP_PAGE_COUNT) page = HELP_PAGE_COUNT - 1;
-    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    help_draw_page(reinterpret_cast<uint8_t*>(snap_load_buffer), page);
+    preview_screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    nmi_rom_data[0] = HELP_PAGE_COUNT;
+}
+
+// A page of Docs/Help.txt (now only Diagnostics, which D on Options shows) drawn on screen
+static void help_draw_page(uint8_t* screen, int page) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);                 // white ink, black paper, as the menu
+    memset(screen + 6144, ui_attr(0x07), 768);                 // white ink, black paper, as the menu
     const uint8_t BANNER = 0x4F, TEXT = 0x47, HEADING = 0x46, KEYS = 0x45;   // bright
     // title row
     memset(screen + 6144, BANNER, 32);
-    const HelpPage& hp = help_pages[page];
+    // the pages, packed in the firmware, unpacked into a part of the buffer nothing keeps
+    // anything in while Help is open
+    char* all = snap_load_buffer + HELP_TEXT_OFFSET;
+    lzss_unpack(help_packed, reinterpret_cast<uint8_t*>(all), HELP_TEXT_SIZE);
+    struct { const char* title; const char* text; } hp;
+    const char* at = all;
+    for (int i = 0; i < page; i++) {
+        at += strlen(at) + 1;           // the title
+        at += strlen(at) + 1;           // the text
+    }
+    hp.title = at;
+    hp.text = at + strlen(at) + 1;
     help_put_text(screen, 0, 1, hp.title, strlen(hp.title), BANNER);
-    char number[12];
-    int n = snprintf(number, sizeof(number), "%d/%d", page + 1, HELP_PAGE_COUNT);
-    help_put_text(screen, 0, 31 - n, number, n, BANNER);
+    if (HELP_PAGE_COUNT > 1) {
+        char number[12];
+        int n = snprintf(number, sizeof(number), "%d/%d", page + 1, HELP_PAGE_COUNT);
+        help_put_text(screen, 0, 31 - n, number, n, BANNER);
+    }
     // the text
     int row = 1;
     for (const char* p = hp.text; *p && row <= 22; row++) {
@@ -3691,11 +4641,9 @@ static void nmi_action_help_page() {
         }
         p += len + (end ? 1 : 0);
     }
-    const char* keys = page == 0 ? "N-Next page      X-Exit" :
+    const char* keys = HELP_PAGE_COUNT == 1 ? "Any key: back to Options" : page == 0 ? "N-Next page      X-Exit" :
         page == HELP_PAGE_COUNT - 1 ? "P-Previous page  X-Exit" : "N-Next  P-Previous  X-Exit";
     help_put_text(screen, 23, 1, keys, strlen(keys), KEYS);
-    preview_screen = screen;
-    nmi_rom_data[0] = HELP_PAGE_COUNT;
 }
 
 // The poke lists: the .pok file in the Poke List folder of the SD card, named like the game
@@ -3783,6 +4731,7 @@ static void nmi_action_poke_get() {
 static const uint32_t INFO_SCREEN_OFFSET = 16384;
 static const uint32_t INFO_DATA_OFFSET = 24576;
 static const uint32_t GRAB_SCR_OFFSET = 32768;
+static const uint32_t PNG_SCRATCH_OFFSET = 73728;       // reading a .png grab (menushot::read_png)
 static_assert(INFO_DATA_OFFSET + sizeof(gameinfo::Info) <= GRAB_SCR_OFFSET, "no room for the game information");
 static_assert(GRAB_SCR_OFFSET + screengrab::SCR_SIZE <= SNAP_LOAD_BUFFER_SIZE, "no room for a screen grab");
 static bool info_loaded = false;
@@ -3804,50 +4753,264 @@ __attribute__((noinline)) static bool info_read_file(gameinfo::Info* info, const
     return false;
 }
 
-// The screen grabs of the game ACTION_SNAP_PREVIEW was asked about: the numbers (0 for the
-// name alone, 1 for name1 ...) of the .scr files in the Screen Grabs folder of the scraper
-// (/Scraper/Screen Grabs, the loading screens it downloads), then in /Screen Grabs (the grabs
-// made here). grab_from says which folder a picture is in.
+// The screen grabs of the game ACTION_SNAP_PREVIEW was asked about, in the order V shows them:
+// by category (in the order of /Scraper/Screen Grabs/order, see screengrab.h), then by number.
+// They are the .scr files named after the game in /Scraper/Screen Grabs (the loading screens the
+// scraper downloads, and the grabs made here), then any left in /Screen Grabs, where grabs were
+// saved before, as Standard Screen Number.
+struct GrabEntry {
+    uint16_t key;           // the rank of its category, its folder, its number: smaller is shown first
+    uint8_t cat;            // screengrab::Category
+    uint8_t from;           // bit 0: 0 SCRAPER_FOLDER, 1 OLD_FOLDER; bit 1: a .png (no .scr of the name)
+    uint8_t number;
+};
 static int grab_count = 0;
-static uint8_t grab_number[screengrab::MAX_PICTURES];
-static uint8_t grab_from[screengrab::MAX_PICTURES];             // 0 /Scraper/Screen Grabs, 1 /Screen Grabs
-static const char* grab_folder(int k) { return grab_from[k] == 0 ? screengrab::SCRAPER_FOLDER : screengrab::FOLDER; }
+static GrabEntry grab_list[screengrab::MAX_PICTURES];
+static const char* grab_folder(int k) { return (grab_list[k].from & 1) == 0 ? screengrab::SCRAPER_FOLDER : screengrab::OLD_FOLDER; }
 
-__attribute__((noinline)) static void grabs_find(const char* game) {
-    grab_count = 0;
-    char base[screengrab::NAME_MAX + 1];
-    if (!sd_card_mounted || screengrab::base_name(game, base) == 0) {
-        return;
-    }
-    for (int from = 0; from < 2; from++) {
-        const char* folder = from == 0 ? screengrab::SCRAPER_FOLDER : screengrab::FOLDER;
-        if (fsops::kind(Drive::EXTERNAL_SD_CARD, folder) != fsops::KIND_DIR) {
-            continue;                   // no folder: no 40 lookups
+// The path of grab k of the game (base) into grab_path
+static void grab_path_of(int k, const char* base) {
+    screengrab::grab_path(grab_folder(k), base, (screengrab::Category) grab_list[k].cat, grab_list[k].number, grab_path,
+        sizeof(grab_path), (grab_list[k].from & 2) ? "png" : "scr");
+}
+
+// The order file (the default order if there is none), read a piece at a time into grab_path
+// Gives each line of an open file to line(text, length), through grab_path. A line longer than
+// grab_path is dropped; a file over 64 times its size is not read to the end. A \r\n is one
+// line end (so the line numbers are right), a \r or \n alone is one too.
+template <class Line>
+static void read_text_lines(FileHandle& f, Line line) {
+    char* buf = grab_path;
+    const size_t cap = sizeof(grab_path);
+    size_t have = 0;
+    bool after_cr = false;          // the last piece ended with a \r: a \n first in this one goes with it
+    for (int pieces = 0; pieces < 64; pieces++) {
+        int got = f.read(buf + have, cap - have);
+        bool end = got <= 0;
+        if (!end) have += (size_t) got;
+        size_t i = 0;
+        if (after_cr && have > 0 && buf[0] == '\n') i = 1;
+        after_cr = false;
+        for (;;) {
+            size_t e = i;
+            while (e < have && buf[e] != '\n' && buf[e] != '\r') e++;
+            if (e == have) {                            // the rest of the line is still to come
+                if (end && e > i) line(buf + i, e - i);
+                break;
+            }
+            line(buf + i, e - i);
+            if (buf[e] == '\r') {
+                if (e + 1 < have) {
+                    if (buf[e + 1] == '\n') e++;
+                } else {
+                    after_cr = true;
+                }
+            }
+            i = e + 1;
         }
-        for (int i = 0; i < screengrab::MAX_SCAN && grab_count < screengrab::MAX_PICTURES; i++) {
-            screengrab::path_in(folder, base, i, ".scr", grab_path, sizeof(grab_path));
-            if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_FILE) {
-                grab_from[grab_count] = (uint8_t) from;
-                grab_number[grab_count++] = (uint8_t) i;
+        if (end) break;
+        if (i == 0 && have == cap) i = cap;             // a line as long as the buffer: dropped
+        memmove(buf, buf + i, have - i);
+        have -= i;
+    }
+}
+
+// Reads Picomenu.ini: the SD card's, or with none there the internal flash's. A setting it
+// does not have, or does not understand, is the default.
+__attribute__((noinline)) static void settings_load() {
+    cfg_stale = false;
+    cfg = settings::Settings();
+    char folder[sizeof(sd_cwd)];
+    folder[0] = '\x01';            // the file has no start_folder
+    settings::Parser parser(cfg, folder, sizeof(folder));
+    FileHandle f;
+    if (sd_card_mounted && f.open(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME, true)) {
+        cfg.source = 1;
+    } else if (f.open(Drive::INTERNAL_FLASH, settings::FILE_NAME, true)) {
+        cfg.source = 2;
+    }
+    if (cfg.source != 0) {
+        read_text_lines(f, [&](const char* t, size_t n) { parser.line(t, n); });
+        f.close();
+    }
+    if (cfg_folder_due) {
+        cfg_folder_due = false;
+        if (folder[0] != '\x01' && sd_card_mounted) {
+            if (folder[0] == '\0' || fsops::kind(Drive::EXTERNAL_SD_CARD, folder) == fsops::KIND_DIR) {
+                walk_stop();
+                snprintf(sd_cwd, sizeof(sd_cwd), "%s", folder);
+            } else {
+                settings::missing_folder(cfg);
             }
         }
+    }
+    LOG("Picomenu.ini: %s, %u settings, %u not understood (first: line %u)\n",
+        cfg.source == 1 ? "SD card" : cfg.source == 2 ? "flash" : "none", (unsigned) cfg.good,
+        (unsigned) cfg.bad, (unsigned) cfg.bad_line);
+}
+
+static void settings_fresh() {
+    if (cfg_stale) settings_load();
+}
+
+// The order V shows a game's pictures in: Picomenu.ini's [Screen grab order], or with no such
+// section the order file (order.txt, or order) in /Scraper/Screen Grabs
+__attribute__((noinline)) static void grabs_order(screengrab::Order& order) {
+    if (cfg.has_order) {        // (read again, if need be, as the menu opened: sendNmiRequest)
+        order = cfg.order;
+        order.finish();
+        return;
+    }
+    FileHandle f;
+    if (f.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE, true) ||
+            f.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE_BARE, true)) {
+        read_text_lines(f, [&](const char* t, size_t n) { order.line(t, n); });
+        f.close();
+    }
+    order.finish();
+}
+
+// file_picture: the game's file has a screen of its own (From File), which goes in the list too
+__attribute__((noinline)) static void grabs_find(const char* game, bool file_picture) {
+    grab_count = 0;
+    char base[screengrab::NAME_MAX + 1];
+    const bool sd = sd_card_mounted && screengrab::base_name(game, base) > 0;
+    screengrab::Order order;
+    if (sd) {
+        grabs_order(order);
+    } else {
+        order.finish();                 // no card: the file's own picture, as before
+    }
+    if (file_picture && order.shown[screengrab::FROM_FILE]) {
+        grab_list[grab_count++] = { (uint16_t) (order.rank[screengrab::FROM_FILE] << 9), screengrab::FROM_FILE, 0, 0 };
+    }
+    if (!sd) {
+        return;
+    }
+    for (uint8_t from = 0; from < 2; from++) {
+        snprintf(grab_path, sizeof(grab_path), "/sd%s", from == 0 ? screengrab::SCRAPER_FOLDER : screengrab::OLD_FOLDER);
+        if (!grab_dir.open(grab_path)) {
+            continue;                   // no folder
+        }
+        do {
+            if (grab_dir.atEnd()) break;
+            screengrab::Category cat;
+            int number;
+            bool png = false;
+            if (grab_dir.isDirectory() || !screengrab::parse_name(grab_dir.fileName(), base, &cat, &number, &png) || number > 255 ||
+                    !order.shown[cat]) {
+                continue;
+            }
+            uint16_t key = (uint16_t) ((order.rank[cat] << 9) | (from << 8) | number);
+            // the same grab as a .scr and a .png (grab_format = both): shown once, from the .scr
+            int same = -1;
+            for (int k = 0; k < grab_count; k++) if (grab_list[k].key == key) same = k;
+            if (same >= 0) {
+                if (!png) grab_list[same].from &= 1;
+                continue;
+            }
+            int at = grab_count;
+            while (at > 0 && grab_list[at - 1].key > key) at--;
+            if (at >= screengrab::MAX_PICTURES) continue;       // more than V shows: the last are left out
+            int last = grab_count < screengrab::MAX_PICTURES ? grab_count : screengrab::MAX_PICTURES - 1;
+            for (int k = last; k > at; k--) grab_list[k] = grab_list[k - 1];
+            grab_list[at] = { key, (uint8_t) cat, (uint8_t) (from | (png ? 2 : 0)), (uint8_t) number };
+            if (grab_count < screengrab::MAX_PICTURES) grab_count++;
+        } while (grab_dir.next());
+        grab_dir.close();
     }
     LOG("%d screen grabs of %s\n", grab_count, game);
 }
 
 __attribute__((noinline)) static bool grab_load(const char* game, int k, uint8_t* dest) {
     char base[screengrab::NAME_MAX + 1];
-    if (k < 0 || k >= grab_count || screengrab::base_name(game, base) == 0) {
+    if (k < 0 || k >= grab_count) {
         return false;
     }
-    screengrab::path_in(grab_folder(k), base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
+    if (grab_list[k].cat == screengrab::FROM_FILE) {
+        if (info_source == nullptr) return false;
+        if (dest != info_source) memcpy(dest, info_source, screengrab::SCR_SIZE);
+        return true;
+    }
+    if (screengrab::base_name(game, base) == 0) {
+        return false;
+    }
+    grab_path_of(k, base);
     FileHandle f;
     if (!f.open(Drive::EXTERNAL_SD_CARD, grab_path, true)) {
         return false;
     }
+    if (grab_list[k].from & 2) {
+        // a .png PicoMenu saved: read back into a screen, through room in snap_load_buffer
+        bool ok = menushot::read_png(f, dest, reinterpret_cast<uint8_t*>(snap_load_buffer) + PNG_SCRATCH_OFFSET);
+        f.close();
+        return ok;
+    }
     int got = f.read(dest, screengrab::SCR_SIZE);
     f.close();
     return got == (int) screengrab::SCR_SIZE;
+}
+
+// The lowest number not taken for a new grab of base in category cat, in /Scraper/Screen Grabs
+// (as a .scr or a .png), or -1 if all are
+static int grab_free_number(const char* base, screengrab::Category cat) {
+    for (int i = 0; i < screengrab::MAX_SCAN; i++) {
+        screengrab::grab_path(screengrab::SCRAPER_FOLDER, base, cat, i, grab_path, sizeof(grab_path), "png");
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) != fsops::KIND_NONE) continue;
+        screengrab::grab_path(screengrab::SCRAPER_FOLDER, base, cat, i, grab_path, sizeof(grab_path));
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+struct GrabSink {
+    FileHandle* f;
+    bool write(const void* p, size_t n) { return f->write(p, n) == (int) n; }
+};
+
+// Saves the screen as grab number of base in category cat, as Picomenu.ini's grab_format says:
+// a .scr, a .png, or both. False if one could not be saved (it is removed).
+__attribute__((noinline)) static bool grab_write(FileHandle& f, const char* base, screengrab::Category cat, int number,
+                                                 const uint8_t* scr) {
+    for (int png = 0; png < 2; png++) {
+        if (png ? cfg.grab_format == settings::GRAB_SCR : cfg.grab_format == settings::GRAB_PNG) continue;
+        screengrab::grab_path(screengrab::SCRAPER_FOLDER, base, cat, number, grab_path, sizeof(grab_path), png ? "png" : "scr");
+        bool ok = f.open(Drive::EXTERNAL_SD_CARD, grab_path, false);
+        if (ok) {
+            if (png) {
+                GrabSink sink{ &f };
+                ok = menushot::write_png(sink, scr);
+            } else {
+                ok = f.write(scr, screengrab::SCR_SIZE) == (int) screengrab::SCR_SIZE;
+            }
+            ok = f.close() && ok;
+        }
+        if (!ok) {
+            fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Removes grab number of base (its .scr and its .png)
+static void grab_remove(const char* base, screengrab::Category cat, int number) {
+    for (int png = 0; png < 2; png++) {
+        screengrab::grab_path(screengrab::SCRAPER_FOLDER, base, cat, number, grab_path, sizeof(grab_path), png ? "png" : "scr");
+        fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+    }
+}
+
+// Makes /Scraper/Screen Grabs if it is not there: false if it can't be
+static bool grab_folder_make() {
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, screengrab::SCRAPER_FOLDER) == fsops::KIND_DIR) {
+        return true;
+    }
+    uint8_t made = make_sd_folder("/Scraper");
+    if (made == fsops::OK || made == fsops::NAME_IN_USE) made = make_sd_folder(screengrab::SCRAPER_FOLDER);
+    return made == fsops::OK || made == fsops::NAME_IN_USE;
 }
 
 // ---- My notes: <game>.txt in the hidden Game Notes folder (notes.h)
@@ -4098,7 +5261,7 @@ NOTES_FUNC static bool det_save_field(const char* game, char field, gameinfo::In
 
 NOTES_FUNC static void det_hub_draw(uint8_t* screen, const gameinfo::Info* info, const char* game) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     char title[40];
     snprintf(title, sizeof(title), "Edit: %s", game);
@@ -4149,7 +5312,7 @@ NOTES_FUNC static void det_field_draw_lines(uint8_t* screen, const E& ed) {
         const char* l = ed.line(ed.top() + i);
         help_put_text(screen, 2 + i, 1, l, (int) strlen(l), gameinfo::ATTR_TEXT);
     }
-    screen[6144 + (2 + ed.row() - ed.top()) * 32 + 1 + ed.col()] = 0xC7;       // bright white, flashing
+    screen[6144 + (2 + ed.row() - ed.top()) * 32 + 1 + ed.col()] = ui_attr(0xC7);       // bright white, flashing
     char count[32];
     if (ed.limit() > 0) {
         snprintf(count, sizeof(count), "%u of %u letters", (unsigned) ed.used(), (unsigned) ed.limit());
@@ -4164,7 +5327,7 @@ NOTES_FUNC static void det_field_draw_lines(uint8_t* screen, const E& ed) {
 
 NOTES_FUNC static void det_field_draw(uint8_t* screen, const char* game) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     char title[48];
     snprintf(title, sizeof(title), "%s: %s", det_field_name(det_field), game);
@@ -4185,7 +5348,7 @@ NOTES_FUNC static void det_field_draw(uint8_t* screen, const char* game) {
 // The editor's screen: the lines, the cursor flashing, the keys
 static void notes_draw(uint8_t* screen, const notes::Editor& ed, const char* game) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     char title[40];
     snprintf(title, sizeof(title), "My notes: %s", game);
@@ -4199,7 +5362,7 @@ static void notes_draw(uint8_t* screen, const notes::Editor& ed, const char* gam
     }
     const char* keys = "E-Edit  X-Back";                     // looking: the notes cannot be changed
     if (notes_edit) {
-        screen[6144 + (2 + ed.row()) * 32 + 1 + ed.col()] = 0xC7;       // bright white, flashing
+        screen[6144 + (2 + ed.row()) * 32 + 1 + ed.col()] = ui_attr(0xC7);       // bright white, flashing
         keys = ed.prompting() ? "Y-Save  N-Discard  other-Back" : "BREAK-Finish";
         help_put_text(screen, 22, 1, "ENTER new line  DELETE deletes", 30, gameinfo::ATTR_DIM);
         help_put_text(screen, 20, 1, "Move: cursor keys or CAPS+5-8", 29, gameinfo::ATTR_DIM);
@@ -4422,20 +5585,26 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     if ((page == 0 || !info_loaded) && !(info_full && info_loaded && !fresh)) {
         info_load(info, name, mode);
     }
-    if (mode == 0 && fresh) {
-        grabs_find(name);
+    const bool file_picture = mode == 0 && info_source != nullptr;
+    if (fresh) {
+        // I on the menu (mode 1): the game's screen grabs too, as V shows them
+        if (mode == 0 || name[0] != '\0') grabs_find(name, file_picture);
+        else grab_count = 0;
     }
     info_loaded = true;
     int pages = gameinfo::page_count(*info);
     if (page >= pages) page = pages - 1;
-    const bool file_picture = mode == 0 && info_source != nullptr;
-    int pictures = mode == 1 ? 0 : (file_picture ? 1 : 0) + grab_count;
+    // the pictures: the file's own (From File) and the grabs, in the order file's order. With
+    // none, I on the menu shows the game's screen as it was when the NMI button was pressed.
+    int pictures = grab_count;
+    const bool stash_picture = mode == 1 && pictures == 0 && screen_stashed;
+    auto from_file = [&](int k) { return k >= 0 && k < grab_count && grab_list[k].cat == screengrab::FROM_FILE; };
     if (pic >= pictures) pic = 0;
     if (op == 5) {                  // F: the picture on the whole screen, or back
         op = 0;
         if (info_full) {
             info_full = false;
-        } else if (mode == 1 ? screen_stashed : pictures > 0) {
+        } else if (stash_picture || pictures > 0) {
             info_full = true;
         } else {
             notes_message = "No picture to show";
@@ -4443,12 +5612,12 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     if (info_full) {
         const uint8_t* full = nullptr;
-        if (mode == 1) {
-            full = screen_stashed ? screen_stash : nullptr;
+        if (stash_picture) {
+            full = screen_stash;
         } else if (pictures > 0) {
-            if (file_picture && pic == 0) {
+            if (from_file(pic)) {
                 full = info_source;
-            } else if (grab_load(name, pic - (file_picture ? 1 : 0), grab)) {
+            } else if (grab_load(name, pic, grab)) {
                 full = grab;
             }
         }
@@ -4463,27 +5632,35 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
         info_full = false;
     }
     // a screen grab is showing (the picture is on the first page): D can delete it
-    bool grab_shown = mode == 0 && page == 0 && pictures > 0 && !(file_picture && pic == 0);
+    bool grab_shown = mode == 0 && page == 0 && pictures > 0 && !from_file(pic);
     bool asking = false;
     if (op == 1 && grab_shown) {
         asking = true;
     }
     else if (op == 2 && grab_shown) {
         char base[screengrab::NAME_MAX + 1];
-        int k = pic - (file_picture ? 1 : 0);
+        int k = pic;
         if (screengrab::base_name(name, base) > 0 && k >= 0 && k < grab_count) {
-            screengrab::path_in(grab_folder(k), base, grab_number[k], ".scr", grab_path, sizeof(grab_path));
-            LOG("Delete the grab %s\n", grab_path);
-            fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+            // its .scr and its .png (grab_format = both saves the two)
+            for (int png = 0; png < 2; png++) {
+                grab_list[k].from = (uint8_t) ((grab_list[k].from & 1) | (png ? 2 : 0));
+                grab_path_of(k, base);
+                if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE) continue;
+                LOG("Delete the grab %s\n", grab_path);
+                if (to_waste_bin(1, grab_path, false, erase_path, sizeof(erase_path)) != BIN_OK) {
+                    grab_path_of(k, base);
+                    fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+                }
+            }
         }
-        grabs_find(name);
-        pictures = (file_picture ? 1 : 0) + grab_count;
+        grabs_find(name, file_picture);
+        pictures = grab_count;
         if (pic >= pictures) pic = 0;
-        grab_shown = pictures > 0 && !(file_picture && pic == 0);
+        grab_shown = pictures > 0 && !from_file(pic);
     }
 
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     // the numbers at the right of the title row
     char numbers[24];
@@ -4504,12 +5681,12 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     help_put_text(screen, 0, 31 - numberlen, numbers, numberlen, gameinfo::ATTR_BANNER);
     if (page == 0) {
         const uint8_t* thumb = nullptr;
-        if (mode == 1) {
-            thumb = screen_stashed ? screen_stash : nullptr;
+        if (stash_picture) {
+            thumb = screen_stash;
         } else if (pictures > 0) {
-            if (file_picture && pic == 0) {
+            if (from_file(pic)) {
                 thumb = info_source;
-            } else if (grab_load(name, pic - (file_picture ? 1 : 0), grab)) {
+            } else if (grab_load(name, pic, grab)) {
                 thumb = grab;
             }
         }
@@ -4521,7 +5698,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     info_paint_text(screen, *info, page);
     char keys[40];
-    gameinfo::key_help(mode == 1, pages, keys, grab_shown, mode == 1 ? screen_stashed : pictures > 0);
+    gameinfo::key_help(mode == 1, pages, keys, grab_shown, stash_picture || pictures > 0);
     if (asking) {
         snprintf(keys, sizeof(keys), "Delete this grab?  Y-Yes  N-No");
     }
@@ -4544,7 +5721,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
 
 // ---- C on the NMI menu: set up the SD card (sdsetup.h). The ROM shows it as the game
 // information with mode 2: D asks "Set up this card?", Y does it (op 2), any other key does not.
-static uint8_t sd_setup_result[sdsetup::FOLDER_COUNT + 1];     // each folder, then the Instructions file
+static uint8_t sd_setup_result[sdsetup::FOLDER_COUNT + 2];     // each folder, then the Instructions file, then the grabs' order file
 static bool sd_setup_done = false;
 
 // The folders, then the example Instructions. Called from a small frame, like notes_step, as
@@ -4594,17 +5771,55 @@ NOTES_FUNC static void sd_setup_run() {
         }
     }
     sd_setup_result[sdsetup::FOLDER_COUNT] = r;
+    // Picomenu.ini, if there is none: every setting at its default, and the screen grab order
+    // (that of an order.txt already on the card, so what it set is kept)
+    trace_step('S', sdsetup::FOLDER_COUNT + 1);
+    r = sdsetup::THERE;
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME) == fsops::KIND_NONE) {
+        r = sdsetup::FAILED;
+        FileHandle& f = *notes_handle();
+        // an order file already there: its text, kept to go in the new file (one handle at a time)
+        char* order = snap_load_buffer + DET_FILE_OFFSET;
+        int order_len = -1;
+        if (f.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE, true) ||
+                f.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE_BARE, true)) {
+            order_len = f.read(order, DET_FILE_MAX);
+            f.close();
+        }
+        if (f.open(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME, false)) {
+            auto put = [&](const char* text, size_t n) { return f.write(text, (int) n) == (int) n; };
+            bool ok = put(settings::DEFAULT_SETTINGS, sizeof(settings::DEFAULT_SETTINGS) - 1) &&
+                put(settings::ORDER_HEADING, sizeof(settings::ORDER_HEADING) - 1);
+            if (ok && order_len >= 0) {
+                ok = put(order, (size_t) order_len);
+                if (ok && order_len > 0 && order[order_len - 1] != '\n') ok = put("\r\n", 2);
+            } else if (ok) {
+                ok = put(settings::DEFAULT_ORDER, sizeof(settings::DEFAULT_ORDER) - 1);
+            }
+            ok = f.close() && ok;
+            r = ok ? sdsetup::MADE : sdsetup::FAILED;
+            if (!ok) {
+                fsops::remove_path(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME);
+            }
+        }
+        if (r == sdsetup::FAILED) {
+            set_last_error("Cannot make", "Picomenu.ini");
+        } else {
+            cfg_stale = true;
+        }
+    }
+    sd_setup_result[sdsetup::FOLDER_COUNT + 1] = r;
     trace_step('Z', 0);             // finished
     LOG("SD card set up\n");
 }
 
 NOTES_FUNC static void sd_setup_draw(uint8_t* screen, int state, bool card) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     // the result's heading says how it went: created, failed, or already there
     bool failed = false, made_any = false;
-    for (int i = 0; state == 2 && card && i <= sdsetup::FOLDER_COUNT; i++) {
+    for (int i = 0; state == 2 && card && i <= sdsetup::FOLDER_COUNT + 1; i++) {
         failed = failed || sd_setup_result[i] == sdsetup::FAILED;
         made_any = made_any || sd_setup_result[i] == sdsetup::MADE;
     }
@@ -4619,36 +5834,39 @@ NOTES_FUNC static void sd_setup_draw(uint8_t* screen, int state, bool card) {
         line(4, "Put the card in, then try");
         line(5, "again.");
     } else if (state == 2) {
-        for (int i = 0; i <= sdsetup::FOLDER_COUNT; i++) {
-            const bool inst = i == sdsetup::FOLDER_COUNT;
-            const char* name = inst ? "Instructions.txt" : sdsetup::FOLDERS[i].path + 1;
+        for (int i = 0; i <= sdsetup::FOLDER_COUNT + 1; i++) {
+            const bool inst = i >= sdsetup::FOLDER_COUNT;
+            const char* name = i == sdsetup::FOLDER_COUNT ? "Instructions.txt" : inst ? "Picomenu.ini" :
+                sdsetup::FOLDERS[i].label != nullptr ? sdsetup::FOLDERS[i].label : sdsetup::FOLDERS[i].path + 1;
             char text[40];
             const uint8_t r = sd_setup_result[i];
-            const char* how = r == sdsetup::MADE ? "made" : r == sdsetup::FAILED ? "FAILED" : inst ? "kept yours" : "there already";
+            const char* how = r == sdsetup::MADE ? "made" : r == sdsetup::FAILED ? "FAILED" :
+                i > sdsetup::FOLDER_COUNT ? "kept" : inst ? "kept yours" : "there already";
             snprintf(text, sizeof(text), "%s%s", name, inst ? "" : "/");
             line(2 + i, text);
-            help_put_text(screen, 2 + i, 18, how, (int) strlen(how), r == sdsetup::FAILED ? gameinfo::ATTR_KEYS : gameinfo::ATTR_HEADING);
+            help_put_text(screen, 2 + i, i > sdsetup::FOLDER_COUNT ? 25 : 18, how, (int) strlen(how), r == sdsetup::FAILED ? gameinfo::ATTR_KEYS : gameinfo::ATTR_HEADING);
         }
         if (failed) {
-            line(11, "SD card creation failed.");
-            line(12, "Is the card full or locked?");
-            line(13, "See Help, Diagnostics.");
+            line(15, "SD card creation failed.");
+            line(16, "Is the card full or locked?");
+            line(17, "See Options, D-Diagnostics.");
         } else {
-            line(11, made_any ? "SD card created." : "Nothing new was needed.");
-            line(12, "Put your game information");
-            line(13, "in Scraper/Instructions.txt.");
+            line(15, made_any ? "SD card created." : "Nothing new was needed.");
+            line(16, "Put your game information");
+            line(17, "in Scraper/Instructions.txt.");
         }
     } else {
         line(2, "Makes these on the SD card.");
         line(3, "Nothing there is replaced.");
         for (int i = 0; i < sdsetup::FOLDER_COUNT; i++) {
             char name[24];
-            snprintf(name, sizeof(name), "%s/", sdsetup::FOLDERS[i].path + 1);
+            snprintf(name, sizeof(name), "%s/", sdsetup::FOLDERS[i].label != nullptr ? sdsetup::FOLDERS[i].label : sdsetup::FOLDERS[i].path + 1);
             line(5 + i, name, gameinfo::ATTR_HEADING);
             help_put_text(screen, 5 + i, 15, sdsetup::FOLDERS[i].what, (int) strlen(sdsetup::FOLDERS[i].what), gameinfo::ATTR_TEXT);
         }
-        line(12, "An example Instructions.txt");
-        line(13, "is added if there is none.");
+        line(16, "An example Instructions.txt and");
+        line(17, "Picomenu.ini (the settings)");
+        line(18, "are added if there are none.");
         keys = state == 1 ? "Set up this card?  Y-Yes  N-No" : "D-Set up  X-Exit";
     }
     help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
@@ -4709,13 +5927,22 @@ static uint32_t conv_path_hash(const char* p) {
     return h;
 }
 static char conv_msg[40];                   // the message on the key row afterwards
+static void nmi_batch_info(int op, uint8_t key);
 static void nmi_action_game_info() {
     uint8_t* nmi_rom_data = rom_data + 16384;
-    nmi_rom_data[INFO_HOUSE] = 0;       // no software house to scroll, unless the first page says so
+    // no software house to scroll, unless the first page says so. All of it is cleared: the ROM
+    // keeps its scroll position and would show the rest of an old name from there (over a
+    // picture shown full screen)
+    memset(nmi_rom_data + INFO_HOUSE, 0, INFO_HOUSE_SIZE);
     int op = nmi_rom_data[5];
     if (nmi_rom_data[2] == 2) {         // C on the menu: set up the SD card
         notes_editing = notes_edit = false;
         nmi_sd_setup(op);
+        return;
+    }
+    if (nmi_rom_data[2] == 3) {         // the batch converter, running
+        notes_editing = notes_edit = false;
+        nmi_batch_info(op, nmi_rom_data[6]);
         return;
     }
     bool ended = false;
@@ -4755,64 +5982,98 @@ static void nmi_action_game_info() {
     nmi_game_info_show(ended);
 }
 
-// ACTION_SCREEN_GRAB: saves the game's screen (as it was when the menu opened) in the
-// Screen Grabs folder of the SD card, a folder made if it is not there (it is not hidden: the Browse Games list leaves it out), as
-// <game>.scr, or <game>1.scr, <game>2.scr ... if the name is taken. <game> is the
-// game last loaded (without " Save Game"), or "Screen" if there is none.
+// ACTION_SCREEN_GRAB: saves the game's screen (as it was when the menu opened) in
+// /Scraper/Screen Grabs on the SD card (made if it is not there), named after the game last
+// loaded (without " Save Game"), or "Screen" if there is none, and the category:
+// <game> Loading Screen.scr, or <game> Loading Screen1.scr ... if the name is taken (the lowest
+// number free), and so on; <game>.scr, <game>1.scr ... for Standard Screen Number.
 // WORD param1 = where to put the message "Saved as <name>"
+// BYTE param2 = the category: 0 Standard Screen Number (a double press), 1 Loading Screen,
+//               2 Menu Screen, 3 Game Screen, 4 Ending Screen (G asks)
 // Status 0 saved, 1 no SD card (or the PC has it), 2 could not save, 3 too many grabs of
 // the game, 4 there is no screen to save.
+// Saves the stashed screen as a grab of the game last loaded, in category cat. The message
+// "Saved as <name>" goes in message (at least 36 bytes). Status as ACTION_SCREEN_GRAB's.
+static uint8_t grab_save(screengrab::Category cat, char* message) {
+    if (!sd_card_mounted) {
+        return 1;
+    }
+    if (!screen_stashed) {
+        return 4;
+    }
+    char base[screengrab::NAME_MAX + 1];
+    if (!reload_known || game_base(reload_dir, reload_name, base) == 0) {      // a slot: its game's
+        snprintf(base, sizeof(base), "Screen");
+    }
+    if (!grab_folder_make()) {
+        set_last_error("Cannot make", "Scraper/Screen Grabs");
+        return 2;
+    }
+    int number = grab_free_number(base, cat);
+    if (number < 0) {
+        return 3;
+    }
+    FileHandle f;
+    if (!grab_write(f, base, cat, number, screen_stash)) {
+        set_last_error("Cannot save", "screen grab");
+        return 2;
+    }
+    screengrab::saved_message(base, cat, number, message, 36);
+    LOG("Screen grab %s\n", grab_path);
+    return 0;
+}
+
 static void nmi_action_screen_grab() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint16_t dest = nmi_rom_data[2] | (nmi_rom_data[3] << 8);
     char* message = reinterpret_cast<char*>(nmi_rom_data) + dest;
+    screengrab::Category cat = nmi_rom_data[4] < screengrab::GRAB_CATEGORIES ? (screengrab::Category) nmi_rom_data[4] : screengrab::STANDARD;
     if (dest > 16384 - 40) {
         nmi_rom_data[0] = 2;
         return;
     }
-    if (!sd_card_mounted) {
+    nmi_rom_data[0] = grab_save(cat, message);
+}
+
+// ACTION_GRAB_MENU (G on the menu): which category, 1-5, then it is saved and the result shown;
+// BREAK or X goes back. BYTE param1 = the key (0: opened). Status 0 the screen stays, 1 closed
+static uint8_t grab_menu_state = 0;         // 0 asking, 1 saved (any key closes)
+__attribute__((noinline)) static void nmi_action_grab_menu() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    static char result[40];
+    if (key == 0) {
+        grab_menu_state = 0;
+    } else if (grab_menu_state == 1 || key == 0x18 || key == 'x') {
         nmi_rom_data[0] = 1;
         return;
+    } else if (key >= '1' && key <= '5') {
+        // 1 Loading Screen ... 4 Ending Screen, 5 Standard Screen Number
+        screengrab::Category cat = key == '5' ? screengrab::STANDARD : (screengrab::Category) (key - '0');
+        uint8_t status = grab_save(cat, result);
+        static const char* const WHY[] = { "", "No SD card (or the PC has it)", "Could not save the grab",
+            "Too many grabs", "No screen to save" };
+        if (status != 0) snprintf(result, sizeof(result), "%s", WHY[status < 5 ? status : 2]);
+        grab_menu_state = 1;
     }
-    if (!screen_stashed) {
-        nmi_rom_data[0] = 4;
-        return;
-    }
-    char base[screengrab::NAME_MAX + 1];
-    if (!reload_known || screengrab::base_name(reload_name, base) == 0) {
-        snprintf(base, sizeof(base), "Screen");
-    }
-    uint8_t made = make_sd_folder(screengrab::FOLDER);
-    if (made != fsops::OK && made != fsops::NAME_IN_USE) {      // (not hidden: Browse Games just does not list it)
-        set_last_error("Cannot make", "Screen Grabs");
-        nmi_rom_data[0] = 2;
-        return;
-    }
-    int number = -1;
-    for (int i = 0; i < screengrab::MAX_SCAN && number < 0; i++) {
-        screengrab::path_for(base, i, ".scr", grab_path, sizeof(grab_path));
-        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE) {
-            number = i;
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    help_put_text(screen, 0, 1, "Screen grab", 11, gameinfo::ATTR_BANNER);
+    if (grab_menu_state == 0) {
+        static const char* const LINES[] = { "Save it as:", "", "1  Loading Screen", "2  Menu Screen",
+            "3  Game Screen", "4  Ending Screen", "5  Standard Screen Number", "   (<game>.scr, <game>1.scr...)" };
+        for (int k = 0; k < 8; k++) {
+            help_put_text(screen, 2 + k, 1, LINES[k], (int) strlen(LINES[k]), k == 0 ? gameinfo::ATTR_HEADING : gameinfo::ATTR_TEXT);
         }
+        help_put_text(screen, 12, 1, "In /Scraper/Screen Grabs", 24, gameinfo::ATTR_DIM);
+        help_put_text(screen, 23, 1, "1-5 Save  BREAK-Back", 20, gameinfo::ATTR_KEYS);
+    } else {
+        help_put_text(screen, 3, 1, result, (int) strlen(result), gameinfo::ATTR_TEXT);
+        help_put_text(screen, 23, 1, "Press any key", 13, gameinfo::ATTR_KEYS);
     }
-    if (number < 0) {
-        nmi_rom_data[0] = 3;
-        return;
-    }
-    bool ok = false;
-    FileHandle f;
-    if (f.open(Drive::EXTERNAL_SD_CARD, grab_path, false)) {
-        ok = f.write(screen_stash, screengrab::SCR_SIZE) == (int) screengrab::SCR_SIZE;
-        ok = f.close() && ok;
-    }
-    if (!ok) {
-        fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
-        set_last_error("Cannot save", "screen grab");
-        nmi_rom_data[0] = 2;
-        return;
-    }
-    screengrab::saved_message(base, number, message, 36);
-    LOG("Screen grab %s\n", grab_path);
+    preview_screen = screen;
     nmi_rom_data[0] = 0;
 }
 
@@ -4859,7 +6120,7 @@ static void nmi_action_recent_list() {
         }
     }
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     help_put_text(screen, 0, 1, "Recently played", 15, gameinfo::ATTR_BANNER);
     if (list->count == 0) {
@@ -5044,7 +6305,7 @@ static int fw_put_wrapped(uint8_t* screen, int row, const char* text, uint8_t at
 // The screen for each outcome of the check
 static void fw_draw(uint8_t* screen, uint8_t status, fwupdate::Error error) {
     memset(screen, 0, 6144);
-    memset(screen + 6144, 0x07, 768);
+    memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
     fw_put(screen, 0, 1, "Update PicoMenu", gameinfo::ATTR_BANNER);
     const char* keys = "X-Back";
@@ -5261,6 +6522,22 @@ static void nmi_action_update() {
     nmi_rom_data[0] = status;
 }
 
+static void nmi_action_tape_position();
+static void nmi_action_tape_insert();
+static void nmi_action_text_file();
+static void nmi_action_snap_hide();
+static void nmi_action_waste_bin();
+static void nmi_action_bin_empty();
+static void nmi_action_grab_menu();
+static void nmi_action_slots();
+static void nmi_action_slot_ask();
+static void nmi_action_options();
+static void nmi_action_batch();
+
+static bool sna_in_buffer = false;          // a snapshot sent to be saved is in snap_load_buffer
+
+static bool list_pool_busy = false;         // a screen (Options, the batch's folders) keeps its state in list_pool
+static bool menu_shot_piece();
 void processNmiRequest() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t action = nmi_rom_data[1];
@@ -5278,6 +6555,7 @@ void processNmiRequest() {
         nmi_rom_data[4] = tocopy & 0xFF;
         nmi_rom_data[5] = (tocopy >> 8) & 0xFF;
     }  else if (action == ACTION_SNA_BEGIN_WRITE) {
+        sna_in_buffer = true;
         uint16_t headeroffset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
         LOG("Start SNA save, head destination: %X\n", headeroffset);
         snap_is_paged = false;
@@ -5285,11 +6563,16 @@ void processNmiRequest() {
         memcpy(snap_load_buffer, nmi_rom_data + headeroffset, SNA_HEADER_SIZE);
         current_sna_write_offset = SNA_HEADER_SIZE;
     }  else if (action == ACTION_SNA_BEGIN_WRITE128) {
+        sna_in_buffer = true;
         uint16_t headeroffset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
         LOG("Start 128K save, head destination: %X\n", headeroffset);
         snap_is_paged = false;
         save_is_128k = true;
         memcpy(save128_info, nmi_rom_data + headeroffset, sizeof(save128_info));
+        if (nmi_menu_open) {
+            // the menu turned the sound chip's volumes down (ayswap): the game's are kept apart
+            memcpy(save128_info + SAVE128_AY_AT + 8, nmi_rom_data + NMI_AYVOLS, 3);
+        }
         current_sna_write_offset = snapload::HEADER_AREA;
     }  else if (action == ACTION_SNA_END_WRITE128) {
         uint8_t port = snapload::finish_save128(reinterpret_cast<uint8_t*>(snap_load_buffer), save128_info, &loaded_paging);
@@ -5302,6 +6585,9 @@ void processNmiRequest() {
         memcpy(snap_load_buffer + current_sna_write_offset, screen_stash, tocopy);
         current_sna_write_offset += tocopy;
     }  else if (action == ACTION_SCREEN_STASH) {
+        if (rom_data[16384 + START_MENUSHOT] != 0 && menu_shot_piece()) {
+            return;                         // a menu grab: the screen is not the game's (status set)
+        }
         nmi_action_screen(SCREEN_STASH);
     }  else if (action == ACTION_SCREEN_RESTORE) {
         nmi_action_screen(SCREEN_RESTORE);
@@ -5318,6 +6604,39 @@ void processNmiRequest() {
         return;
     }  else if (action == ACTION_UPDATE) {
         nmi_action_update();
+        return;
+    }  else if (action == ACTION_TAPE_POSITION) {
+        nmi_action_tape_position();
+        return;
+    }  else if (action == ACTION_TAPE_INSERT) {
+        nmi_action_tape_insert();
+        return;
+    }  else if (action == ACTION_TEXT_FILE) {
+        nmi_action_text_file();
+        return;
+    }  else if (action == ACTION_SNAP_HIDE) {
+        nmi_action_snap_hide();
+        return;
+    }  else if (action == ACTION_WASTE_BIN) {
+        nmi_action_waste_bin();
+        return;
+    }  else if (action == ACTION_BIN_EMPTY) {
+        nmi_action_bin_empty();
+        return;
+    }  else if (action == ACTION_GRAB_MENU) {
+        nmi_action_grab_menu();
+        return;
+    }  else if (action == ACTION_SLOTS) {
+        nmi_action_slots();
+        return;
+    }  else if (action == ACTION_SLOT_ASK) {
+        nmi_action_slot_ask();
+        return;
+    }  else if (action == ACTION_OPTIONS) {
+        nmi_action_options();
+        return;
+    }  else if (action == ACTION_BATCH) {
+        nmi_action_batch();
         return;
     }  else if (action == ACTION_GAME_INFO) {
         nmi_action_game_info();
@@ -5386,6 +6705,9 @@ void processNmiRequest() {
 //---------------------------------------------
 // CLI commands
 
+#ifdef PICOFACE_HOST
+extern "C" void host_step(void);       // the simulator runs the Spectrum a little
+#endif
 inline bool sendNmiAndWaitForCompletion(uint8_t command, uint16_t param1, uint16_t param2) {
     // Without the volatile then the nmi_rom_data[0] is only
     // accessed once and we fail to process requests from the nmi
@@ -5396,6 +6718,9 @@ inline bool sendNmiAndWaitForCompletion(uint8_t command, uint16_t param1, uint16
             if (nmi_rom_data[0] == 255) {
                 processNmiRequest();
             }            
+#ifdef PICOFACE_HOST
+            host_step();
+#endif
         }
         return true;
     }
@@ -5447,22 +6772,42 @@ const uint8_t* getSnapshotData(size_t& snapshotLength) {
 // (or the root of the SD card).  The ROM is patched in memory only.
 
 static const char* const TAPE_ROM_NAME = "48.rom";
+
+// The ROM files (48.rom, 128.rom ...) are looked for in the root of the flash, then the SD
+// card's ROMS folder (which Set up SD card makes, hidden), then the root of the card
+static bool rom_file_open(FileHandle& f, const char* name) {
+    if (f.open(Drive::INTERNAL_FLASH, name, true)) return true;
+    if (!sd_card_mounted) return false;
+    char path[48];
+    snprintf(path, sizeof(path), "%s/%s", ROMS_FOLDER, name);
+    return f.open(Drive::EXTERNAL_SD_CARD, path, true) || f.open(Drive::EXTERNAL_SD_CARD, name, true);
+}
 static const uint32_t TAPE_MBOX = 0x3FF8;        // mailbox, replaces the (c) glyph
-static const uint32_t TAPE_HOOK_ADDR = 0x0556;   // LD-BYTES
+static const uint32_t TAPE_LDBYTES = 0x0556;     // LD-BYTES
+static const uint32_t TAPE_HOOK_ADDR = 0x0562;   // the hook: LD-BYTES after its first 12 bytes
 
 // Mailbox layout: +0 state (1 = request posted, 2 = ok, 3 = failed),
 // +1 flag, +2/+3 destination, +4/+5 length, +6 mode (1 load, 0 verify)
 
-// Z80 hook (assembled and tested in a simulator).  Ends with the 8 byte
-// glyph that the hook writes back over the mailbox when it is finished.
-static const uint8_t TAPE_HOOK[] = {
-    0xF3, 0x21, 0x3F, 0x05, 0xE5, 0x32, 0xF9, 0x3F, 0xDD, 0x22, 0xFA, 0x3F,
-    0xED, 0x53, 0xFC, 0x3F, 0x9F, 0xE6, 0x01, 0x32, 0xFE, 0x3F, 0xDD, 0x19,
-    0x11, 0x00, 0x00, 0x3E, 0x01, 0x32, 0xF8, 0x3F, 0x3A, 0xF8, 0x3F, 0xFE,
-    0x02, 0x38, 0xF9, 0xFE, 0x03, 0xF5, 0x21, 0x90, 0x05, 0x11, 0xF8, 0x3F,
-    0x01, 0x08, 0x00, 0xED, 0xB0, 0x11, 0x00, 0x00, 0xF1, 0xC9,
-    0x3C, 0x42, 0x99, 0xA1, 0xA1, 0x99, 0x42, 0x3C
+// Z80 hook, at 0x0562.  The first 12 bytes of LD-BYTES (0x0556-0x0561: INC D, EX AF,AF',
+// DEC D, DI, the border, PUSH SA/LD-RET) are left as they are, so a game that does those
+// itself and jumps to 0x0562 (Out Run's and Gauntlet's level loaders do) finds the hook
+// too; A' and F' then hold the flag byte and the carry (load or verify) either way.
+// Assembled with sjasmplus (tools/picosim/tests/tapehook.asm):
+//     EX AF,AF' / DI / LD (3FF9),A / LD (3FFA),IX / LD (3FFC),DE / SBC A,A / AND 1 /
+//     LD (3FFE),A / ADD IX,DE / LD A,1 / LD (3FF8),A / wait: LD A,(3FF8) / CP 2 / JR C,wait /
+//     CP 3 / PUSH AF / LD HL,glyph / LD DE,3FF8 / LD BC,8 / LDIR / LD DE,0 / POP AF / RET
+// It ends with the 8 byte glyph that the hook writes back over the mailbox when it is
+// finished.  It stays below LD-EDGE-2 (0x05E3).
+static constexpr uint8_t TAPE_HOOK[] = {
+    0x08, 0xF3, 0x32, 0xF9, 0x3F, 0xDD, 0x22, 0xFA, 0x3F, 0xED, 0x53, 0xFC,
+    0x3F, 0x9F, 0xE6, 0x01, 0x32, 0xFE, 0x3F, 0xDD, 0x19, 0x3E, 0x01, 0x32,
+    0xF8, 0x3F, 0x3A, 0xF8, 0x3F, 0xFE, 0x02, 0x38, 0xF9, 0xFE, 0x03, 0xF5,
+    0x21, 0x96, 0x05, 0x11, 0xF8, 0x3F, 0x01, 0x08, 0x00, 0xED, 0xB0, 0x11,
+    0x00, 0x00, 0xF1, 0xC9, 0x3C, 0x42, 0x99, 0xA1, 0xA1, 0x99, 0x42, 0x3C
 };
+static_assert(TAPE_HOOK_ADDR + sizeof(TAPE_HOOK) - 8 == 0x0596, "the hook's LD HL,glyph");
+static_assert(TAPE_HOOK_ADDR + sizeof(TAPE_HOOK) <= 0x05E3, "LD-EDGE-2 must stay");
 
 // What an unmodified 48K ROM has where we patch it
 static const uint8_t TAPE_ROM_LDBYTES_SIG[] = {
@@ -5501,12 +6846,51 @@ static const uint8_t TAPE_AUTO_LOAD_CODE[] = { 0xEF, '"', '"', 0xAF, 0x0D, 0 }; 
 static const uint8_t TAPE_AUTO_HOOK_SIG[] = { 0xFD, 0xCB, 0x02, 0xEE, 0x18, 0x07 };
 
 static bool tape_service_active = false;
+// E on the tape position screen: the tape is taken out (its file closed, so it can be erased
+// or moved), but the trap's ROM stays, as the game is using it: a load then fails at once
+// (as with no tape; BREAK stops it) until another tape is loaded
+static bool tape_ejected = false;
 static bool tape_trap_running() { return tape_service_active; }
 static FileHandle tape_file;
 static bool tape_file_open = false;
 static uint8_t tape_drive = 0;
 static char tape_name[BROWSE_PATH_MAX];
 static TzxState tape_tz;      // where the tape being served is (a preview of another .tzx has its own)
+static uint32_t tape_done = 0;  // data blocks the tape has gone past since its start
+static bool tape_goto(uint32_t block);
+// Tape in (T in Browse Games): see tape_in_start()
+static const uint32_t TAPE_IN_ENTRY = TAPE_HOOK_ADDR;   // as in piohandler.S
+static const uint32_t TAPE_IN_EXIT = TAPE_HOOK_ADDR + 1 + (sizeof(TAPE_HOOK) - 8) - 1;   // its RET
+static_assert(TAPE_IN_EXIT == 0x0596, "piohandler.S has TAPE_IN_EXIT 0x0596");
+static_assert(TAPE_HOOK[sizeof(TAPE_HOOK) - 9] == 0xC9, "the hook ends with RET before its glyph");
+static_assert(TAPE_HOOK[36] == 0x21 && TAPE_HOOK[37] == 0x96 && TAPE_HOOK[38] == 0x05, "LD HL,glyph");
+static const uint32_t TAPE_IN_ENTRY_SHIFTED = (0u << 14 | TAPE_IN_ENTRY) << 17;   // an M1 read
+// Recording (W on the tape position screen): SAVE goes through SA-BYTES, where the Pico takes
+// over in the same way and serves TAPE_SAVE_HOOK (tools/picosim/tests/savehook.asm). It hands
+// the block (flag, from, length; mailbox mode 2) to the Pico, which writes it on the end of the
+// recording, then jumps to SA/LD-RET (0x053F) in the Spectrum's ROM. Playing and recording are
+// one at a time, as on a cassette deck: the bus handler watches one of the two.
+static bool tape_rec = false;                           // recording (tape_name is the new file)
+static const uint32_t TAPE_SAVE_ENTRY = 0x04C2;         // SA-BYTES
+static constexpr uint8_t TAPE_SAVE_HOOK[] = {
+    0x00, 0xF3, 0x32, 0xF9, 0x3F, 0xDD, 0x22, 0xFA, 0x3F, 0xED, 0x53, 0xFC, 0x3F, 0x3E, 0x02, 0x32,
+    0xFE, 0x3F, 0x3E, 0x01, 0x32, 0xF8, 0x3F, 0x3A, 0xF8, 0x3F, 0xFE, 0x02, 0x38, 0xF9, 0xC3, 0x3F,
+    0x05
+};
+static const uint32_t TAPE_SAVE_EXIT = TAPE_SAVE_ENTRY + sizeof(TAPE_SAVE_HOOK) - 1;  // its JP's last byte
+static_assert(TAPE_SAVE_EXIT == 0x04E2 && TAPE_SAVE_EXIT < TAPE_IN_ENTRY, "the two hooks apart");
+static_assert(TAPE_SAVE_HOOK[sizeof(TAPE_SAVE_HOOK) - 3] == 0xC3, "it ends with JP 053F");
+
+// The bus handler takes the new values when the NMI ROM exits: playing (a tape put in with T)
+static void tape_in_watch(bool on) {
+    rom_state.tape_exit = (uint32_t) TAPE_IN_EXIT << 18;
+    rom_state.tape_entry = on ? TAPE_IN_ENTRY_SHIFTED : 1;
+}
+// ... or recording
+static void tape_rec_watch() {
+    rom_state.tape_exit = (uint32_t) TAPE_SAVE_EXIT << 18;
+    rom_state.tape_entry = (0u << 14 | TAPE_SAVE_ENTRY) << 17;     // an M1 read
+}
 
 static bool tape_open_file() {
     if (tape_file_open) {
@@ -5520,23 +6904,51 @@ static bool tape_open_file() {
         tape_file_open = false;
     }
     tape_tz = tz;
+    tape_done = 0;
     return tape_file_open;
 }
 
+// sd_check: a tape playing from the card keeps its file open (allowed); when the card has to be
+// mounted again, the file is closed first and opened again after, where it was
+// (where the tape was: kept on sd_check's stack, the RAM for statics being all used)
+struct TapeLost {
+    bool lost;
+    uint32_t pos, done;
+    TzxState tz;
+};
+static bool tape_on_card_open() { return tape_file_open && tape_drive == 1; }
+static void tape_card_lost(TapeLost& t) {
+    t.lost = tape_on_card_open();
+    if (!t.lost) return;
+    t.pos = tape_file.tell();
+    t.done = tape_done;
+    t.tz = tape_tz;
+    tape_file.close();
+    tape_file_open = false;
+}
+static void tape_card_back(const TapeLost& t) {
+    if (!t.lost || !sd_card_mounted) return;
+    tape_file_open = tape_file.open(Drive::EXTERNAL_SD_CARD, tape_name, true);
+    if (tape_file_open && tape_file.seek(t.pos)) {
+        tape_done = t.done;
+        tape_tz = t.tz;
+    } else {
+        tape_open_file();               // from its start, then
+    }
+}
+
 // Reads and patches the 48K ROM into rom_data[0..16383]
-static bool tape_load_patched_rom(bool first_block_is_code) {
+static bool tape_load_patched_rom(bool first_block_is_code, uint8_t* scratch = nullptr) {
     // The ROM is read into the part of the snapshot buffer that the 48K
-    // memory image does not use, instead of a buffer of its own.
+    // memory image does not use, instead of a buffer of its own (or into scratch: a 128K
+    // snapshot fills the buffer)
     static const uint32_t ROM_SIZE = 16384;
     static const uint32_t ROM_SCRATCH = 65536;
     static_assert(ROM_SCRATCH + ROM_SIZE <= SNAP_LOAD_BUFFER_SIZE, "no room for the ROM");
     static_assert(ROM_SCRATCH >= SNA_FILE_SIZE, "the ROM would overlap the memory image");
-    uint8_t* rom = reinterpret_cast<uint8_t*>(snap_load_buffer) + ROM_SCRATCH;
+    uint8_t* rom = scratch != nullptr ? scratch : reinterpret_cast<uint8_t*>(snap_load_buffer) + ROM_SCRATCH;
     FileHandle f;
-    bool opened = f.open(Drive::INTERNAL_FLASH, TAPE_ROM_NAME, true);
-    if (!opened) {
-        opened = f.open(Drive::EXTERNAL_SD_CARD, TAPE_ROM_NAME, true);
-    }
+    bool opened = rom_file_open(f, TAPE_ROM_NAME);
     if (!opened) {
         LOG("Tape ROM: %s not found\n", TAPE_ROM_NAME);
         return false;
@@ -5547,7 +6959,7 @@ static bool tape_load_patched_rom(bool first_block_is_code) {
         LOG("Tape ROM: %s must be a 16384 byte 48K ROM image\n", TAPE_ROM_NAME);
         return false;
     }
-    if (memcmp(rom + TAPE_HOOK_ADDR, TAPE_ROM_LDBYTES_SIG, sizeof(TAPE_ROM_LDBYTES_SIG)) != 0 ||
+    if (memcmp(rom + TAPE_LDBYTES, TAPE_ROM_LDBYTES_SIG, sizeof(TAPE_ROM_LDBYTES_SIG)) != 0 ||
         rom[0x053F] != 0xF5 || rom[0] != 0xF3) {
         LOG("Tape ROM: %s does not look like a standard 48K ROM\n", TAPE_ROM_NAME);
         return false;
@@ -5581,6 +6993,8 @@ static bool tape_load_patched_rom(bool first_block_is_code) {
 // Serves one block of the tape.  Returns true if the request was satisfied
 // (the way a successful LD-BYTES would).
 static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bool load);
+static int level_loaders_patch(uint8_t* mem, uint32_t n, uint32_t base, uint16_t* at, int max);
+static bool level_loaders_scan_pending = false;     // the Spectrum's memory to be looked at (level_loaders_poll)
 static bool tape_serve_block(uint8_t flag, uint16_t dest, uint16_t length, bool load) {
     tz = tape_tz;
     bool ok = tape_serve_block_at(flag, dest, length, load);
@@ -5591,7 +7005,9 @@ static bool tape_serve_block(uint8_t flag, uint16_t dest, uint16_t length, bool 
 static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bool load) {
     const bool tzx = tape_is_tzx(tape_name);
     uint32_t blen;
-    if (!tape_next_block(tape_file, tzx, blen)) {
+    bool more = tape_next_block(tape_file, tzx, blen);
+    if (more) tape_done++;
+    if (!more) {
         // The end of the tape: the load fails (as it would wait for ever on a real tape) and
         // the tape is rewound, so the next load starts from the first block again.
         LOG("Tape: end of the tape\n");
@@ -5622,6 +7038,8 @@ static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bo
     if (keep > 0) {
         uint8_t* target = reinterpret_cast<uint8_t*>(snap_load_buffer) + SNA_HEADER_SIZE + (d - 16384);
         if (tape_file.read(target, keep) != (int)keep) return false;
+        // a game's own copy of the ROM loader in it (its level loader): made to use the trap
+        if (load && cfg.level_loaders) level_loaders_patch(target, keep, d, nullptr, 0);
     }
     uint32_t used = skipfront + keep;
     if (!tap_skip(tape_file, payload - used + 1)) return false;   // rest of block and checksum
@@ -5639,29 +7057,76 @@ static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bo
     return ok;
 }
 
+static bool tape_record_block(uint8_t flag, uint16_t from, uint16_t length);
 // Called from the main loop
 static void tape_service_poll() {
     volatile uint8_t* mbox = rom_data + TAPE_MBOX;
     if (!tape_service_active || mbox[0] != 1) {
         return;
     }
+    if (tape_ejected) {
+        mbox[0] = 3;                // no tape
+        return;
+    }
     uint8_t flag = mbox[1];
     uint16_t dest = mbox[2] | (mbox[3] << 8);
     uint16_t length = mbox[4] | (mbox[5] << 8);
+    if (mbox[6] == 2) {                 // a SAVE (the record hook)
+        bool ok = tape_rec && tape_record_block(flag, dest, length);
+        mbox[0] = ok ? 2 : 3;
+        return;
+    }
     bool load = mbox[6] != 0;
     bool ok = tape_serve_block(flag, dest, length, load);
     mbox[0] = ok ? 2 : 3;
 }
 
+#ifdef PICOFACE_HOST
+// the simulator's main loop: a tape block asked for
+void host_tape_poll() { tape_service_poll(); }
+#endif
+
 static void tape_service_stop() {
+    tape_in_watch(false);
+    tape_in = false;
+    tape_rec = false;
     if (tape_service_active) {
         tape_service_active = false;
+        tape_ejected = false;
         if (tape_file_open) {
             tape_file.close();
             tape_file_open = false;
         }
         rom_state.flags_on_nmi_exit = 0;       // back to the internal ROM
         rom_state.writableStartAddress = 32768;
+    }
+}
+
+static void tape_eject() {
+    if (tape_rec) {                     // stop recording: the file is complete as it is
+        LOG("Tape: recording to %s stopped\n", tape_name);
+        tape_service_stop();
+        return;
+    }
+    if (tape_service_active && !tape_ejected) {
+        if (tape_file_open) {
+            tape_file.close();
+            tape_file_open = false;
+        }
+        tape_ejected = true;
+        if (tape_in) {
+            tape_in_watch(false);       // the Spectrum's own ROM loads from its EAR socket again
+        }
+        LOG("Tape: ejected\n");
+    }
+}
+
+static void tape_eject_if_in(uint8_t drive, const char* path) {
+    if (!tape_service_active || tape_ejected || (drive == 1) != (tape_drive == 1)) return;
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/') n--;        // a folder, given with or without its '/'
+    if (strncasecmp(tape_name, path, n) == 0 && (tape_name[n] == '\0' || tape_name[n] == '/' || n == 1)) {
+        tape_eject();
     }
 }
 
@@ -5688,11 +7153,1610 @@ static bool tape_service_start(uint8_t drive, const char* filename) {
         return false;
     }
     tape_service_active = true;
+    tape_ejected = false;
     rom_state.flags_on_nmi_exit = 1;                    // serve our ROM when the NMI exits
     rom_state.writableStartAddress = TAPE_MBOX;         // only the mailbox is writable
     return true;
 }
 
+// ---- Tape in (T in Browse Games) ----
+// The tape is put in for the Spectrum's own ROMs, with no reset: 128 BASIC, the Tape Loader,
+// 48 BASIC, or a game already running. The Spectrum's ROM runs as normal, and the bus handler
+// (piohandler.S) watches for the fetch at 0x0562 in LD-BYTES: there it serves rom_data, which
+// holds TAPE_IN_HOOK (the trap's hook with a NOP before it), and hands back to the internal ROM
+// when the hook's RET is read. The hook asks for the block through the mailbox as the 48K
+// trap's does, so tape_service_poll() serves both. On a 128K the editor ROM has text at
+// 0x0556-0x05A0, so the fetch only happens in ROM 1 (48 BASIC), in LD-BYTES.
+// The 48K way (a tape loaded with its number) is unchanged: the Pico serves its patched 48K
+// ROM all the time, with the hook in it, and the bus handler's watch stays off.
+
+// The hook in rom_data: a NOP (served from a constant, as the NMI's first byte is), the trap's
+// hook, its glyph. Nothing else in rom_data is ever served while the internal ROM is in use.
+static void tape_in_hook_to_rom() {
+    memset(rom_data, 0, 16384);
+    uint8_t* hook = rom_data + TAPE_IN_ENTRY;
+    hook[0] = 0x00;
+    memcpy(hook + 1, TAPE_HOOK, sizeof(TAPE_HOOK));
+    hook[1 + 37] = (uint8_t) ((TAPE_IN_EXIT + 1) & 0xFF);         // LD HL,glyph: it is one on
+    memcpy(rom_data + TAPE_SAVE_ENTRY, TAPE_SAVE_HOOK, sizeof(TAPE_SAVE_HOOK));
+}
+
+
+// Puts the tape filename (on drive: 1 the SD card) in. The NMI menu is up. nullptr if it is in,
+// else why not
+static const char* tape_in_start(uint8_t drive, const char* filename, uint32_t block) {
+    if (rom_state.flags_on_nmi_exit != 0 && !tape_service_active) {
+        return "Not with a changed ROM";            // C - Change ROM: Internal Rom first
+    }
+    tape_service_stop();                            // a 48K tape too: its ROM is replaced
+    if (filename != tape_name) {
+        snprintf(tape_name, sizeof(tape_name), "%s", filename);
+    }
+    tape_drive = drive;
+    if (!tape_open_file()) {
+        LOG("Tape in: could not open %s\n", tape_name);
+        return "Cannot open the tape";
+    }
+    tape_in_hook_to_rom();
+    tape_service_active = true;
+    tape_ejected = false;
+    tape_in = true;
+    rom_state.flags_on_nmi_exit = 0;                // the internal ROM
+    rom_state.writableStartAddress = 32768;
+    tape_goto(block);
+    tape_in_watch(true);
+    level_loaders_scan_pending = true;              // once the menu has gone
+    LOG("Tape in: %s from block %u\n", tape_name, (unsigned) tape_done);
+    return nullptr;
+}
+
+// ---- Level loaders (multi-load, stage B) ----
+// Some games load their levels with their own copy of the ROM's LD-BYTES in RAM (Out Run's
+// Speedlock releases, at 0x8795), often faster than the ROM and without a BREAK test. The Pico
+// only sees fetches from the ROM, so the tape trap (and tape in, T) never hears of such a load:
+// the game waits at PRESS PLAY. Such a copy is found by the way LD-BYTES starts reading the tape:
+//     LD HL,<its SA/LD-RET> / PUSH HL / IN A,(FE) / RRA / AND 20 ...
+// with its own LD-EDGE close by (LD A,7F / IN A,(FE) / RRA / [RET NC] / XOR C / AND 20). The
+// IN A,(FE) / RRA (DB FE 1F) is made JP 0x0562, the place in the ROM's LD-BYTES after the same
+// steps, which is where the trap's hook is: the game has already set A'F' (the flag and load or
+// verify), IX and DE and pushed its own return, so the hook loads the block from the tape file
+// and returns there with the carry flag as LD-BYTES would. The bytes before (the border, the
+// game's own variables) still run.
+// Done (with level_loaders = patch in Picomenu.ini) to each block the trap loads, and to the
+// whole of the Spectrum's memory as it can see it just after a tape is put in with T or a
+// snapshot carries on with its tape (the Pico reads it and writes the 3 bytes back, with NMIs).
+// Without a tape in, 0x0562 is the ROM's own LD-BYTES, which loads at the normal speed.
+static const uint8_t LL_READ[] = { 0xDB, 0xFE, 0x1F, 0xE6, 0x20 };     // IN A,(FE) / RRA / AND 20
+static const uint8_t LL_JUMP[] = { 0xC3, (uint8_t) (TAPE_HOOK_ADDR & 0xFF), (uint8_t) (TAPE_HOOK_ADDR >> 8) };
+static const int LL_EDGE_NEAR = 256;        // how far from it its LD-EDGE may be
+
+// LD A,7F / IN A,(FE) / RRA / [RET NC] / XOR C / AND 20 at mem[i]
+static bool ll_edge_at(const uint8_t* m, uint32_t n, uint32_t i) {
+    if (i + 9 > n || m[i] != 0x3E || m[i + 1] != 0x7F || m[i + 2] != 0xDB || m[i + 3] != 0xFE || m[i + 4] != 0x1F) return false;
+    uint32_t k = i + 5;
+    if (m[k] == 0xD0) k++;
+    return k + 3 <= n && m[k] == 0xA9 && m[k + 1] == 0xE6 && m[k + 2] == 0x20;
+}
+
+// The level loaders in mem (n bytes, mem[0] at address base) are patched; at[] (if not nullptr)
+// gets the addresses of the 3 bytes changed, up to max of them. The number patched.
+static int level_loaders_patch(uint8_t* mem, uint32_t n, uint32_t base, uint16_t* at, int max) {
+    int found = 0;
+    for (uint32_t i = 0; i + 4 + sizeof(LL_READ) <= n; i++) {
+        if (mem[i] != 0x21 || mem[i + 3] != 0xE5 || memcmp(mem + i + 4, LL_READ, sizeof(LL_READ)) != 0) continue;
+        uint16_t ret = (uint16_t) (mem[i + 1] | (mem[i + 2] << 8));
+        if (ret < 0x4000 && ret != 0x053F) continue;            // its return: in RAM, or SA/LD-RET
+        uint32_t from = i > (uint32_t) LL_EDGE_NEAR ? i - LL_EDGE_NEAR : 0;
+        uint32_t to = i + LL_EDGE_NEAR < n ? i + LL_EDGE_NEAR : n;
+        bool edge = false;
+        for (uint32_t k = from; k < to && !edge; k++) edge = ll_edge_at(mem, n, k);
+        if (!edge) continue;
+        uint32_t addr = base + i + 4;
+        if (addr < 0x4000 || addr + sizeof(LL_JUMP) > 0x10000) continue;
+        memcpy(mem + i + 4, LL_JUMP, sizeof(LL_JUMP));
+        LOG("Level loader at %04X (return %04X): it now loads from the tape trap\n", (unsigned) addr, ret);
+        if (at != nullptr && found < max) at[found] = (uint16_t) addr;
+        found++;
+    }
+    return found;
+}
+
+// After T or a snapshot that carries on with its tape: the Spectrum's memory is read (once the
+// menu has gone) and its level loaders patched. Called from the main loop.
+static void level_loaders_poll() {
+    if (!level_loaders_scan_pending || rom_state.nmi_active || (rom_state.flags & 0x2) != 0) return;
+    level_loaders_scan_pending = false;
+    if (!cfg.level_loaders || !tape_service_active || tape_ejected || tape_rec || sna_in_buffer) return;
+    if (loaded_paging.valid && (loaded_paging.port & 0x30) == 0) {
+        // a 128K game with the editor ROM paged: 0x0562 is not LD-BYTES there
+        LOG("Level loaders: not looked for (the 128K editor ROM is paged)\n");
+        return;
+    }
+    bool loggingWasEnabled = enable_logging;
+    enable_logging = false;
+    bool got = sendNmiAndWaitForCompletion(STARTUP_ACTION_SAVE_MEMORY, 0x4000, 0xC000);
+    enable_logging = loggingWasEnabled;
+    if (!got) return;
+    uint8_t* ram = reinterpret_cast<uint8_t*>(snap_load_buffer) + SNA_HEADER_SIZE;    // address 16384 is ram[0]
+    uint16_t at[4];
+    int n = level_loaders_patch(ram, 0xC000, 0x4000, at, 4);
+    for (int k = 0; k < n && k < 4; k++) {
+        enable_logging = false;
+        sendNmiAndWaitForCompletion(STARTUP_ACTION_LOAD_MEMORY, at[k], (uint16_t) sizeof(LL_JUMP));
+        enable_logging = loggingWasEnabled;
+    }
+    LOG("Level loaders: %d patched\n", n);
+}
+#ifdef PICOFACE_HOST
+void host_level_loaders_poll() { level_loaders_poll(); }
+#endif
+
+// ---- Recording (W on the tape position screen) ----
+// A new .tap in RECORDINGS_DIR on the SD card, named when W is pressed. Each SAVE (or anything
+// that saves with the ROM's SA-BYTES) adds its block on the end at once, until E stops it. A name
+// already in use is refused, so a recording never writes over a tape.
+static const char RECORDINGS_DIR[] = "/Recordings";
+static uint32_t tape_rec_blocks = 0;
+static bool tape_rec_failed = false;            // a block could not be written
+
+// Starts recording to RECORDINGS_DIR/<typed>.tap. The NMI menu is up. nullptr if it has
+// started, else why not
+static const char* tape_record_start(const char* typed) {
+    if (rom_state.flags_on_nmi_exit != 0 && !tape_service_active) {
+        return "Not with a changed ROM";
+    }
+    if (!sd_card_mounted) {
+        return "No SD card";
+    }
+    char name[40];
+    snprintf(name, sizeof(name), "%s", typed);
+    if (!tidy_new_name(name)) {
+        return "Type a name for the tape";
+    }
+    char* path = grab_path;                     // free here
+    int n = snprintf(path, sizeof(grab_path), "%s/%s.tap", RECORDINGS_DIR, name);
+    if (n < 0 || n >= (int) sizeof(tape_name)) {
+        return "That name is too long";
+    }
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, RECORDINGS_DIR) != fsops::KIND_DIR &&
+            make_sd_folder(RECORDINGS_DIR) != FILEOP_OK) {
+        return "Cannot make /Recordings";
+    }
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) != fsops::KIND_NONE) {
+        return "That name is already in use";
+    }
+    FileHandle f;                               // the new, empty tape
+    if (!f.open(Drive::EXTERNAL_SD_CARD, path, false)) {
+        return "Cannot make the file";
+    }
+    f.close();
+    tape_service_stop();                        // playing and recording are one at a time
+    snprintf(tape_name, sizeof(tape_name), "%s", path);
+    tape_drive = 1;
+    tape_in_hook_to_rom();
+    tape_service_active = true;
+    tape_ejected = false;
+    tape_in = true;                             // the Spectrum's own ROM; resets keep it
+    tape_rec = true;
+    tape_rec_blocks = 0;
+    tape_rec_failed = false;
+    rom_state.flags_on_nmi_exit = 0;
+    rom_state.writableStartAddress = 32768;
+    tape_rec_watch();
+    LOG("Tape: recording to %s\n", tape_name);
+    return nullptr;
+}
+
+// A block SA-BYTES was asked to save: the flag, then length bytes from `from`, then the
+// checksum, as a .tap block on the end of the recording. The bytes at 16384 and up come from the
+// Spectrum (through the snapshot buffer, at their address - 16384); any below are the ROM's, which
+// the Pico can't read, so they are taken from 48.rom (zeros if there is none).
+static bool tape_record_block(uint8_t flag, uint16_t from, uint16_t length) {
+    uint32_t start = from, end = (uint32_t) from + length;
+    if (end > 65536) end = 65536;               // as far as the Z80 can see
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    uint8_t* ram = buf + SNA_HEADER_SIZE;       // address 16384 is ram[0]
+    uint8_t* rom = buf + 65536;                 // past the 48K image (as tape_load_patched_rom)
+    static_assert(SNA_HEADER_SIZE + 49152 <= 65536 && 65536 + 16384 <= SNAP_LOAD_BUFFER_SIZE, "room");
+    if (end > 16384) {
+        uint32_t s = start > 16384 ? start : 16384;
+        bool loggingWasEnabled = enable_logging;
+        enable_logging = false;
+        bool got = sendNmiAndWaitForCompletion(STARTUP_ACTION_SAVE_MEMORY, (uint16_t) s, (uint16_t) (end - s));
+        enable_logging = loggingWasEnabled;
+        if (!got) return false;
+    }
+    if (start < 16384) {
+        memset(rom, 0, 16384);
+        FileHandle r;
+        if (rom_file_open(r, TAPE_ROM_NAME)) {
+            r.read(rom, 16384);
+            r.close();
+        }
+    }
+    FileHandle f;
+    if (!f.openAppend(Drive::EXTERNAL_SD_CARD, tape_name)) {
+        tape_rec_failed = true;
+        return false;
+    }
+    uint32_t n = end - start;
+    uint8_t head[3] = { (uint8_t) ((n + 2) & 0xFF), (uint8_t) ((n + 2) >> 8), flag };
+    uint8_t sum = flag;
+    bool ok = f.write(head, 3) == 3;
+    if (ok && start < 16384) {
+        uint32_t e = end < 16384 ? end : 16384;
+        for (uint32_t a = start; a < e; a++) sum ^= rom[a];
+        ok = f.write(rom + start, e - start) == (int) (e - start);
+    }
+    if (ok && end > 16384) {
+        uint32_t s = start > 16384 ? start : 16384;
+        for (uint32_t a = s; a < end; a++) sum ^= ram[a - 16384];
+        ok = f.write(ram + (s - 16384), end - s) == (int) (end - s);
+    }
+    ok = ok && f.write(&sum, 1) == 1;
+    ok = f.close() && ok;
+    if (ok) tape_rec_blocks++;
+    else tape_rec_failed = true;
+    LOG("Tape: recorded block flag %02X, %u bytes from %04X%s\n", flag, (unsigned) n, (unsigned) start, ok ? "" : " (not written)");
+    return ok;
+}
+
+// T in Browse Games, then the tape's number
+// WORD param1 = the list entry's name, BYTE param2 = the drive, WORD param3 = where the reason
+// goes if it can't be put in. Status 0 (it is in: the menu goes back to the program), or 1
+static void nmi_action_tape_insert() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint16_t offset = (nmi_rom_data[3] << 8) | nmi_rom_data[2];
+    uint8_t drive = nmi_rom_data[4] == 1 ? 1 : 0;
+    uint16_t why_at = (nmi_rom_data[6] << 8) | nmi_rom_data[5];
+    const char* why = nullptr;
+    int i = file_entry_for(drive, offset);
+    char* path = grab_path;                         // free here (no grab, save or recent list now)
+    static_assert(sizeof(grab_path) >= BROWSE_PATH_MAX, "a whole path");
+    if (i < 0) {
+        why = "Not found";
+    } else {
+        const char* name = list_entry_name[i];
+        const char* ext = name + strlen(name) + 1;
+        int n = snprintf(path, sizeof(grab_path), "%s/%s.%s", list_entry_dir[i], name, ext);
+        if (strcasecmp(ext, "tap") != 0 && strcasecmp(ext, "tzx") != 0) {
+            why = "That is not a .tap or .tzx";
+        } else if (n < 0 || n >= (int) sizeof(grab_path)) {
+            why = "That path is too long";
+        } else {
+            walk_stop();                            // the folder may be read again; nothing is open
+            why = tape_in_start(drive, path, 0);
+            if (why == nullptr) {
+                remember_last_game(drive, list_entry_dir[i], name);    // Q names its saves after it
+                persist_last_game();
+                game_running = true;
+            }
+        }
+    }
+    if (why != nullptr && why_at < 16384 - SNAPLIST_PATH_SIZE) {
+        snprintf(reinterpret_cast<char*>(nmi_rom_data + why_at), SNAPLIST_PATH_SIZE, "%s", why);
+    }
+    nmi_rom_data[0] = why == nullptr ? 0 : 1;
+}
+
+// Empties the Waste Bin (and makes it again, empty): nullptr, or why not
+static const char* waste_bin_empty() {
+    char* path = erase_path;
+    char* scratch = erase_scratch;
+    walk_stop();
+    if (!sd_card_mounted) return "No SD card (or the PC has it)";
+    const char* why = nullptr;
+    snprintf(path, sizeof(erase_path), "%s", WASTE_BIN);
+    tape_notes_follow_folder(1, WASTE_BIN, nullptr, false);     // the tape notes of what is in it
+    bool ok = fsops::kind(Drive::EXTERNAL_SD_CARD, WASTE_BIN) != fsops::KIND_DIR ||
+        fsops::remove_tree(Drive::EXTERNAL_SD_CARD, path, sizeof(erase_path), find_dirs, 0, ERASE_MAX_DEPTH, scratch, sizeof(erase_scratch));
+    LOG("Empty the Waste Bin: %d\n", ok);
+    if (!ok) {
+        set_last_error("Cannot empty", "the Waste Bin");
+        why = "Some of it could not be erased";
+    }
+    if (!waste_bin_make()) why = "Cannot make the Waste Bin";
+    if (in_waste_bin(1, sd_cwd)) {
+        snprintf(sd_cwd, sizeof(sd_cwd), "%s", WASTE_BIN);     // a folder in it has gone
+    }
+    return why;
+}
+
+// ACTION_BIN_EMPTY (B in the Waste Bin): asks, and empties it on Y. BYTE param1 = the key
+// (0: the screen is opened). Status 0 the screen stays, 1 it is closed
+static uint8_t bin_empty_state = 0;         // 0 asking, 1 done (any key closes)
+__attribute__((noinline)) static void nmi_action_bin_empty() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    const char* result = nullptr;
+    if (key == 0) {
+        bin_empty_state = 0;
+    } else if (bin_empty_state == 1 || key == 'n' || key == 0x18 || key == 'x') {
+        nmi_rom_data[0] = 1;
+        return;
+    } else if (key == 'y') {
+        const char* why = waste_bin_empty();
+        result = why != nullptr ? why : "The Waste Bin is empty.";
+        bin_empty_state = 1;
+    }
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    help_put_text(screen, 0, 1, "Waste Bin", 9, gameinfo::ATTR_BANNER);
+    if (bin_empty_state == 0) {
+        help_put_text(screen, 3, 1, "Are you sure you want to empty", 30, gameinfo::ATTR_TEXT);
+        help_put_text(screen, 4, 1, "the waste bin?", 14, gameinfo::ATTR_TEXT);
+        help_put_text(screen, 6, 1, "Everything in it is erased for", 30, gameinfo::ATTR_DIM);
+        help_put_text(screen, 7, 1, "good.", 5, gameinfo::ATTR_DIM);
+        help_put_text(screen, 23, 1, "Y-Yes  N-No", 11, gameinfo::ATTR_KEYS);
+    } else {
+        help_put_text(screen, 3, 1, result, (int) strlen(result), gameinfo::ATTR_TEXT);
+        help_put_text(screen, 23, 1, "Press any key", 13, gameinfo::ATTR_KEYS);
+    }
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// ACTION_WASTE_BIN: BYTE param1 = 0 open it (W on the menu: Browse Games then lists it, on the
+// SD card), 2 leave it (Browse Games has its folder before W again). WORD param2 = where a message goes (a line).
+// Status 0 done, 1 not (the message says why)
+__attribute__((noinline)) static void nmi_action_waste_bin() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t op = nmi_rom_data[2];
+    uint16_t msg_at = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
+    const char* why = nullptr;
+    walk_stop();
+    if (!sd_card_mounted) {
+        why = "No SD card (or the PC has it)";
+    } else if (op == 2) {
+        bin_leave();
+    } else if (!waste_bin_make()) {
+        why = "Cannot make the Waste Bin";
+    } else {
+        if (!bin_open && !in_waste_bin(1, sd_cwd)) {
+            snprintf(bin_return_cwd, sizeof(bin_return_cwd), "%s", sd_cwd);
+        } else if (!bin_open) {
+            bin_return_cwd[0] = '\0';           // it was in the bin already: back to the root
+        }
+        bin_open = true;
+        snprintf(sd_cwd, sizeof(sd_cwd), "%s", WASTE_BIN);      // Browse Games lists it
+        snap_filter[0] = '\0';
+    }
+    if (why != nullptr && msg_at < 16384 - SNAPLIST_PATH_SIZE) {
+        snprintf(reinterpret_cast<char*>(nmi_rom_data + msg_at), SNAPLIST_PATH_SIZE, "%s", why);
+    }
+    nmi_rom_data[0] = why == nullptr ? 0 : 1;
+}
+
+// ---- H in Browse Games: hide a file or folder, or show it again (ACTION_SNAP_HIDE) ----
+// On the SD card it is the hidden attribute (as Windows sets it), on the flash a littlefs
+// attribute. Hidden ones are listed only with L-All, dimmed. Those always hidden (they can't be
+// loaded, or are system ones) stay so.
+// WORD param1 = the list entry's name, BYTE param2 = the drive, WORD param3 = where a message
+// goes (a line). Status 0: changed (the list is read again), 1: not, the message says why.
+__attribute__((noinline)) static void nmi_action_snap_hide() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint16_t offset = (nmi_rom_data[3] << 8) | nmi_rom_data[2];
+    uint8_t drive = nmi_rom_data[4] == 1 ? 1 : 0;
+    uint16_t msg_at = (nmi_rom_data[6] << 8) | nmi_rom_data[5];
+    const char* why = nullptr;
+    int i = any_entry_for(offset);
+    char* path = grab_path;                             // free here
+    if (i < 0) {
+        why = "Not found";
+    } else {
+        const char* name = list_entry_name[i];
+        uint8_t flags = entry_flags(name);
+        size_t len = strlen(name);
+        bool dir = len > 0 && name[len - 1] == '/';
+        if (dir) dir_entry_path(i, path, sizeof(grab_path));
+        else entry_path(i, nullptr, path, sizeof(grab_path));
+        bool hide = !(flags & ENTRY_HIDDEN_SET);
+        if (flags & ENTRY_ALWAYS) {
+            why = "Always hidden: can't be loaded";
+        } else if (drive == 1) {
+            FRESULT r = f_chmod(path, hide ? AM_HID : 0, AM_HID);
+            if (r != FR_OK) why = "Could not change it";
+        } else {
+            uint8_t one = 1;
+            int r = hide ? pico_setattr(path, FLASH_HIDDEN_ATTR, &one, 1) : pico_removeattr(path, FLASH_HIDDEN_ATTR);
+            if (r < 0) why = "Could not change it";
+        }
+        LOG("%s %s on drive %d: %s\n", hide ? "Hide" : "Show", path, drive, why != nullptr ? why : "done");
+        if (why == nullptr) {
+            walk_stop();                                // the list is read again, with the change
+        }
+    }
+    if (why != nullptr && msg_at < 16384 - SNAPLIST_PATH_SIZE) {
+        snprintf(reinterpret_cast<char*>(nmi_rom_data + msg_at), SNAPLIST_PATH_SIZE, "%s", why);
+    }
+    nmi_rom_data[0] = why == nullptr ? 0 : 1;
+}
+
+// ---- A .txt file (L-All lists them in Browse Games; ENTER or V opens one): ACTION_TEXT_FILE ----
+// The pico shows the file a page at a time (21 lines of 32 letters, long lines wrapped at a
+// space), N and P turning the pages; E edits it, on the SD card only, in the details' editor
+// (96 lines of 30 letters, 3 KB at most): a bigger file, or one with a longer line, can only be
+// looked at, as the editor would have to change it to hold it. X or BREAK closes it.
+// The screen is drawn at the start of snap_load_buffer (as the tape position's); the path and
+// where each page starts are kept above it, the file being edited in the details' room.
+static const uint32_t TXT_PATH_OFFSET = 8192;
+static const uint32_t TXT_PAGES_OFFSET = TXT_PATH_OFFSET + 512;
+static const int TXT_PAGES_MAX = 1024;                  // P goes back this many pages at most
+static const uint32_t TXT_READ_OFFSET = TXT_PAGES_OFFSET + TXT_PAGES_MAX * 4;
+static const size_t TXT_READ_SIZE = 1024;               // more than a page can use (21 lines of 32, and their ends)
+static_assert(BROWSE_PATH_MAX <= 512, "the text file's path does not fit");
+static_assert(TXT_READ_OFFSET + TXT_READ_SIZE <= 16384, "the text viewer would cover the game information's screen");
+static const int TXT_ROWS = 21;
+static const size_t TXT_EDIT_MAX = DET_FILE_MAX - 72;   // what the editor may grow it to (its file buffer is DET_FILE_MAX)
+static int txt_page = 0;                                // the page shown (pages[txt_page] is where it starts)
+static int txt_known = 1;                               // pages[0 .. txt_known-1] are known
+static bool txt_last = false;                           // the page shown is the last
+static uint8_t txt_drive = 1;
+static bool txt_editing = false;
+static bool txt_crlf = false;                           // its lines end with \r\n: saved the same way
+static const char* txt_msg = nullptr;                   // shown once above the keys
+
+static char* txt_path() { return snap_load_buffer + TXT_PATH_OFFSET; }
+static uint32_t* txt_pages() { return reinterpret_cast<uint32_t*>(snap_load_buffer + TXT_PAGES_OFFSET); }
+static DetEditorBig* txt_editor() { return reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET); }
+
+// Draws the page starting at file position `from`; returns where the next page starts, and
+// whether this page reached the end of the file
+NOTES_FUNC static uint32_t txt_draw_page(uint8_t* screen, uint32_t from, bool* at_end) {
+    char* buf = snap_load_buffer + TXT_READ_OFFSET;
+    int n = 0;
+    FileHandle& f = *notes_handle();
+    *at_end = true;
+    if (f.open(txt_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, txt_path(), true)) {
+        if (f.seek(from)) {
+            n = f.read(buf, TXT_READ_SIZE);
+            if (n < 0) n = 0;
+        }
+        *at_end = from + (uint32_t) n >= (uint32_t) f.size();
+        f.close();
+    } else {
+        help_put_text(screen, 2, 1, "Cannot read the file", 20, gameinfo::ATTR_KEYS);
+        return from;
+    }
+    int pos = 0;
+    for (int row = 0; row < TXT_ROWS && pos < n; row++) {
+        char line[33];
+        int len = 0, start = pos;
+        bool ended = false;                 // the line ended with its end of line (taken)
+        while (pos < n && len < 32) {
+            char c = buf[pos];
+            if (c == '\r' || c == '\n') {
+                pos++;
+                if (c == '\r' && pos < n && buf[pos] == '\n') pos++;
+                ended = true;
+                break;
+            }
+            if (c == '\t') c = ' ';
+            if ((unsigned char) c < 32 || (unsigned char) c > 126) c = '?';
+            line[len++] = c;
+            pos++;
+        }
+        if (!ended && len == 32 && pos < n && buf[pos] != '\r' && buf[pos] != '\n' && buf[pos] != ' ') {
+            // a word cut by the edge: the line breaks after its last space, if it has one
+            int sp = len - 1;
+            while (sp > 0 && line[sp] != ' ') sp--;
+            if (sp > 0) {
+                len = sp + 1;
+                pos = start + len;
+            }
+        }
+        if (!ended && pos < n && buf[pos] == ' ' && len == 32) {
+            pos++;                          // a space at the edge is the line's end
+        }
+        help_put_text(screen, 1 + row, 0, line, len, gameinfo::ATTR_TEXT);
+    }
+    if (pos < n) *at_end = false;
+    return from + (uint32_t) pos;
+}
+
+NOTES_FUNC static void txt_draw(uint8_t* screen) {
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    const char* path = txt_path();
+    const char* name = strrchr(path, '/');
+    name = name != nullptr ? name + 1 : path;
+    char title[48];
+    if (txt_editing) {
+        snprintf(title, sizeof(title), "Edit: %s", name);
+        help_put_text(screen, 0, 1, title, (int) strlen(title) > 30 ? 30 : (int) strlen(title), gameinfo::ATTR_BANNER);
+        det_field_draw_lines(screen, *txt_editor());
+        help_put_text(screen, 20, 1, "Move: cursor keys or CAPS+5-8", 29, gameinfo::ATTR_DIM);
+        help_put_text(screen, 22, 1, "ENTER new line  DELETE deletes", 30, gameinfo::ATTR_DIM);
+        return;
+    }
+    char pg[12];
+    snprintf(pg, sizeof(pg), "Pg %d", txt_page + 1);
+    int pl = (int) strlen(pg);
+    int room = 30 - pl - 1, tl = (int) strlen(name);
+    help_put_text(screen, 0, 1, name, tl > room ? room : tl, gameinfo::ATTR_BANNER);
+    help_put_text(screen, 0, 31 - pl, pg, pl, gameinfo::ATTR_BANNER);
+    uint32_t* pages = txt_pages();
+    bool at_end = true;
+    uint32_t next = txt_draw_page(screen, pages[txt_page], &at_end);
+    txt_last = at_end || next == pages[txt_page];
+    if (!txt_last && txt_page + 1 < TXT_PAGES_MAX && txt_page + 1 >= txt_known) {
+        pages[txt_page + 1] = next;
+        txt_known = txt_page + 2;
+    }
+    if (txt_msg != nullptr) {
+        help_put_text(screen, 22, 1, txt_msg, (int) strlen(txt_msg), gameinfo::ATTR_KEYS);
+        txt_msg = nullptr;
+    }
+    const char* keys = txt_drive == 1 ? "N-Next P-Prev E-Edit X-Exit" : "N-Next P-Prev X-Exit";
+    help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
+}
+
+// E: the file into the editor, if it fits it
+NOTES_FUNC static void txt_edit_start() {
+    if (txt_drive != 1) {
+        txt_msg = "Only files on the SD card";
+        return;
+    }
+    char* file = snap_load_buffer + DET_FILE_OFFSET;
+    FileHandle& f = *notes_handle();
+    if (!f.open(Drive::EXTERNAL_SD_CARD, txt_path(), true)) {
+        txt_msg = "Cannot read the file";
+        return;
+    }
+    int size = f.size();
+    int got = size <= (int) TXT_EDIT_MAX ? f.read(file, TXT_EDIT_MAX) : -1;
+    f.close();
+    if (size > (int) TXT_EDIT_MAX) {
+        txt_msg = "Too big to edit (3 KB at most)";
+        return;
+    }
+    if (got < 0) {
+        txt_msg = "Cannot read the file";
+        return;
+    }
+    DetEditorBig* ed = new (txt_editor()) DetEditorBig();
+    if (!ed->load(file, (size_t) got)) {
+        txt_msg = "Lines too long to edit here";
+        return;
+    }
+    ed->set_limit(TXT_EDIT_MAX);
+    txt_crlf = memchr(file, '\r', (size_t) got) != nullptr;
+    txt_editing = true;
+}
+
+// Saves the edited text over the file (as the notes are saved: written straight to it)
+static bool txt_saved_ini = false;     // the last save was of Picomenu.ini
+NOTES_FUNC static bool txt_save() {
+    char* file = snap_load_buffer + DET_FILE_OFFSET;
+    size_t n = txt_editor()->text(file, DET_FILE_MAX);
+    FileHandle& f = *notes_handle();
+    if (!f.open(Drive::EXTERNAL_SD_CARD, txt_path(), false)) {
+        set_last_error("Cannot save", "text file");
+        return false;
+    }
+    bool ok = true;
+    size_t at = 0;
+    while (ok && at < n) {                  // a line at a time, with \r\n if the file had them
+        const char* nl = (const char*) memchr(file + at, '\n', n - at);
+        size_t len = nl != nullptr ? (size_t) (nl - (file + at)) : n - at;
+        if (len > 0) ok = f.write(file + at, len) == (int) len;
+        if (ok && nl != nullptr) ok = txt_crlf ? f.write("\r\n", 2) == 2 : f.write("\n", 1) == 1;
+        at += len + (nl != nullptr ? 1 : 0);
+    }
+    ok = f.close() && ok;
+    if (!ok) set_last_error("Cannot save", "text file");
+    txt_saved_ini = ok && strcasecmp(txt_path(), settings::FILE_NAME) == 0;
+    if (txt_saved_ini) {
+        // Picomenu.ini was changed: it is used at once. The menu that is open gets the new save
+        // type and theme now, and the list may be sorted another way; show_all, details,
+        // start_drive and start_folder are how Browse Games starts, so the menu's next opening.
+        settings_load();
+        walk_stop();
+        uint8_t* rom = rom_data + 16384;
+        rom[START_SAVETYPE] = cfg.save_type;
+        rom[START_THEME] = cfg.light ? 1 : 0;
+        cfg_stale = true;
+        cfg_folder_due = true;
+    }
+    return ok;
+}
+
+// O-Options (in Tools): Picomenu.ini's settings and the screen grab order, changed on the
+// Spectrum (options.h). While the screen is open, the list's memory (free after walk_stop)
+// holds the file as it was, the file as it will be written, and what is shown (before: as the
+// file has it; after: as changed).
+static const size_t OPT_IN_MAX = 12 * 1024;
+static const size_t OPT_OUT_MAX = 16 * 1024;
+static_assert(OPT_IN_MAX + OPT_OUT_MAX + 2 * sizeof(options::Edit) + 16 <= LIST_POOL_SIZE, "Options fits in the list's memory");
+static char* opt_in() { return list_pool; }
+static char* opt_out() { return list_pool + OPT_IN_MAX; }
+static options::Edit* opt_before() { return reinterpret_cast<options::Edit*>(list_pool + OPT_IN_MAX + OPT_OUT_MAX); }
+static options::Edit* opt_after() { return opt_before() + 1; }
+static size_t opt_in_len = 0;
+static uint8_t opt_page = 0;            // 0 the settings, 1 the screen grab order
+static uint8_t opt_cursor[2] = { 0, 0 };
+static uint8_t opt_state = 0;           // 0 changing, 1 "Save changes?", 2 a message: any key closes
+static const char* opt_msg = nullptr;
+static bool opt_on_sd = true;           // where the file is (or will be)
+
+static const uint8_t OPT_ATTR_CURSOR = 0x68;   // black on bright cyan (the theme leaves it)
+
+// Reads the file (and, if it has no screen grab order, order.txt) into what is shown
+__attribute__((noinline)) static bool opt_open() {
+    walk_stop();                                    // the list's memory is ours
+    list_pool_busy = true;
+    info_loaded = false;
+    opt_on_sd = sd_card_mounted && cfg.source != 2;
+    opt_in_len = 0;
+    FileHandle& f = *notes_handle();
+    Drive drive = opt_on_sd ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH;
+    if (f.open(drive, settings::FILE_NAME, true)) {
+        int size = f.size();
+        int got = size >= 0 && size <= (int) OPT_IN_MAX ? f.read(opt_in(), OPT_IN_MAX) : -1;
+        f.close();
+        if (got < 0) {
+            opt_msg = size > (int) OPT_IN_MAX ? "Picomenu.ini is too big (12 KB)" : "Cannot read Picomenu.ini";
+            return false;
+        }
+        opt_in_len = (size_t) got;
+    }
+    options::Edit* b = new (opt_before()) options::Edit();
+    char folder[options::FOLDER_MAX];
+    folder[0] = '\x01';                             // the file has no start_folder
+    settings::Parser parser(b->s, folder, sizeof(folder));
+    parser.text(opt_in(), opt_in_len);
+    if (folder[0] != '\x01') snprintf(b->start_folder, sizeof(b->start_folder), "%s", folder[0] == '\0' ? "/" : folder);
+    screengrab::Order order;
+    if (b->s.has_order) {
+        order = b->s.order;
+    } else if (sd_card_mounted) {
+        FileHandle& g = *notes_handle();
+        if (g.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE, true) ||
+                g.open(Drive::EXTERNAL_SD_CARD, screengrab::ORDER_FILE_BARE, true)) {
+            read_text_lines(g, [&](const char* t, size_t n) { order.line(t, n); });
+            g.close();
+        }
+    }
+    b->set_order(order);
+    new (opt_after()) options::Edit(*b);
+    return true;
+}
+
+// Writes the changes into the file and uses them at once (as E on Picomenu.ini does)
+__attribute__((noinline)) static bool opt_save() {
+    size_t n = 0;
+    if (!options::rewrite(opt_in(), opt_in_len, *opt_before(), *opt_after(), opt_out(), OPT_OUT_MAX, &n)) {
+        opt_msg = "Picomenu.ini would be too big";
+        return false;
+    }
+    bool folder_changed = options::changed(*opt_before(), *opt_after(), options::START_FOLDER);
+    FileHandle& f = *notes_handle();
+    Drive drive = opt_on_sd ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH;
+    bool ok = f.open(drive, settings::FILE_NAME, false);
+    if (ok) {
+        ok = f.write(opt_out(), n) == (int) n;
+        ok = f.close() && ok;
+    }
+    if (!ok) {
+        set_last_error("Cannot save", "Picomenu.ini");
+        opt_msg = "Could not save Picomenu.ini";
+        return false;
+    }
+    walk_stop();                    // (the list's memory was ours: nothing is cached in it)
+    settings_load();
+    uint8_t* rom = rom_data + 16384;
+    rom[START_SAVETYPE] = cfg.save_type;
+    rom[START_THEME] = cfg.light ? 1 : 0;
+    cfg_stale = true;
+    if (folder_changed) cfg_folder_due = true;     // Browse Games starts there from the next menu
+    return true;
+}
+
+static void opt_draw(uint8_t* screen) {
+    const options::Edit& a = *opt_after();
+    const options::Edit& b = *opt_before();
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    const char* title = opt_page == 0 ? "Options (Picomenu.ini)" : "Options: Screen grab order";
+    help_put_text(screen, 0, 1, title, (int) strlen(title), gameinfo::ATTR_BANNER);
+    char v[40];
+    if (opt_page == 0) {
+        for (int i = 0; i < options::COUNT; i++) {
+            int row = 2 + i;
+            bool here = i == opt_cursor[0];
+            uint8_t attr = here ? OPT_ATTR_CURSOR : gameinfo::ATTR_TEXT;
+            if (here) memset(screen + 6144 + row * 32, OPT_ATTR_CURSOR, 32);
+            if (options::changed(b, a, (uint8_t) i)) help_put_text(screen, row, 0, "*", 1, here ? attr : gameinfo::ATTR_HEADING);
+            const char* key = options::ITEMS[i].key;
+            help_put_text(screen, row, 1, key, (int) strlen(key), attr);
+            options::value_text(a, (uint8_t) i, v, sizeof(v));
+            if (v[0] == '\0') snprintf(v, sizeof(v), "-");
+            size_t len = strlen(v);
+            const char* shown = v;
+            char cut[20];
+            if (len > 16) {             // a long folder: its end
+                snprintf(cut, sizeof(cut), "..%s", v + len - 14);
+                shown = cut;
+            }
+            help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
+        }
+        const char* hint = options::ITEMS[opt_cursor[0]].hint;
+        static_assert(2 + options::COUNT <= 20, "the items above the hint");
+        help_put_text(screen, 20, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
+        help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Exit", 29, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 22, 1, "N-Grab order  D-Diagnostics", 27, gameinfo::ATTR_KEYS);
+    } else {
+        help_put_text(screen, 2, 1, "V shows a game's pictures in", 28, gameinfo::ATTR_DIM);
+        help_put_text(screen, 3, 1, "this order (hidden: not shown)", 30, gameinfo::ATTR_DIM);
+        for (int i = 0; i < screengrab::CATEGORIES; i++) {
+            int row = 5 + i;
+            bool here = i == opt_cursor[1];
+            uint8_t c = a.list[i];
+            uint8_t attr = here ? OPT_ATTR_CURSOR : a.shown[c] ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM;
+            if (here) memset(screen + 6144 + row * 32, OPT_ATTR_CURSOR, 32);
+            snprintf(v, sizeof(v), "%d %s", i + 1, screengrab::ORDER_NAME[c]);
+            help_put_text(screen, row, 1, v, (int) strlen(v), attr);
+            if (!a.shown[c]) help_put_text(screen, row, 25, "hidden", 6, attr);
+        }
+        if (options::order_changed(b, a)) help_put_text(screen, 12, 1, "* changed", 9, gameinfo::ATTR_HEADING);
+        help_put_text(screen, 18, 1, "Q/A-Up/Down  H-Hide/Show", 24, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 19, 1, "U-Move up  D-Move down", 22, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 20, 1, "N-Settings  X-Exit", 18, gameinfo::ATTR_KEYS);
+    }
+    if (opt_state == 1) {
+        help_put_text(screen, 21, 1, "Save changes?", 13, gameinfo::ATTR_HEADING);
+        help_put_text(screen, 22, 1, "Y-Yes  N-No  BREAK-Stay", 23, gameinfo::ATTR_KEYS);
+    }
+    if (opt_msg != nullptr) help_put_text(screen, 23, 1, opt_msg, (int) strlen(opt_msg), gameinfo::ATTR_TEXT);
+}
+
+// ACTION_OPTIONS: BYTE param1 = the key (0: opened). Status 0 the screen stays, 1 closed
+__attribute__((noinline)) static void nmi_action_options() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    if (key >= 'A' && key <= 'Z') key = (uint8_t) (key - 'A' + 'a');
+    const bool up = key == notes::KEY_UP || key == 'q' || key == '7';
+    const bool down = key == notes::KEY_DOWN || key == 'a' || key == '6';
+    const bool leave = key == 'x' || is_key_break(key);
+    if (key == 0) {
+        opt_page = 0;
+        opt_cursor[0] = opt_cursor[1] = 0;
+        opt_state = 0;
+        opt_msg = nullptr;
+        if (!opt_open()) opt_state = 2;
+    } else if (opt_state == 3) {
+        opt_state = 0;                  // the Diagnostics page: any key goes back to the settings
+    } else if (opt_state == 2) {
+        nmi_rom_data[0] = 1;            // the message has been seen
+        return;
+    } else if (opt_state == 1) {
+        if (key == 'y') {
+            if (opt_save()) {
+                nmi_rom_data[0] = 1;
+                return;
+            }
+            opt_state = 0;
+        } else if (key == 'n') {
+            nmi_rom_data[0] = 1;        // closed, the changes forgotten
+            return;
+        } else if (is_key_break(key)) {
+            opt_state = 0;
+        }
+    } else {
+        opt_msg = nullptr;
+        options::Edit& a = *opt_after();
+        int count = opt_page == 0 ? options::COUNT : screengrab::CATEGORIES;
+        uint8_t& cur = opt_cursor[opt_page];
+        if (leave) {
+            if (!options::any_changed(*opt_before(), a)) {
+                nmi_rom_data[0] = 1;
+                return;
+            }
+            opt_state = 1;
+        } else if (up) {
+            cur = (uint8_t) (cur == 0 ? count - 1 : cur - 1);
+        } else if (down) {
+            cur = (uint8_t) (cur + 1 >= count ? 0 : cur + 1);
+        } else if (key == 'n' || key == 'p') {
+            opt_page ^= 1;
+        } else if (opt_page == 0 && key == 'd') {
+            help_draw_page(screen, HELP_PAGE_COUNT - 1);       // Diagnostics (the last page of Help)
+            opt_state = 3;
+            preview_screen = screen;
+            nmi_rom_data[0] = 0;
+            return;
+        } else if (opt_page == 0 && (key == 'c' || key == notes::KEY_ENTER || key == 13)) {
+            options::cycle(a, cur, sd_cwd);
+        } else if (opt_page == 1 && key == 'h') {
+            if (!options::toggle(a, cur)) opt_msg = "One kind at least must show";
+        } else if (opt_page == 1 && key == 'u') {
+            if (options::move(a, cur, -1)) cur--;
+        } else if (opt_page == 1 && key == 'd') {
+            if (options::move(a, cur, 1)) cur++;
+        }
+    }
+    if (opt_state == 2) {
+        memset(screen, 0, 6144);
+        memset(screen + 6144, ui_attr(0x07), 768);
+        memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+        help_put_text(screen, 0, 1, "Options (Picomenu.ini)", 22, gameinfo::ATTR_BANNER);
+        help_put_text(screen, 2, 1, opt_msg, (int) strlen(opt_msg), gameinfo::ATTR_TEXT);
+        help_put_text(screen, 4, 1, "Press any key", 13, gameinfo::ATTR_KEYS);
+    } else {
+        opt_draw(screen);
+    }
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// ACTION_TEXT_FILE: BYTE param1 = the key (0: open the file: WORD param2 = the list entry's
+// name, BYTE param4 = the drive). Status 0: the screen stays (shown again), 1: it is closed
+__attribute__((noinline)) static void nmi_action_text_file() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    if (key == 0) {
+        uint16_t offset = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
+        txt_drive = nmi_rom_data[5] == 1 ? 1 : 0;
+        int i = file_entry_for(txt_drive, offset);
+        if (i < 0) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        const char* name = list_entry_name[i];
+        const char* ext = name + strlen(name) + 1;
+        int n = snprintf(txt_path(), BROWSE_PATH_MAX, "%s/%s.%s", list_entry_dir[i], name, ext);
+        if (n < 0 || n >= (int) BROWSE_PATH_MAX) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        walk_stop();                        // nothing is open while the file is read
+        info_loaded = false;                // the game information's buffers are not kept
+        txt_pages()[0] = 0;
+        txt_known = 1;
+        txt_page = 0;
+        txt_editing = false;
+        txt_msg = nullptr;
+        LOG("Text file %s on drive %d\n", txt_path(), txt_drive);
+    } else if (txt_editing) {
+        notes::EditorT<96, 30>::Result r = txt_editor()->key(key);
+        if (r == DetEditorBig::SAVE) {
+            txt_editing = false;
+            txt_msg = !txt_save() ? "Could not save it" : !txt_saved_ini ? "Saved" :
+                cfg.bad != 0 ? "Saved: see Diagnostics (O, D)" : "Saved: settings in use now";
+            txt_known = 1;                  // the pages may have moved
+            txt_page = 0;
+        } else if (r == DetEditorBig::DISCARD) {
+            txt_editing = false;
+        }
+    } else if (key == 'x' || key == 0x18) {
+        nmi_rom_data[0] = 1;
+        return;
+    } else if (key == 'n' || key == ' ') {
+        if (!txt_last && txt_page + 1 < txt_known) txt_page++;
+    } else if (key == 'p') {
+        if (txt_page > 0) txt_page--;
+    } else if (key == 'e') {
+        txt_edit_start();
+    }
+    txt_draw(screen);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// ---- The tape position kept with a snapshot ----
+// A snapshot saved while a tape is being played (S, Q) or made from a tape (C) gets a note
+// saying which tape and how far it had got. Loading the snapshot then starts the tape there
+// (the 48K trap, or tape in for a 128K snapshot), so a multi-load game can load its next level.
+// The notes are kept together in TAPE_NOTE_DIR, "/Tape Files" in the root of the snapshot's
+// drive, so the games' folders only have games in them. A note is named after its snapshot's
+// path with each / as ~: /Games/OutRun.z80 has "/Tape Files/Games~OutRun.z80.tape". It is a
+// few lines of text, the last one the snapshot it is for (a note for another snapshot of the
+// same name, as "a~b/c" and "a/b~c" would be, is not used):
+//     PicoMenu tape position
+//     drive 1
+//     block 8
+//     tape /Games/OutRun.tap
+//     snap /Games/OutRun.z80
+// The note follows its snapshot when that, or a folder it is in, is erased, renamed, moved or
+// copied. Earlier builds kept "<snapshot>.tape" beside the snapshot: such a note is still read,
+// and is moved into /Tape Files the first time it is used.
+static const char TAPE_NOTE_EXT[] = ".tape";
+static const char TAPE_NOTE_TITLE[] = "PicoMenu tape position";
+static const char TAPE_NOTE_DIR[] = "/Tape Files";
+static const size_t TAPE_NOTE_NAME_MAX = 255;       // a file's name (FAT and littlefs)
+// One path buffer for all of them (none calls another while using it): the RAM left over is
+// the heap, which littlefs needs (a test build had static buffers in each and too little heap). The
+// rest is in the list's memory (list_pool), which is free once walk_stop() has been called:
+//   0 - 16K              tape_notes_follow_folder: the names of the notes it changes
+//   16K - 17K            a note's text (TAPE_NOTE_TEXT)
+//   17K - end-3 paths    lent to FatFs to make /Tape Files (it clears a cluster)
+//   start / end-3 paths  the tape's path, the snapshot's (and the new one) while notes change
+static struct {
+    char path[BROWSE_PATH_MAX + 24];        // a note's path
+} tape_note_mem;
+static const size_t TAPE_NOTE_TEXT_AT = 16384, TAPE_NOTE_TEXT_MAX = 1024;
+static const size_t TAPE_NOTE_LEND_AT = TAPE_NOTE_TEXT_AT + TAPE_NOTE_TEXT_MAX;
+static_assert(TAPE_NOTE_LEND_AT % 8 == 0 && LIST_POOL_SIZE > TAPE_NOTE_LEND_AT + 8192 + 3 * BROWSE_PATH_MAX,
+    "room in list_pool for the notes");
+static char* tape_note_text() { return list_pool + TAPE_NOTE_TEXT_AT; }
+static char dirpath_tape_notes[sizeof(TAPE_NOTE_DIR) + 4];     // /Tape Files as the drive's folder is opened
+
+// The note of the snapshot snap (a path on its drive)
+static bool tape_note_path(const char* snap, char* out, size_t size) {
+    const char* s = snap[0] == '/' ? snap + 1 : snap;
+    int n = snprintf(out, size, "%s/%s%s", TAPE_NOTE_DIR, s, TAPE_NOTE_EXT);
+    if (n <= 0 || n >= (int) size) return false;
+    char* name = out + sizeof(TAPE_NOTE_DIR);       // after "/Tape Files/"
+    for (char* c = name; *c != '\0'; c++) {
+        if (*c == '/') *c = '~';
+    }
+    return strlen(name) <= TAPE_NOTE_NAME_MAX;
+}
+
+// Where earlier builds kept it: beside the snapshot
+static bool tape_note_old_path(const char* snap, char* out, size_t size) {
+    int n = snprintf(out, size, "%s%s", snap, TAPE_NOTE_EXT);
+    return n > 0 && n < (int) size;
+}
+
+static void tape_note_write(uint8_t drive, const char* snap, uint8_t tdrive, const char* tpath, uint32_t block) {
+    char* path = tape_note_mem.path;
+    walk_stop();                                    // the list's memory is used
+    char* text = tape_note_text();
+    const Drive d = fsops::drive_of(drive);
+    if (fsops::kind(d, TAPE_NOTE_DIR) != fsops::KIND_DIR) {
+        // FatFs clears the new folder's cluster: it is lent a part of the list's memory that
+        // tpath (which may be in it too) is not in
+        if (drive == 1) {
+            ff_pool = reinterpret_cast<unsigned char*>(list_pool) + TAPE_NOTE_LEND_AT;
+            ff_pool_size = sizeof(list_pool) - TAPE_NOTE_LEND_AT - 3 * BROWSE_PATH_MAX;
+        }
+        uint8_t made = fsops::make_dir(d, TAPE_NOTE_DIR);
+        ff_pool = nullptr;
+        ff_pool_size = 0;
+        LOG("Tape note: made %s on drive %d: %d\n", TAPE_NOTE_DIR, drive, made);
+    }
+    if (!tape_note_path(snap, path, sizeof(tape_note_mem.path))) return;
+    int n = snprintf(text, TAPE_NOTE_TEXT_MAX, "%s\r\ndrive %u\r\nblock %u\r\ntape %s\r\nsnap %s\r\n",
+        TAPE_NOTE_TITLE, (unsigned) (tdrive == 1 ? 1 : 0), (unsigned) block, tpath, snap);
+    if (n <= 0 || n >= (int) TAPE_NOTE_TEXT_MAX) return;
+    if (fsops::kind(d, path) == fsops::KIND_FILE) {
+        fsops::remove_path(d, path);                // FileHandle makes a new file
+    }
+    FileHandle f;
+    if (!f.open(d, path, false)) {
+        LOG("Tape note: cannot write %s\n", path);
+        return;
+    }
+    bool ok = f.write(text, (size_t) n) == n;
+    f.close();
+    LOG("Tape note %s: block %u of %s%s\n", path, (unsigned) block, tpath, ok ? "" : " (not written)");
+}
+
+// Reads the note at path. snap (if not nullptr, BROWSE_PATH_MAX bytes) gets the snapshot it says
+// it is for ("" in an earlier build's note)
+static bool tape_note_parse(uint8_t drive, const char* path, char* snap, uint8_t& tdrive, char* tpath,
+                            size_t tsize, uint32_t& block) {
+    walk_stop();                                    // the list's memory is used
+    char* text = tape_note_text();
+    FileHandle f;
+    if (!f.open(fsops::drive_of(drive), path, true)) return false;
+    int n = f.read(text, TAPE_NOTE_TEXT_MAX - 1);
+    f.close();
+    if (n <= 0) return false;
+    text[n] = '\0';
+    if (strncmp(text, TAPE_NOTE_TITLE, sizeof(TAPE_NOTE_TITLE) - 1) != 0) return false;
+    bool have_drive = false, have_block = false, have_tape = false;
+    if (snap != nullptr) snap[0] = '\0';
+    for (char* line = text; *line != '\0'; ) {
+        char* end = line + strcspn(line, "\r\n");
+        char saved = *end;
+        *end = '\0';
+        if (strncmp(line, "drive ", 6) == 0) {
+            tdrive = (uint8_t) (atoi(line + 6) == 1 ? 1 : 0);
+            have_drive = true;
+        } else if (strncmp(line, "block ", 6) == 0) {
+            block = (uint32_t) strtoul(line + 6, nullptr, 10);
+            have_block = true;
+        } else if (strncmp(line, "tape ", 5) == 0 && line[5] == '/') {
+            snprintf(tpath, tsize, "%s", line + 5);
+            have_tape = strlen(line + 5) < tsize;
+        } else if (strncmp(line, "snap ", 5) == 0 && snap != nullptr) {
+            snprintf(snap, BROWSE_PATH_MAX, "%s", line + 5);
+        }
+        *end = saved;
+        line = end + strspn(end, "\r\n");
+    }
+    return have_drive && have_block && have_tape;
+}
+
+static void tape_note_remove(uint8_t drive, const char* snap) {
+    char* path = tape_note_mem.path;
+    const Drive d = fsops::drive_of(drive);
+    if (tape_note_path(snap, path, sizeof(tape_note_mem.path)) && fsops::kind(d, path) == fsops::KIND_FILE) {
+        fsops::remove_path(d, path);
+    }
+    if (tape_note_old_path(snap, path, sizeof(tape_note_mem.path)) && fsops::kind(d, path) == fsops::KIND_FILE) {
+        fsops::remove_path(d, path);
+    }
+}
+
+// The note of the snapshot snap. An earlier build's note beside it is moved into /Tape Files.
+static bool tape_note_read(uint8_t drive, const char* snap, uint8_t& tdrive, char* tpath, size_t tsize,
+                           uint32_t& block) {
+    char* path = tape_note_mem.path;
+    // whose note it is: in the list's memory (free: no folder is being read while a note is)
+    char* who = list_pool + sizeof(list_pool) - BROWSE_PATH_MAX;
+    if (tape_note_path(snap, path, sizeof(tape_note_mem.path)) &&
+        tape_note_parse(drive, path, who, tdrive, tpath, tsize, block)) {
+        if (who[0] == '\0' || strcasecmp(who, snap) == 0) {
+            return true;
+        }
+        LOG("Tape note %s is for %s, not %s\n", path, who, snap);
+        return false;
+    }
+    if (!tape_note_old_path(snap, path, sizeof(tape_note_mem.path)) ||
+        !tape_note_parse(drive, path, nullptr, tdrive, tpath, tsize, block)) {
+        return false;
+    }
+    LOG("Tape note: moving %s into %s\n", path, TAPE_NOTE_DIR);
+    tape_note_write(drive, snap, tdrive, tpath, block);
+    if (tape_note_old_path(snap, path, sizeof(tape_note_mem.path))) {
+        fsops::remove_path(fsops::drive_of(drive), path);
+    }
+    return true;
+}
+
+// After a snapshot file is erased (to == nullptr), renamed or moved, or copied (keep): its note
+// goes the same way. The list's memory is free (walk_stop has been called).
+static void tape_note_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool keep) {
+    if (to == nullptr) {
+        tape_note_remove(from_drive, from);
+        return;
+    }
+    char* tpath = list_pool;                    // the tape's path, while the note is rewritten
+    uint8_t tdrive = 0;
+    uint32_t block = 0;
+    if (!tape_note_read(from_drive, from, tdrive, tpath, BROWSE_PATH_MAX, block)) {
+        tape_note_remove(to_drive, to);         // an old note of a file that was replaced
+        return;
+    }
+    tape_note_write(to_drive, to, tdrive, tpath, block);
+    if (!keep) {
+        tape_note_remove(from_drive, from);
+    }
+    LOG("Tape note follows %s -> %s\n", from, to);
+}
+
+// After a folder is erased (to == nullptr), renamed or moved, or copied (keep): the notes of the
+// snapshots in it (by their names: the folder's path with / as ~, then ~) go the same way. Notes
+// beside the snapshots, from earlier builds, went with the folder already. The list's memory is
+// free (walk_stop has been called), and so is find_dirs[0].
+static void tape_notes_follow_folder(uint8_t drive, const char* from, const char* to, bool keep) {
+    const Drive d = fsops::drive_of(drive);
+    walk_stop();
+    if (fsops::kind(d, TAPE_NOTE_DIR) != fsops::KIND_DIR) return;
+    // the names' start, "Games~Old~": in the path buffer for now
+    char* prefix = tape_note_mem.path;
+    {
+        const char* f = from[0] == '/' ? from + 1 : from;
+        int n = snprintf(prefix, sizeof(tape_note_mem.path), "%s/", f);
+        if (n <= 1 || n >= (int) sizeof(tape_note_mem.path)) return;
+        for (char* c = prefix; *c != '\0'; c++) if (*c == '/') *c = '~';
+    }
+    const size_t plen = strlen(prefix);
+    // the matching names, one after the other in the list's memory (the folder is read once,
+    // and only changed after)
+    char* names = list_pool;
+    char* tpath = list_pool + sizeof(list_pool) - 3 * BROWSE_PATH_MAX;
+    char* snap = list_pool + sizeof(list_pool) - 2 * BROWSE_PATH_MAX;
+    char* newsnap = list_pool + sizeof(list_pool) - BROWSE_PATH_MAX;
+    const size_t room = TAPE_NOTE_TEXT_AT;
+    size_t used = 0;
+    int count = 0;
+    fsops::dir_open_path(d, TAPE_NOTE_DIR, dirpath_tape_notes, sizeof(dirpath_tape_notes));
+    DirHandle& dir = find_dirs[0];
+    if (!dir.open(dirpath_tape_notes)) return;
+    while (!dir.atEnd()) {
+        const char* name = dir.fileName();
+        size_t len = strlen(name);
+        if (!dir.isDirectory() && len > plen && strncasecmp(name, prefix, plen) == 0 && used + len + 1 <= room) {
+            memcpy(names + used, name, len + 1);
+            used += len + 1;
+            count++;
+        }
+        if (!dir.next()) break;
+    }
+    dir.close();
+    for (size_t at = 0; at < used; at += strlen(names + at) + 1) {
+        char* path = tape_note_mem.path;
+        snprintf(path, sizeof(tape_note_mem.path), "%s/%s", TAPE_NOTE_DIR, names + at);
+        uint8_t tdrive = 0;
+        uint32_t block = 0;
+        if (!tape_note_parse(drive, path, snap, tdrive, tpath, BROWSE_PATH_MAX, block)) continue;
+        size_t flen = strlen(from);
+        if (snap[0] == '\0' || strncasecmp(snap, from, flen) != 0 || snap[flen] != '/') continue;
+        if (to == nullptr) {
+            fsops::remove_path(d, path);
+            continue;
+        }
+        int n = snprintf(newsnap, BROWSE_PATH_MAX, "%s%s", to, snap + flen);
+        if (n <= 0 || n >= (int) BROWSE_PATH_MAX) continue;
+        if (!keep) fsops::remove_path(d, path);
+        tape_note_write(drive, newsnap, tdrive, tpath, block);
+    }
+    LOG("Tape notes of %s: %d %s\n", from, count, to == nullptr ? "erased" : keep ? "copied" : "moved");
+}
+
+// After a tape (or a folder, is_dir) was renamed, moved or put in the Waste Bin: the notes that
+// say a snapshot was taken on it (on either drive) now say where it is, so the snapshot still
+// goes on with the tape. For a file only a .tap or .tzx is looked for. The list's memory is free
+// (walk_stop has been called), and so is find_dirs[0].
+static void tape_notes_retarget(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir) {
+    if (from == nullptr || to == nullptr) return;
+    size_t flen = strlen(from);
+    if (!is_dir && (flen < 4 || (strcasecmp(from + flen - 4, ".tap") != 0 && !tape_is_tzx(from)))) return;
+    walk_stop();
+    char* names = list_pool;
+    char* tpath = list_pool + sizeof(list_pool) - 3 * BROWSE_PATH_MAX;
+    char* snap = list_pool + sizeof(list_pool) - 2 * BROWSE_PATH_MAX;
+    char* newtpath = list_pool + sizeof(list_pool) - BROWSE_PATH_MAX;
+    int changed = 0;
+    for (uint8_t nd = 0; nd < 2; nd++) {
+        if (nd == 1 && !sd_card_mounted) continue;
+        const Drive d = fsops::drive_of(nd);
+        if (fsops::kind(d, TAPE_NOTE_DIR) != fsops::KIND_DIR) continue;
+        size_t used = 0;
+        fsops::dir_open_path(d, TAPE_NOTE_DIR, dirpath_tape_notes, sizeof(dirpath_tape_notes));
+        DirHandle& dir = find_dirs[0];
+        if (!dir.open(dirpath_tape_notes)) continue;
+        while (!dir.atEnd()) {
+            const char* name = dir.fileName();
+            size_t len = strlen(name);
+            if (!dir.isDirectory() && len > sizeof(TAPE_NOTE_EXT) - 1 &&
+                strcasecmp(name + len - (sizeof(TAPE_NOTE_EXT) - 1), TAPE_NOTE_EXT) == 0 &&
+                used + len + 1 <= TAPE_NOTE_TEXT_AT) {
+                memcpy(names + used, name, len + 1);
+                used += len + 1;
+            }
+            if (!dir.next()) break;
+        }
+        dir.close();
+        for (size_t at = 0; at < used; at += strlen(names + at) + 1) {
+            char* path = tape_note_mem.path;
+            snprintf(path, sizeof(tape_note_mem.path), "%s/%s", TAPE_NOTE_DIR, names + at);
+            uint8_t tdrive = 0;
+            uint32_t block = 0;
+            if (!tape_note_parse(nd, path, snap, tdrive, tpath, BROWSE_PATH_MAX, block)) continue;
+            if (snap[0] == '\0' || tdrive != from_drive || strncasecmp(tpath, from, flen) != 0) continue;
+            if (is_dir ? tpath[flen] != '/' : tpath[flen] != '\0') continue;
+            int n = snprintf(newtpath, BROWSE_PATH_MAX, "%s%s", to, tpath + flen);
+            if (n <= 0 || n >= (int) BROWSE_PATH_MAX) continue;
+            tape_note_write(nd, snap, to_drive, newtpath, block);
+            changed++;
+        }
+    }
+    LOG("Tape notes on %s now on %s: %d\n", from, to, changed);
+}
+
+// A snapshot was saved (S or Q): if a tape is being played, a note of where it is; otherwise
+// any old note of a file of that name goes
+static void tape_note_after_save(uint8_t drive, const char* snap) {
+    if (tape_service_active && !tape_ejected && !tape_rec) {
+        tape_note_write(drive, snap, tape_drive, tape_name, tape_done);
+    } else {
+        tape_note_remove(drive, snap);
+    }
+}
+
+// Loading a snapshot with a note: the tape trap is started on that tape at that block. Only
+// for a 48K snapshot, or a 128K one locked in 48K mode (port 0x7FFD bits 4 and 5).
+static bool tape_goto(uint32_t block);
+
+static void tape_note_resume(uint8_t drive, const char* snap, bool paged, uint8_t port_7ffd) {
+    uint8_t tdrive = 0;
+    uint32_t block = 0;
+    char* tpath = tape_name;         // the trap is stopped (load_snapshot_file), so it is free
+    if (!tape_note_read(drive, snap, tdrive, tpath, sizeof(tape_name), block)) return;
+    if (paged && (port_7ffd & 0x30) != 0x30) {
+        // a 128K game: the trap's ROM is a 48K one, so the tape goes in for the Spectrum's own
+        // ROMs instead (tape in), at the block the note says
+        const char* why = tape_in_start(tdrive, tpath, block);
+        if (why != nullptr) {
+            const char* name = strrchr(tpath, '/');
+            set_last_error("Tape not found", name != nullptr ? name + 1 : tpath);
+            LOG("Tape note: cannot put in %s\n", tpath);
+        }
+        return;
+    }
+    uint8_t* scratch = nullptr;
+    if (paged) {
+        walk_stop();                // the 128K image fills the snapshot buffer: the ROM goes here
+        scratch = reinterpret_cast<uint8_t*>(list_pool);
+    }
+    tape_drive = tdrive;
+    if (!tape_open_file() || !tape_load_patched_rom(false, scratch)) {
+        if (tape_file_open) {
+            tape_file.close();
+            tape_file_open = false;
+        }
+        const char* name = strrchr(tpath, '/');
+        set_last_error("Tape not found", name != nullptr ? name + 1 : tpath);
+        LOG("Tape note: cannot play %s\n", tpath);
+        return;
+    }
+    tape_service_active = true;
+    tape_ejected = false;
+    rom_state.flags_on_nmi_exit = 1;
+    rom_state.writableStartAddress = TAPE_MBOX;
+    tape_goto(block);
+    level_loaders_scan_pending = true;      // once the snapshot is in
+    LOG("Tape note: %s from block %u\n", tpath, (unsigned) tape_done);
+}
+
+
+// ---- V on the menu: the Virtual Tape Player (the tape position) ----
+// The blocks of the tape being played (the tape trap's) by name, where it has got to, and keys
+// to move it: 1-0 makes the next load start at that block, R rewinds it, N and P turn the
+// pages. A header and the block after it (its data) are one line. Moving the tape is done
+// as playing it: from the start, block by block (the blocks themselves are skipped).
+
+struct TapeEntry {
+    uint32_t first;         // its first data block (0 is the tape's first)
+    uint8_t blocks;         // 1, or 2 for a header and its data
+    int8_t type;            // a header's type (0 program, 1 and 2 arrays, 3 bytes), -1 none
+    uint8_t flag;
+    char name[11];
+    uint32_t length;        // the data's length (a header's says it)
+};
+
+// Calls visit(entry) for each line of the tape in f (open at its start), until it returns false.
+// Uses the global tz for a .tzx, which the caller saves.
+template <class F>
+static void tape_entries(FileHandle& f, bool tzx, F visit) {
+    if (tzx && !tzx_begin(f)) return;
+    TapeEntry e;
+    bool pending = false;           // a header waiting to see whether data follows
+    uint32_t block = 0, blen;
+    while (tape_next_block(f, tzx, blen)) {
+        uint32_t at = f.tell();
+        uint8_t h[18];
+        uint32_t n = blen < sizeof(h) ? blen : (uint32_t) sizeof(h);
+        if (n < 1 || !tap_read_exact(f, h, n)) break;
+        if (pending && h[0] != 0) {             // the header's data
+            e.blocks = 2;
+            pending = false;
+            if (!visit(e)) return;
+        } else {
+            if (pending && !visit(e)) return;
+            pending = false;
+            memset(&e, 0, sizeof(e));
+            e.first = block;
+            e.blocks = 1;
+            e.flag = h[0];
+            e.type = -1;
+            e.length = blen >= 2 ? blen - 2 : 0;
+            if (h[0] == 0 && blen == 19) {      // a standard header
+                e.type = (int8_t) h[1];
+                for (int i = 0; i < 10; i++) e.name[i] = (h[2 + i] >= 32 && h[2 + i] < 127) ? (char) h[2 + i] : '?';
+                for (int i = 9; i >= 0 && e.name[i] == ' '; i--) e.name[i] = '\0';
+                e.length = h[12] | (h[13] << 8);
+                pending = true;
+            } else if (!visit(e)) {
+                return;
+            }
+        }
+        block++;
+        if (!f.seek(at + blen)) return;
+    }
+    if (pending) visit(e);
+}
+
+static uint32_t tape_pos_page = 0;
+static char tape_pos_msg[33] = "";
+
+// Plays the tape from its start to just before data block 'block'
+static bool tape_goto(uint32_t block) {
+    if (!tape_open_file()) return false;
+    const bool tzx = tape_is_tzx(tape_name);
+    for (uint32_t i = 0; i < block; i++) {
+        tz = tape_tz;
+        uint32_t blen;
+        bool ok = tape_next_block(tape_file, tzx, blen) && tape_file.seek(tape_file.tell() + blen);
+        tape_tz = tz;
+        if (!ok) return tape_open_file();
+        tape_done++;
+    }
+    return true;
+}
+
+// The data blocks of a tape, counted as the trap counts them (at most TZX_MAX_BLOCKS)
+static uint32_t tape_count_data_blocks(uint8_t drive, const char* path) {
+    FileHandle f;
+    if (!f.open(drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, path, true)) return 0;
+    const bool tzx = tape_is_tzx(path);
+    TzxState saved = tz;
+    uint32_t n = 0, blen;
+    if (!tzx || tzx_begin(f)) {
+        while (n < TZX_MAX_BLOCKS && tape_next_block(f, tzx, blen) && f.seek(f.tell() + blen)) n++;
+    }
+    f.close();
+    tz = saved;
+    return n;
+}
+
+static void tape_entry_text(const TapeEntry& e, char* out, size_t size) {
+    static const char* const kinds[] = { "Program", "Numbers", "Characters", "Bytes" };
+    if (e.type >= 0 && e.type <= 3) snprintf(out, size, "%s: %s", kinds[e.type], e.name);
+    else if (e.type >= 0) snprintf(out, size, "Header: %s", e.name);
+    else if (e.flag == 0xFF) snprintf(out, size, "Headerless data");
+    else snprintf(out, size, "Data, flag %02X", e.flag);
+}
+
+// W: the name of a new recording is typed here (the keys come one at a time, as for the rest of
+// this screen): letters, digits and symbols, DELETE, ENTER to start, BREAK to go back
+static bool tape_rec_naming = false;
+static char tape_rec_typed[25];
+static const char* tape_rec_why = nullptr;      // why the last ENTER did not start it
+
+static void tape_rec_name_draw(uint8_t* screen) {
+    const uint8_t BANNER = 0x4F, TEXT = 0x47, DONE = 0x07, HEADING = 0x46, KEYS = 0x45, NOW = 0x44;
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, BANNER, 32);
+    static const char title[] = "Record a new tape";
+    help_put_text(screen, 0, 1, title, sizeof(title) - 1, BANNER);
+    static const char where[] = "In /Recordings on the SD card:";
+    help_put_text(screen, 2, 0, where, sizeof(where) - 1, TEXT);
+    char line[40];
+    int n = snprintf(line, sizeof(line), "%s_.tap", tape_rec_typed);
+    help_put_text(screen, 4, 1, line, n, NOW);
+    const char* const lines[] = {
+        "Type the tape's name, then", "ENTER. Each SAVE (in BASIC, or", "a program that saves with the",
+        "ROM) then goes on the end of", "it at once, until E on this", "screen stops it. While it",
+        "records, no tape is played.", "", "A name in use is not taken, so", "no tape is written over.",
+    };
+    for (int i = 0; i < (int) (sizeof(lines) / sizeof(lines[0])); i++) {
+        help_put_text(screen, 7 + i, 0, lines[i], strlen(lines[i]), DONE);
+    }
+    if (tape_rec_why != nullptr) help_put_text(screen, 21, 0, tape_rec_why, strlen(tape_rec_why), HEADING);
+    static const char k[] = "ENTER-Record DELETE BREAK-Back";
+    help_put_text(screen, 23, 1, k, sizeof(k) - 1, KEYS);
+    (void) TEXT;
+}
+
+static void nmi_action_tape_position() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    const uint8_t BANNER = 0x4F, TEXT = 0x47, DONE = 0x07, HEADING = 0x46, KEYS = 0x45, NOW = 0x44;
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    bool keep_msg = false;              // drawn again after recording starts: its message stays
+    if (key == 0) {
+        tape_rec_naming = false;        // the screen is opened
+    }
+    if (tape_rec_naming) {
+        size_t len = strlen(tape_rec_typed);
+        if (key == 0x18) {                              // BREAK: back to the tape position
+            tape_rec_naming = false;
+            key = 0;
+        } else if (key == 0x13) {                       // ENTER: start
+            tape_rec_why = tape_record_start(tape_rec_typed);
+            if (tape_rec_why == nullptr) {
+                tape_rec_naming = false;
+                tape_pos_page = 0;
+                snprintf(tape_pos_msg, sizeof(tape_pos_msg), "Recording: SAVE goes on the end");
+                keep_msg = true;
+                key = 0;
+            }
+        } else if (key == 0x0A) {                       // DELETE
+            if (len > 0) tape_rec_typed[len - 1] = '\0';
+            tape_rec_why = nullptr;
+        } else if (key >= 32 && key < 127 && key != '~' && len + 1 < sizeof(tape_rec_typed)) {
+            tape_rec_typed[len] = (char) key;
+            tape_rec_typed[len + 1] = '\0';
+            tape_rec_why = nullptr;
+        }
+        if (tape_rec_naming) {
+            tape_rec_name_draw(screen);
+            preview_screen = screen;
+            nmi_rom_data[0] = 0;
+            return;
+        }
+    }
+    if (key == 'w' && !tape_rec) {                      // W: record a new tape
+        tape_rec_naming = true;
+        tape_rec_typed[0] = '\0';
+        tape_rec_why = nullptr;
+        tape_rec_name_draw(screen);
+        preview_screen = screen;
+        nmi_rom_data[0] = 0;
+        return;
+    }
+    bool playing = tape_service_active && !tape_ejected;
+    if (key == 'x' || key == 0x18 || key == 0x13 || (key != 0 && key != 'e' && !playing)) {
+        nmi_rom_data[0] = 1;            // closed
+        return;
+    }
+    if (key == 'e' && playing && tape_rec) {    // stop recording
+        const char* name = strrchr(tape_name, '/');
+        snprintf(tape_pos_msg, sizeof(tape_pos_msg), "Saved %.24s", name != nullptr ? name + 1 : tape_name);
+        tape_eject();
+        playing = false;
+    } else if (key == 'e' && playing) {        // eject: the file is closed, the trap stays
+        tape_eject();
+        playing = false;
+    } else if (key == 'e') {
+        nmi_rom_data[0] = 1;
+        return;
+    }
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, BANNER, 32);
+    const char* title = playing && tape_rec ? "Recording" : "Virtual Tape Player";
+    help_put_text(screen, 0, 1, title, strlen(title), BANNER);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+    if (!playing) {
+        const char* const lines[] = {
+            tape_service_active ? "The tape is out (ejected)." : "No tape is being played.",
+            tape_service_active ? "Its file can be erased or moved." : "",
+            "",
+            "Load a .tap or .tzx with its", "number in B - Browse Games, or",
+            "put one in with T there for the", "Spectrum's own LOAD and the 128",
+            "Tape Loader. This screen then", "shows its blocks and where the", "tape has got to, and moves it",
+            "on or back for a game that", "loads more as it is played.", "",
+            "W records a new tape in", "/Recordings: each SAVE goes", "into it at once.",
+        };
+        for (int i = 0; i < (int) (sizeof(lines) / sizeof(lines[0])); i++) {
+            help_put_text(screen, 2 + i, 0, lines[i], strlen(lines[i]), i == 0 ? HEADING : TEXT);
+        }
+        if (tape_pos_msg[0] != '\0') help_put_text(screen, 21, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
+        static const char k[] = "W-Record  Any other key: back";
+        help_put_text(screen, 23, 1, k, sizeof(k) - 1, KEYS);
+        return;
+    }
+    const bool tzx = tape_is_tzx(tape_name);
+    TzxState saved = tz;
+    FileHandle f;
+    bool open = f.open(tape_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, tape_name, true);
+    // the lines, and the one the tape is at (the next load's)
+    uint32_t count = 0, now = 0;
+    bool at_end = true;
+    if (open) {
+        tape_entries(f, tzx, [&](const TapeEntry& e) {
+            if (at_end && tape_done < e.first + e.blocks) {
+                now = count;
+                at_end = false;
+            }
+            count++;
+            return true;
+        });
+    }
+    const uint32_t PER_PAGE = 10;
+    uint32_t pages = count == 0 ? 1 : (count + PER_PAGE - 1) / PER_PAGE;
+    if (key == 0) {
+        tape_pos_page = tape_rec ? (pages - 1) : at_end ? 0 : now / PER_PAGE;     // recording: the newest blocks
+        if (!keep_msg) tape_pos_msg[0] = '\0';
+    } else if ((key == 'n' || key == ' ' || key == 8) && tape_pos_page + 1 < pages) {
+        tape_pos_page++;
+    } else if ((key == 'p' || key == 5) && tape_pos_page > 0) {
+        tape_pos_page--;
+    } else if (key == 'r' && !tape_rec) {
+        tape_goto(0);
+        snprintf(tape_pos_msg, sizeof(tape_pos_msg), "Rewound to the start");
+        tape_pos_page = 0;
+    } else if (key >= '0' && key <= '9' && open && !tape_rec) {
+        uint32_t want = tape_pos_page * PER_PAGE + (key == '0' ? 9 : key - '1');
+        if (want < count) {
+            uint32_t i = 0, block = 0;
+            if (f.seek(0)) {
+                tape_entries(f, tzx, [&](const TapeEntry& e) {
+                    if (i++ == want) {
+                        block = e.first;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+            tape_goto(block);
+            snprintf(tape_pos_msg, sizeof(tape_pos_msg), "The next load starts at %u", (unsigned) (want + 1));
+        }
+    }
+    // after a move: where it is now
+    if (!tape_rec && (key == 'r' || (key >= '0' && key <= '9'))) {
+        now = 0;
+        at_end = true;
+        uint32_t i = 0;
+        if (open && f.seek(0)) {
+            tape_entries(f, tzx, [&](const TapeEntry& e) {
+                if (tape_done < e.first + e.blocks) {
+                    now = i;
+                    at_end = false;
+                    return false;
+                }
+                i++;
+                return true;
+            });
+        }
+    }
+    // the tape's name and the page
+    const char* name = strrchr(tape_name, '/');
+    name = name != nullptr ? name + 1 : tape_name;
+    help_put_text(screen, 1, 0, name, strlen(name), HEADING);
+    char line[40];
+    int n = snprintf(line, sizeof(line), "%u/%u", (unsigned) (tape_pos_page + 1), (unsigned) pages);
+    help_put_text(screen, 0, 31 - n, line, n, BANNER);
+    // this page's lines: the ones the tape has gone past are dim, the next load's is marked
+    uint32_t first = tape_pos_page * PER_PAGE, i = 0;
+    if (open && f.seek(0)) {
+        tape_entries(f, tzx, [&](const TapeEntry& e) {
+            if (i >= first + PER_PAGE) return false;
+            if (i >= first) {
+                int row = 3 + (int) (i - first);
+                bool here = !tape_rec && !at_end && i == now;
+                bool done = !tape_rec && (at_end || i < now);
+                char text[32];
+                tape_entry_text(e, text, sizeof(text));
+                line[0] = (char) ('0' + (i - first + 1) % 10);
+                line[1] = here ? '>' : ' ';
+                help_put_text(screen, row, 0, line, 2, here ? NOW : KEYS);
+                help_put_text(screen, row, 3, text, strlen(text) < 22 ? strlen(text) : 22, here ? NOW : done ? DONE : TEXT);
+                char len[12];
+                int ln = snprintf(len, sizeof(len), "%u", (unsigned) e.length);
+                help_put_text(screen, row, 32 - ln, len, ln, here ? NOW : done ? DONE : TEXT);
+            }
+            i++;
+            return true;
+        });
+    }
+    if (open) f.close();
+    tz = saved;
+    if (count == 0) {
+        const char* none = tape_rec ? "Nothing saved on it yet" : "No blocks on this tape";
+        help_put_text(screen, 3, 0, none, strlen(none), TEXT);
+    }
+    if (tape_rec) {
+        static const char* const rec[] = {
+            "Each SAVE (in BASIC, or a", "program that saves with the", "ROM) goes on the end of this",
+            "tape at once. E stops: the tape", "stays in /Recordings, to load", "as any other tape.",
+        };
+        for (int k = 0; k < (int) (sizeof(rec) / sizeof(rec[0])); k++) {
+            help_put_text(screen, 14 + k, 0, rec[k], strlen(rec[k]), DONE);
+        }
+        if (tape_rec_failed) {
+            static const char bad[] = "A block could not be written";
+            help_put_text(screen, 21, 0, bad, sizeof(bad) - 1, HEADING);
+        } else if (tape_pos_msg[0] != '\0') {
+            help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
+        }
+        static const char kr[] = "E-Stop recording  N P X-Exit";
+        help_put_text(screen, 23, 1, kr, sizeof(kr) - 1, KEYS);
+        return;
+    }
+    const char* where = at_end ? "At the end: it starts again" : "> the next load";
+    help_put_text(screen, 14, 0, where, strlen(where), NOW);
+    if (tape_in) {
+        static const char in[] = "In with T: for the Spectrum ROM";
+        help_put_text(screen, 15, 0, in, sizeof(in) - 1, DONE);
+    }
+    static const char* const help[] = {
+        "1-0 the next load starts there", "R   rewind to the start",
+        "E   eject (to erase or move it)", "W   record a new tape instead",
+        "Dim: loaded already.",
+    };
+    for (int k = 0; k < (int) (sizeof(help) / sizeof(help[0])); k++) {
+        help_put_text(screen, 16 + k, 0, help[k], strlen(help[k]), DONE);
+    }
+    if (tape_pos_msg[0] != '\0') help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
+    static const char k1[] = "1-0 R-Rewind E-Eject N P X-Exit";
+    help_put_text(screen, 23, 1, k1, sizeof(k1) - 1, KEYS);
+}
 
 uint8_t* beginSendSnapDataToMachine() {
     return reinterpret_cast<uint8_t*>(snap_load_buffer);
@@ -5720,9 +8784,11 @@ bool endSendSnapDataToMachine(uint32_t snapshotSize) {
 // It is done with a snapshot that jumps to 0, the same as the tape loader's reset.
 static void reset_spectrum_to_internal_rom() {
     LOG("Long press: resetting into the internal ROM\n");
-    tape_service_stop();
+    if (!tape_in) {
+        tape_service_stop();            // a tape put in with T stays in
+    }
     tap_make_reset_snapshot();
-    game_running = false;
+    game_running = tape_in;
     reset_to_128k_pending = true;
     endSendSnapDataToMachine(SNA_FILE_SIZE);
     reset_to_128k_pending = false;
@@ -5754,6 +8820,11 @@ bool readMachineMemToLoadBuffer(uint32_t startAddress, uint32_t length) {
     return false;
 }
 
+extern "C" int ff_open_objects(void);
+
+// SD card trouble that was put right (Help > Diagnostics): read errors, and times the card was
+// mounted again because it had stopped answering or files and folders were left open
+
 void mountSdCard() {
     sd_card_t *pSD = sd_get_by_num(0);
     FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
@@ -5774,7 +8845,8 @@ void mountSdCard() {
 // True while the Pico is using the card: the NMI menu is open or about to open, or a tape
 // is being played from it. The PC is not given the card then.
 bool pico_sd_in_use() {
-    return ((rom_state.flags & 0x2) != 0) || rom_state.nmi_active || tape_service_active || tape_file_open;
+    return ((rom_state.flags & 0x2) != 0) || rom_state.nmi_active || (tape_service_active && !tape_ejected) ||
+        tape_file_open;
 }
 
 // The card goes to the PC: nothing of ours may keep a view of it. FatFs is unmounted, so
@@ -5798,7 +8870,48 @@ void pico_sd_take_back_from_pc() {
     walk_stop();
     sd_cwd[0] = '\0';
     mountSdCard();
+    cfg_stale = true;               // Picomenu.ini may have been changed: read before it is used
+    cfg_folder_due = true;
     enable_logging = loggingWasEnabled;
+}
+
+// The card is checked each time the NMI menu opens. Two things have made it look empty until
+// the Picoface was switched off and on: the card stops answering after an error (it needs
+// initialising again), or FatFs's 16 places for open files and folders (FF_FS_LOCK) are all
+// taken by ones that were not closed, so nothing more opens. Mounting the card again puts both
+// right (FatFs forgets every open file of the card, and the card is initialised from the
+// start). Only files the Picoface keeps open on purpose may be open now: a tape playing from
+// the card. Returns true if the card had to be mounted again.
+struct TapeLost;
+static bool tape_on_card_open();
+static void tape_card_lost(TapeLost& t);
+static void tape_card_back(const TapeLost& t);
+__attribute__((noinline)) static bool sd_check() {
+    if (!sd_card_mounted || usb_msc_pc_holds_card()) return false;
+    walk_stop();                        // (its folders are closed)
+    int allowed = tape_on_card_open() ? 1 : 0;
+    int open_now = ff_open_objects();
+    // a read of the card itself (the first sector of the volume), not of what FatFs has kept
+    sd_card_t* pSD = sd_get_by_num(0);
+    DRESULT dr = RES_OK;
+    if (open_now <= allowed) {
+        dr = disk_read(pSD->fatfs.pdrv, reinterpret_cast<BYTE*>(list_pool), pSD->fatfs.volbase, 1);
+    }
+    FRESULT fr = dr == RES_OK ? FR_OK : FR_DISK_ERR;
+    if (open_now <= allowed && fr == FR_OK) return false;
+    LOG("SD card: %d open (%d allowed), root %d: mounting it again\n", open_now, allowed, (int) fr);
+    if (open_now > allowed) set_last_error("SD card: files left open", "(mounted again)");
+    else set_last_error("SD card stopped answering", "(mounted again)");
+    TapeLost lost;
+    tape_card_lost(lost);               // a tape playing from it is put in again after
+    f_unmount(pSD->pcName);
+#ifndef PICOFACE_HOST
+    pSD->m_Status |= STA_NOINIT;        // initialised from the start
+#endif
+    mountSdCard();
+    tape_card_back(lost);
+    sd_remounts++;
+    return true;
 }
 
 void initFileSystem() {
@@ -5812,6 +8925,7 @@ void initFileSystem() {
     mountSdCard();
     load_save_dir();
     load_last_game();
+    settings_load();
     check_trace();
 }
 
@@ -5823,11 +8937,15 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
     else {
 
         uint8_t* nmi_rom_data = rom_data + 16384;
-        memcpy(nmi_rom_data, NMI_ROM, NMI_ROM_SIZE);
+        if (command == 0 || command == STARTUP_ACTION_GRAB) sd_check();     // the menu (or a grab): is the card still well?
+        nmi_rom_unpack(nmi_rom_data);        // (kept packed in the firmware)
+        nmi_menu_open = command == 0;        // the ROM turns the sound down for the menu only
         // the NMI rom starts afresh each time, with no search in force, and
         // the card may have been changed since it was last listed
         snap_filter[0] = '\0';
         walk_stop();
+        sna_in_buffer = false;
+        list_pool_busy = false;
         move_picked = false;
         screen_stashed = false;
         preview_screen = nullptr;
@@ -5840,7 +8958,18 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         // 1 there is a card, 2 it is in use by the PC (USB drive), 0 no card
         nmi_rom_data[STARTUP_SDCARD_PRESENT] = sd_card_mounted ? 1 : (usb_msc_pc_holds_card() ? 2 : 0);
         nmi_rom_data[STARTUP_SDCARD_PRESENT + 1] = running_48k ? 1 : 0;     // start_up_machine48
-        // what the L item on the menu says: the last game, or that there is none to reload
+        // how Browse Games and Save snapshot start, from Picomenu.ini ("last": as they were left)
+        settings_fresh();
+        bool all = cfg.show_all == settings::SHOW_LAST ? list_all : cfg.show_all == settings::SHOW_ON;
+        bool info = cfg.details == settings::SHOW_LAST ? list_details : cfg.details == settings::SHOW_ON;
+        nmi_rom_data[START_SHOWALL] = all ? 4 : 0;
+        nmi_rom_data[START_SHOWINFO] = info ? 2 : 0;
+        nmi_rom_data[START_DRIVE] = cfg.start_drive == settings::DRIVE_LAST ? list_drive :
+            cfg.start_drive == settings::DRIVE_FLASH ? 0 : 1;      // (with no card the menu uses the flash)
+        nmi_rom_data[START_SAVETYPE] = cfg.save_type;
+        nmi_rom_data[START_THEME] = cfg.light ? 1 : 0;
+        bin_leave();        // the menu was left from the Waste Bin (a game loaded from it): B starts where it was
+        // what the R item on the menu says: the last game, or that there is none to reload
         extras::reload_label(reload_known, reload_drive == 0 || sd_card_mounted, reload_name,
             reinterpret_cast<char*>(nmi_rom_data + STARTUP_RELOAD_LABEL));
         rom_state.flags |= 2;
@@ -5868,7 +8997,7 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
 // list_pool (so the Browse list is read again afterwards); the machine, the tape's file and
 // the two overlay rows in pok_file (read again when the poke list is next opened).
 // The ROMs are 48.rom, and 128.rom (32K: the editor ROM then the 48K BASIC ROM) or
-// 128-0.rom and 128-1.rom, in the root of the flash or the SD card.
+// 128-0.rom and 128-1.rom, in the root of the flash, the SD card's ROMS folder, or its root.
 
 enum ConvPhase : uint8_t { CONV_IDLE, CONV_CHOOSE, CONV_RUN };
 enum ConvMode : uint8_t { CONV_AUTO, CONV_48, CONV_128 };
@@ -5880,6 +9009,9 @@ static bool conv_retried = false;           // Auto: the 128K attempt failed, th
 static uint32_t conv_size = 0;              // of the tape file
 static uint64_t conv_started = 0;           // time_us_64() at the start
 static bool conv_file_open = false;         // conv_scratch().file is the tape, open
+// The batch converter (C in Tools, see nmi_batch_info): the tapes of a folder, one after another
+static bool batch_on = false;               // a batch is running: the .z80 goes in <folder>/Converted
+static uint16_t batch_total = 0, batch_done = 0;    // tapes in the folder, and how many looked at
 
 struct ConvScratch {
     alignas(8) uint8_t machine[pconv::STATE_SIZE];
@@ -5911,7 +9043,7 @@ static void conv_row(int r, uint8_t attr, int col, const char* text) {
     memset(c.attr[r], attr, sizeof(c.attr[r]));
     for (int i = 0; text[i] != '\0' && col + i < 32; i++) {
         unsigned char ch = (unsigned char) text[i];
-        const uint8_t* glyph = help_font[(ch >= 32 && ch < 128 ? ch : '?') - 32];
+        const uint8_t* glyph = menu_font()[(ch >= 32 && ch < 128 ? ch : '?') - 32];
         for (int line = 0; line < 8; line++) c.pix[r][line][col + i] = glyph[line];
     }
 }
@@ -5919,9 +9051,11 @@ static void conv_row(int r, uint8_t attr, int col, const char* text) {
 // Reads a ROM file of exactly `size` bytes from the root of the flash, else the SD card
 static bool conv_read_rom(const char* name, uint8_t* dest, uint32_t size) {
     FileHandle& f = conv_scratch().file;
-    for (int d = 0; d < 2; d++) {
-        if (d == 1 && !sd_card_mounted) break;
-        if (!f.open(d == 0 ? Drive::INTERNAL_FLASH : Drive::EXTERNAL_SD_CARD, name, true)) continue;
+    char path[48];
+    snprintf(path, sizeof(path), "%s/%s", ROMS_FOLDER, name);
+    for (int d = 0; d < 3; d++) {           // the flash, the card's ROMS folder, the card
+        if (d >= 1 && !sd_card_mounted) break;
+        if (!f.open(d == 0 ? Drive::INTERNAL_FLASH : Drive::EXTERNAL_SD_CARD, d == 1 ? path : name, true)) continue;
         bool ok = f.size() == (int) size && f.read(dest, size) == (int) size;
         f.close();
         if (ok) return true;
@@ -5938,7 +9072,12 @@ static bool conv_is_tape(const char* path, bool* tzx) {
 
 static void conv_titles() {
     char t[48];
-    snprintf(t, sizeof(t), "Converting (%s): %s", conv_as128 ? "128K" : conv_retried ? "48K, 2nd go" : "48K", info_name);
+    if (batch_on) {
+        snprintf(t, sizeof(t), "%u/%u %s: %s", (unsigned) (batch_done + 1), (unsigned) batch_total,
+            conv_as128 ? "128K" : "48K", info_name);
+    } else {
+        snprintf(t, sizeof(t), "Converting (%s): %s", conv_as128 ? "128K" : conv_retried ? "48K, 2nd go" : "48K", info_name);
+    }
     conv_row(0, gameinfo::ATTR_BANNER, 0, t);
 }
 
@@ -5952,7 +9091,7 @@ static const uint8_t CONV_ATTR_FAIL = 0x57;     // white on bright red
 static void conv_close_tape();
 static bool conv_scr_folder = false;            // the folder is there (made at the start)
 static bool conv_auto_saved = false;            // the loading screen has been saved
-static int conv_auto_number = -1;               // its number (<name><n>.scr), -1 none: BREAK removes it
+static int conv_auto_number = -1;               // its number (<name> Loading Screen<n>.scr), -1 none: BREAK removes it
 static bool conv_manual_saved = false;          // S saved a screen in this conversion
 static uint64_t conv_note_until = 0;            // the top row shows a note until then
 
@@ -5966,12 +9105,7 @@ static void conv_note(const char* text, uint8_t attr) {
 static void conv_scr_prepare() {
     conv_scr_folder = false;
     if (!sd_card_mounted) return;
-    if (fsops::kind(Drive::EXTERNAL_SD_CARD, screengrab::SCRAPER_FOLDER) != fsops::KIND_DIR) {
-        uint8_t made = make_sd_folder("/Scraper");
-        if (made == fsops::OK || made == fsops::NAME_IN_USE) made = make_sd_folder(screengrab::SCRAPER_FOLDER);
-        if (made != fsops::OK && made != fsops::NAME_IN_USE) return;
-    }
-    conv_scr_folder = true;
+    conv_scr_folder = grab_folder_make();
 }
 
 // Saves scr (6912 bytes). The tape's file handle is used, so the tape is closed meanwhile and
@@ -5984,34 +9118,28 @@ static bool conv_save_screen(const uint8_t* scr, bool automatic) {
     }
     char base[screengrab::NAME_MAX + 1];
     if (screengrab::base_name(info_name, base) == 0) snprintf(base, sizeof(base), "Screen");
-    int number = -1;
-    for (int i = 0; i < screengrab::MAX_SCAN && number < 0; i++) {
-        screengrab::path_in(screengrab::SCRAPER_FOLDER, base, i, ".scr", grab_path, sizeof(grab_path));
-        if (fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE) number = i;
-    }
+    // the loading screen saved by itself, and one saved with S, are "<name> Loading Screen.scr",
+    // then "<name> Loading Screen1.scr" ... (the lowest number free)
+    const screengrab::Category cat = screengrab::LOADING;
+    int number = grab_free_number(base, cat);
     if (number < 0) {
         conv_note("Screen not saved: too many", CONV_ATTR_FAIL);
         return true;
     }
     uint32_t pos = c.file.tell();
     conv_close_tape();
-    bool ok = false;
-    if (c.file.open(Drive::EXTERNAL_SD_CARD, grab_path, false)) {
-        ok = c.file.write(scr, screengrab::SCR_SIZE) == (int) screengrab::SCR_SIZE;
-        ok = c.file.close() && ok;
-    }
-    if (!ok) fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
-    else if (automatic) conv_auto_number = number;
+    bool ok = grab_write(c.file, base, cat, number, scr);
+    if (!ok) {
+    } else if (automatic) conv_auto_number = number;
     else conv_manual_saved = true;
     LOG("Convert: screen %s %s\n", grab_path, ok ? "saved" : "not saved");
     if (!c.file.open(info_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, info_path, true)) return false;
     conv_file_open = true;
     if (!c.file.seek(pos)) return false;
-    // "Loading screen saved: <name>" or "Screen saved: <name>", the end kept if it is long
-    char name[screengrab::NAME_MAX + 8], t[40];
-    if (number == 0) snprintf(name, sizeof(name), "%s", base);
-    else snprintf(name, sizeof(name), "%s%d", base, number);
-    const char* lead = !ok ? "Screen not saved: " : automatic ? "Loading screen saved: " : "Screen saved: ";
+    // "Saved: <name> Loading Screen<n>", the end kept if it is long
+    char name[screengrab::NAME_MAX + 24], t[40];
+    screengrab::grab_name(base, cat, number, name, sizeof(name));
+    const char* lead = !ok ? "Screen not saved: " : "Saved: ";
     size_t room = 32 - strlen(lead), n = strlen(name);
     if (!ok) snprintf(t, sizeof(t), "Screen not saved (SD card)");
     else if (n > room) snprintf(t, sizeof(t), "%s..%s", lead, name + n - (room - 2));
@@ -6029,11 +9157,11 @@ static bool conv_start(bool as128) {
         uint8_t* roms = reinterpret_cast<uint8_t*>(list_pool);
         if (!conv_read_rom("128.rom", roms, 32768) &&
             !(conv_read_rom("128-0.rom", roms, 16384) && conv_read_rom("128-1.rom", roms + 16384, 16384))) {
-            snprintf(conv_msg, sizeof(conv_msg), "No 128.rom (see Help: Convert)");
+            snprintf(conv_msg, sizeof(conv_msg), "No 128.rom (flash or SD /ROMS)");
             return false;
         }
     } else if (!conv_read_rom(TAPE_ROM_NAME, buf + 65536, 16384)) {
-        snprintf(conv_msg, sizeof(conv_msg), "No 48.rom (see Help: Convert)");
+        snprintf(conv_msg, sizeof(conv_msg), "No 48.rom (flash or SD /ROMS)");
         return false;
     }
     bool tzx = false;
@@ -6075,7 +9203,9 @@ static bool conv_save(char* saved, size_t savedsize) {
     for (int k = 1; k <= 9 && !found; k++) {
         char suffix[4] = "";
         if (k > 1) snprintf(suffix, sizeof(suffix), " %d", k);
-        int n = snprintf(out, sizeof(out), "%.*s/%s%s.z80", dirlen, info_path, info_name, suffix);
+        // (a batch: in the Converted folder of the tapes' folder)
+        int n = batch_on ? snprintf(out, sizeof(out), "%.*s/Converted/%s%s.z80", dirlen, info_path, info_name, suffix)
+                         : snprintf(out, sizeof(out), "%.*s/%s%s.z80", dirlen, info_path, info_name, suffix);
         if (n < 0 || n >= (int) sizeof(out)) return false;
         found = fsops::kind(drive, out) == fsops::KIND_NONE;
         if (found) snprintf(saved, savedsize, "%s%s.z80", info_name, suffix);
@@ -6101,6 +9231,19 @@ static bool conv_save(char* saved, size_t savedsize) {
     ok = c.file.close() && ok;
     if (!ok) fsops::remove_path(drive, out);
     LOG("Converted to %s: %s\n", out, ok ? "saved" : "not saved");
+    if (ok) {
+        // where the tape had got to, if the conversion stopped with more on it that nothing
+        // took in (a multi-load game's next levels): they load from there when the .z80 is
+        // loaded (through the tape trap)
+        uint32_t at = pconv::tape_position(c.machine);
+        bool more = pconv::stopped_early(c.machine);
+        conv_close_tape();          // the tape is read again to count its blocks
+        if (more && at < tape_count_data_blocks(info_drive, info_path)) {
+            tape_note_write(info_drive, out, info_drive, info_path, at);
+        } else {
+            tape_note_remove(info_drive, out);
+        }
+    }
     return ok;
 }
 
@@ -6196,8 +9339,7 @@ static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep) {
         if (conv_auto_number >= 0) {
             char base[screengrab::NAME_MAX + 1];
             if (screengrab::base_name(info_name, base) == 0) snprintf(base, sizeof(base), "Screen");
-            screengrab::path_in(screengrab::SCRAPER_FOLDER, base, conv_auto_number, ".scr", grab_path, sizeof(grab_path));
-            fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+            grab_remove(base, screengrab::LOADING, conv_auto_number);
             LOG("Convert stopped: %s removed\n", grab_path);
             conv_auto_number = -1;
         }
@@ -6221,7 +9363,9 @@ static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep) {
         st = pconv::run(c.machine, 1);
         if (pconv::loading_screen(c.machine)) {
             conv_auto_saved = true;
-            tape_ok = conv_save_screen(pconv::screen_data(c.machine), true);
+            if (cfg.loading_grab) {         // loading_grab = off in Picomenu.ini: only S saves one
+                tape_ok = conv_save_screen(pconv::screen_data(c.machine), true);
+            }
         }
     }
     if (!tape_ok) {
@@ -6285,6 +9429,553 @@ static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep) {
     nmi_rom_data[1] = 6;
     nmi_rom_data[0] = 1;            // one page, no pictures
     return true;
+}
+
+// ---- C in Tools: the batch converter ----
+// A folder of the SD card is chosen (ACTION_BATCH, a screen of its own), then the game
+// information screen runs in mode 3: each .tap and .tzx in the folder (not those below it, nor
+// hidden ones) is converted as C does with Auto, into <folder>/Converted/<name>.z80. A tape
+// whose .z80 is already there is skipped, so a batch that was stopped carries on where it got
+// to. Each result goes in <folder>/Converted/Batch convert.txt; at the end (or BREAK) a summary.
+// The tapes are found in the folder's own order, again for each (nothing is kept: the
+// converter uses all the spare memory).
+static uint8_t batch_phase = 0;             // 0 none, 1 chosen (starts at op 0), 2 running, 3 over
+static uint16_t batch_saved = 0, batch_skipped = 0, batch_failed = 0;
+static const char* batch_end_msg = nullptr; // why it stopped early, or nullptr
+static uint8_t batch_page = 0;              // the chooser's page of folders
+static const char* batch_msg = nullptr;     // the chooser's message row
+static bool batch_machine128 = false;       // the Spectrum can page memory (the ROM's machine128)
+
+// What the batch does: 0 tapes to .z80 (C, into Converted), 1 .z80 to tapes (T, into Tapes)
+static uint8_t batch_kind = 0;
+static const char* batch_out_folder() { return batch_kind == 0 ? "Converted" : "Tapes"; }
+
+// kind 0: a .tap or .tzx; 1: a .z80 (not hidden)
+static bool batch_is_input(DirHandle& d, uint8_t kind) {
+    const char* n = d.fileName();
+    if (d.isDirectory() || n[0] == '.' || d.isHiddenSet() || d.isSystem()) return false;
+    size_t len = strlen(n);
+    if (len <= 4) return false;
+    if (kind == 1) return strcasecmp(n + len - 4, ".z80") == 0;
+    return strcasecmp(n + len - 4, ".tap") == 0 || strcasecmp(n + len - 4, ".tzx") == 0;
+}
+
+// The chooser's folders: in list_pool, offsets then the names, sorted
+static const int BATCH_DIRS_MAX = 500;
+static uint16_t* batch_dir_offsets() { return reinterpret_cast<uint16_t*>(list_pool); }
+static int batch_dir_count = 0;
+static int batch_tapes_here = 0;
+static int batch_z80_here = 0;
+
+static int batch_dir_compare(const void* x, const void* y) {
+    return strcasecmp(list_pool + *(const uint16_t*) x, list_pool + *(const uint16_t*) y);
+}
+
+// Reads the folder being chosen (sd_cwd): its folders, and how many tapes it has
+__attribute__((noinline)) static bool batch_read_folder() {
+    walk_stop();
+    list_pool_busy = true;
+    batch_dir_count = 0;
+    batch_tapes_here = 0;
+    batch_z80_here = 0;
+    char path[sizeof(sd_cwd) + 4];
+    snprintf(path, sizeof(path), "/sd%s", sd_cwd);
+    DirHandle& d = find_dirs[0];
+    if (!d.open(path)) {
+        if (sd_cwd[0] == '\0') return false;
+        sd_cwd[0] = '\0';                       // gone: the root
+        snprintf(path, sizeof(path), "/sd");
+        if (!d.open(path)) return false;
+    }
+    size_t used = BATCH_DIRS_MAX * sizeof(uint16_t);
+    while (!d.atEnd()) {
+        const char* n = d.fileName();
+        if (batch_is_input(d, 0)) {
+            batch_tapes_here++;
+        } else if (batch_is_input(d, 1)) {
+            batch_z80_here++;
+        } else if (is_listable_dir(d) && n[0] != '.' && !d.isHiddenSet() && !d.isSystem() &&
+                   strcasecmp(n, "Converted") != 0 && strcasecmp(n, "Tapes") != 0 && batch_dir_count < BATCH_DIRS_MAX) {
+            size_t len = strlen(n) + 1;
+            if (used + len <= LIST_POOL_SIZE) {
+                memcpy(list_pool + used, n, len);
+                batch_dir_offsets()[batch_dir_count++] = (uint16_t) used;
+                used += len;
+            }
+        }
+        if (!d.next()) break;
+    }
+    d.close();
+    sort_u16(batch_dir_offsets(), (size_t) batch_dir_count, batch_dir_compare);
+    return true;
+}
+
+static void batch_banner(uint8_t* screen, const char* title) {
+    memset(screen, 0, 6144);
+    memset(screen + 6144, ui_attr(0x07), 768);
+    memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
+    help_put_text(screen, 0, 1, title, (int) strlen(title), gameinfo::ATTR_BANNER);
+}
+
+static void batch_put(uint8_t* screen, int row, const char* text, uint8_t attr = gameinfo::ATTR_TEXT) {
+    help_put_text(screen, row, 1, text, (int) strlen(text), attr);
+}
+
+// "SD:/Games/Arcade" in 31 letters at most (the end of a long one)
+static void batch_where(char* out, size_t size) {
+    char t[sizeof(sd_cwd) + 8];
+    snprintf(t, sizeof(t), "SD:%s", sd_cwd[0] ? sd_cwd : "/");
+    size_t n = strlen(t);
+    if (n > 31) snprintf(out, size, "..%s", t + n - 29);
+    else snprintf(out, size, "%s", t);
+}
+
+// ACTION_BATCH: BYTE param1 = the key (0: opened). Status 0 the screen stays, 1 closed,
+// 3 convert the tapes of sd_cwd (the ROM then shows the game information in mode 3)
+__attribute__((noinline)) static void nmi_action_batch() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    if (key >= 'A' && key <= 'Z') key = (uint8_t) (key - 'A' + 'a');
+    const int per_page = 10;
+    if (key <= 1) {                     // opened: 1 if the Spectrum can page memory
+        batch_machine128 = key == 1;
+        batch_phase = 0;
+        batch_page = 0;
+        batch_msg = nullptr;
+        if (!sd_card_mounted) {
+            batch_banner(screen, "Batch convert");
+            batch_put(screen, 2, "It converts the tapes of a");
+            batch_put(screen, 3, "folder on the SD card, and");
+            batch_put(screen, 4, "there is no SD card (or the");
+            batch_put(screen, 5, "PC has it).");
+            batch_put(screen, 7, "Press any key", gameinfo::ATTR_KEYS);
+            batch_phase = 3;            // (any key closes)
+            preview_screen = screen;
+            nmi_rom_data[0] = 0;
+            return;
+        }
+        batch_read_folder();
+    } else if (batch_phase == 3) {
+        nmi_rom_data[0] = 1;
+        return;
+    } else {
+        batch_msg = nullptr;
+        int pages = (batch_dir_count + per_page - 1) / per_page;
+        if (key == 'x' || is_key_break(key)) {
+            walk_stop();
+            nmi_rom_data[0] = 1;
+            return;
+        } else if (key >= '0' && key <= '9') {
+            int i = batch_page * per_page + (key == '0' ? 9 : key - '1');
+            if (i < batch_dir_count) {
+                const char* name = list_pool + batch_dir_offsets()[i];
+                size_t have = strlen(sd_cwd), len = strlen(name);
+                if (have + 1 + len < sizeof(sd_cwd)) {
+                    sd_cwd[have] = '/';
+                    memcpy(sd_cwd + have + 1, name, len + 1);
+                    batch_page = 0;
+                    batch_read_folder();
+                } else {
+                    batch_msg = "That folder's path is too long";
+                }
+            }
+        } else if (key == 'u') {
+            char* slash = strrchr(sd_cwd, '/');
+            if (slash != nullptr) {
+                *slash = '\0';
+                batch_page = 0;
+                batch_read_folder();
+            }
+        } else if (key == 'n' && batch_page + 1 < pages) {
+            batch_page++;
+        } else if (key == 'p' && batch_page > 0) {
+            batch_page--;
+        } else if (key == 'c' || key == 't' || key == notes::KEY_ENTER || key == 13) {
+            uint8_t kind = key == 't' ? 1 : 0;
+            int count = kind == 1 ? batch_z80_here : batch_tapes_here;
+            if (count == 0) {
+                batch_msg = kind == 1 ? "No .z80 in this folder" : "No .tap or .tzx in this folder";
+            } else {
+                walk_stop();
+                batch_kind = kind;
+                batch_total = (uint16_t) count;
+                batch_phase = 1;
+                nmi_rom_data[0] = 3;
+                return;
+            }
+        }
+    }
+    batch_banner(screen, "Batch convert: which folder?");
+    char t[48];
+    batch_where(t, sizeof(t));
+    batch_put(screen, 2, t, gameinfo::ATTR_HEADING);
+    snprintf(t, sizeof(t), "%d tape%s, %d .z80 here", batch_tapes_here, batch_tapes_here == 1 ? "" : "s", batch_z80_here);
+    batch_put(screen, 3, t, batch_tapes_here + batch_z80_here > 0 ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+    int pages = (batch_dir_count + per_page - 1) / per_page;
+    if (batch_page >= pages) batch_page = 0;
+    for (int k = 0; k < per_page; k++) {
+        int i = batch_page * per_page + k;
+        if (i >= batch_dir_count) break;
+        snprintf(t, sizeof(t), "%d-%.27s/", k == 9 ? 0 : k + 1, list_pool + batch_dir_offsets()[i]);
+        batch_put(screen, 5 + k, t);
+    }
+    if (batch_dir_count == 0) batch_put(screen, 5, "(no folders in it)", gameinfo::ATTR_DIM);
+    if (pages > 1) {
+        snprintf(t, sizeof(t), "Page %d/%d  N-Next P-Previous", batch_page + 1, pages);
+        batch_put(screen, 16, t, gameinfo::ATTR_KEYS);
+    }
+    batch_put(screen, 18, "1-0 Open a folder  U-Up", gameinfo::ATTR_KEYS);
+    batch_put(screen, 19, "C-Tapes here to .z80", gameinfo::ATTR_KEYS);
+    batch_put(screen, 20, "T-.z80 here to tapes", gameinfo::ATTR_KEYS);
+    batch_put(screen, 21, "X-Exit", gameinfo::ATTR_KEYS);
+    batch_put(screen, 22, "Into Converted/ or Tapes/ here", gameinfo::ATTR_DIM);
+    if (batch_msg != nullptr) batch_put(screen, 23, batch_msg, gameinfo::ATTR_HEADING);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// A line at the end of <folder>/Converted/Batch convert.txt (made if need be)
+static void batch_log(const char* a, const char* b = "", const char* c = "", const char* d = "") {
+    int n = snprintf(grab_path, sizeof(grab_path), "%s/%s/Batch convert.txt", sd_cwd, batch_out_folder());
+    if (n < 0 || n >= (int) sizeof(grab_path)) return;
+    FileHandle& f = *notes_handle();
+    if (!f.openAppend(Drive::EXTERNAL_SD_CARD, grab_path)) return;
+    f.write(a, (int) strlen(a));
+    f.write(b, (int) strlen(b));
+    f.write(c, (int) strlen(c));
+    f.write(d, (int) strlen(d));
+    f.write("\r\n", 2);
+    f.close();
+}
+
+// The next tape of the folder that has no .z80 in Converted yet, from the batch_done'th on
+// (counting the skipped ones): its path and name in info_path / info_name. False at the end.
+__attribute__((noinline)) static bool batch_next_tape() {
+    char path[sizeof(sd_cwd) + 4];
+    snprintf(path, sizeof(path), "/sd%s", sd_cwd);
+    for (;;) {
+        DirHandle& d = find_dirs[0];
+        if (!d.open(path)) return false;
+        int k = 0;
+        bool found = false;
+        while (!d.atEnd()) {
+            if (batch_is_input(d, batch_kind) && k++ == batch_done) {
+                found = true;
+                snprintf(info_path, sizeof(info_path), "%s/%s", sd_cwd, d.fileName());
+                break;
+            }
+            if (!d.next()) break;
+        }
+        d.close();
+        if (!found) return false;
+        // the name without the extension, as the game information has it
+        const char* slash = strrchr(info_path, '/');
+        const char* file = slash != nullptr ? slash + 1 : info_path;
+        snprintf(info_name, sizeof(info_name), "%.*s", (int) strlen(file) - 4, file);     // (.tap .tzx .z80)
+        int n = snprintf(grab_path, sizeof(grab_path), "%s/%s/%s.%s", sd_cwd, batch_out_folder(), info_name,
+            batch_kind == 1 ? "tap" : "z80");
+        if (n > 0 && n < (int) sizeof(grab_path) && fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) != fsops::KIND_NONE) {
+            batch_skipped++;
+            batch_done++;
+            continue;                           // converted already
+        }
+        info_drive = 1;
+        return true;
+    }
+}
+
+static void batch_summary(uint8_t* screen) {
+    batch_banner(screen, batch_end_msg != nullptr ? "Batch convert: stopped" : "Batch convert: done");
+    char t[48];
+    batch_where(t, sizeof(t));
+    batch_put(screen, 2, t, gameinfo::ATTR_HEADING);
+    snprintf(t, sizeof(t), "Saved:          %u", (unsigned) batch_saved);
+    batch_put(screen, 4, t);
+    snprintf(t, sizeof(t), "Already done:   %u", (unsigned) batch_skipped);
+    batch_put(screen, 5, t);
+    snprintf(t, sizeof(t), batch_kind == 1 ? "Not converted:  %u" : "Did not load:   %u", (unsigned) batch_failed);
+    batch_put(screen, 6, t, batch_failed > 0 ? gameinfo::ATTR_HEADING : gameinfo::ATTR_TEXT);
+    if (batch_done < batch_total) {
+        snprintf(t, sizeof(t), "Not looked at:  %u", (unsigned) (batch_total - batch_done));
+        batch_put(screen, 7, t);
+    }
+    snprintf(t, sizeof(t), "The %s files are in", batch_kind == 1 ? ".tap" : ".z80");
+    batch_put(screen, 9, t);
+    snprintf(t, sizeof(t), "%s/ in that folder, and", batch_out_folder());
+    batch_put(screen, 10, t);
+    batch_put(screen, 11, batch_kind == 1 ? "what happened to each in" : "what happened to each tape in");
+    snprintf(t, sizeof(t), "%s/Batch convert.txt", batch_out_folder());
+    batch_put(screen, 12, t);
+    if (batch_end_msg != nullptr) {
+        batch_put(screen, 14, batch_end_msg, gameinfo::ATTR_HEADING);
+        if (strncmp(batch_end_msg, "Stopped", 7) == 0) batch_put(screen, 15, batch_kind == 1 ? "T there again carries on." : "C there again carries on.", gameinfo::ATTR_DIM);
+    }
+    batch_put(screen, 23, "X-Exit", gameinfo::ATTR_KEYS);
+}
+
+// A tape is over (conv_msg says how): counted and written down
+static void batch_tape_over() {
+    const char* tape = info_path + strlen(sd_cwd) + 1;
+    if (strncmp(conv_msg, "Saved", 5) == 0) {
+        batch_saved++;
+        batch_log("Saved: ", tape, " ->", conv_msg + 5);
+    } else {
+        batch_failed++;
+        batch_log("Not loaded: ", tape, " - ", conv_msg);
+    }
+    batch_done++;
+}
+
+// Starts the next tape (skipping those done); false if there are none left or it could not
+// start (then batch_phase is 3)
+static bool batch_start_next(uint8_t& keep) {
+    while (batch_next_tape()) {
+        conv_machine128 = batch_machine128;
+        conv_phase = CONV_CHOOSE;
+        if (conv_op(0, 'a', keep)) return true;       // started, and its first slice run
+        // over already: no ROM files (every tape would fail: the batch stops), or the tape
+        // could not be opened, or it was all done in the first slice
+        if (strncmp(conv_msg, "No ", 3) == 0) {
+            batch_end_msg = conv_msg;
+            batch_log("Stopped: ", conv_msg);
+            return false;
+        }
+        batch_tape_over();
+    }
+    return false;
+}
+
+// ---- T on the Batch convert screen: .z80 snapshots to tapes (z80tap.h) ----
+// One snapshot a request: read into snap_load_buffer, its tape written to <folder>/Tapes/<name>.tap
+// (the loader's plan and bytes in list_pool), then a screen saying how far it has got, and
+// byte 1 is 6 so the ROM asks again. False when there are no more (or it stopped).
+struct TapFileSink {
+    FileHandle* f;
+    bool write(const void* p, size_t n) { return f->write(p, n) == (int) n; }
+};
+static_assert(sizeof(z80tap::Plan) + z80tap::LC_SIZE + 8 <= LIST_POOL_SIZE, "the tape's plan fits in list_pool");
+
+__attribute__((noinline)) static const char* batch_tap_one() {
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    FileHandle& f = conv_scratch().file;            // (the converter is not running)
+    if (!f.open(Drive::EXTERNAL_SD_CARD, info_path, true)) return "cannot read it";
+    int32_t size = f.size();
+    // a version 1 file (PC in the header) is 49182 bytes, or compressed and ending 00 ED ED 00:
+    // anything else is not a .z80 (the reader takes any 30 bytes for a header)
+    uint8_t h[30], tail[4];
+    bool v1 = f.read(h, 30) == 30 && (h[6] | h[7]) != 0;
+    bool good = !v1 || size == (int32_t) snapload::Z80V1_SIZE ||
+        ((h[12] & 0x20) && size > 34 && f.seek((uint32_t) size - 4) && f.read(tail, 4) == 4 &&
+         tail[0] == 0 && tail[1] == 0xED && tail[2] == 0xED && tail[3] == 0);
+    if (!good || !f.seek(0)) {
+        f.close();
+        return "not a .z80 it can read";
+    }
+    snapload::Kind k = snapload::load_z80(f, size, buf, snap_io_buffer, sizeof(snap_io_buffer));
+    f.close();
+    if (k == snapload::KIND_ERROR) return "not a .z80 it can read";
+    z80tap::Snap s{};
+    s.hdr = buf;
+    s.is128 = k == snapload::KIND_PAGED;
+    if (s.is128) {
+        for (int b = 0; b < 8; b++) s.bank[b] = snapload::bank_memory(buf, (uint32_t) b);
+    } else {
+        s.ram48 = buf + 30;
+    }
+    z80tap::Plan* plan = new (list_pool) z80tap::Plan();
+    uint8_t* lc = reinterpret_cast<uint8_t*>(list_pool) + ((sizeof(z80tap::Plan) + 7) & ~(size_t) 7);
+    int n = snprintf(list_path, sizeof(list_path), "%s/Tapes/%s.tap", sd_cwd, info_name);
+    if (n < 0 || n >= (int) sizeof(list_path)) return "its name is too long";
+    if (!f.open(Drive::EXTERNAL_SD_CARD, list_path, false)) return "cannot write the tape";
+    TapFileSink sink{ &f };
+    const char* why = z80tap::write_tap(sink, s, info_name, lc, *plan);
+    bool closed = f.close();
+    if (why == nullptr && !closed) why = "could not write the file";
+    if (why != nullptr) fsops::remove_path(Drive::EXTERNAL_SD_CARD, list_path);
+    LOG("Tape of %s: %s\n", info_path, why ? why : "saved");
+    return why == nullptr ? (s.is128 ? "" : nullptr) : why;     // "" saved (128K), nullptr saved (48K)
+}
+
+__attribute__((noinline)) static bool batch_tap_step() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    if (!batch_next_tape()) return false;           // (skips those done)
+    const char* why = batch_tap_one();
+    const char* file = info_path + strlen(sd_cwd) + 1;
+    if (why == nullptr || why[0] == '\0') {
+        batch_saved++;
+        batch_log("Saved: ", file, why == nullptr ? " -> a 48K tape" : " -> a 128K tape");
+    } else {
+        batch_failed++;
+        batch_log("Not converted: ", file, " - ", why);
+    }
+    batch_done++;
+    walk_stop();                                    // (list_pool was used)
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer) + INFO_SCREEN_OFFSET;
+    batch_banner(screen, "Batch convert: .z80 to tapes");
+    char t[48];
+    batch_where(t, sizeof(t));
+    batch_put(screen, 2, t, gameinfo::ATTR_HEADING);
+    snprintf(t, sizeof(t), "%u/%u %.24s", (unsigned) batch_done, (unsigned) batch_total, info_name);
+    batch_put(screen, 4, t);
+    snprintf(t, sizeof(t), "Saved %u, already done %u", (unsigned) batch_saved, (unsigned) batch_skipped);
+    batch_put(screen, 6, t);
+    if (batch_failed > 0) {
+        snprintf(t, sizeof(t), "Not converted %u", (unsigned) batch_failed);
+        batch_put(screen, 7, t, gameinfo::ATTR_HEADING);
+    }
+    batch_put(screen, 23, "BREAK-Stop", gameinfo::ATTR_KEYS);
+    preview_screen = screen;
+    conv_overlay_on = false;
+    nmi_rom_data[1] = 6;                            // the ROM asks again
+    nmi_rom_data[3] = 0;
+    nmi_rom_data[0] = 1;
+    return true;
+}
+
+// ACTION_GAME_INFO in mode 3: op 0 starts the batch (or shows the summary), op 6 goes on
+// (key 0) or takes a key (BREAK/X stop it, S saves the screen as C does)
+__attribute__((noinline)) static void nmi_batch_info(int op, uint8_t key) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t keep = 0;
+    if (key >= 'A' && key <= 'Z') key = (uint8_t) (key - 'A' + 'a');
+    if (batch_phase == 1 && op == 0) {
+        batch_phase = 2;
+        batch_saved = batch_skipped = batch_failed = 0;
+        batch_done = 0;
+        batch_end_msg = nullptr;
+        batch_on = true;
+        batch_on = batch_kind == 0;
+        snprintf(grab_path, sizeof(grab_path), "%s/%s", sd_cwd, batch_out_folder());     // (a static: the stack is small)
+        uint8_t made = make_sd_folder(grab_path);
+        if (made != fsops::OK && made != fsops::NAME_IN_USE) {
+            batch_end_msg = batch_kind == 1 ? "Could not make Tapes/" : "Could not make Converted/";
+        } else {
+            batch_log(batch_kind == 1 ? "Batch convert (.z80 to tapes) of SD:" : "Batch convert of SD:", sd_cwd[0] ? sd_cwd : "/");
+            if (batch_kind == 1) {
+                if (batch_tap_step()) return;
+            } else if (batch_start_next(keep)) {
+                return;
+            }
+        }
+    } else if (batch_phase == 2 && op == 6 && batch_kind == 1) {
+        if (key == 0x18 || key == 'x') {
+            batch_end_msg = "Stopped with BREAK";
+            batch_log("Stopped");
+        } else if (batch_tap_step()) {
+            return;
+        }
+    } else if (batch_phase == 2 && op == 6) {
+        bool stopping = key == 0x18 || key == 'x';
+        if (conv_op(0, key, keep)) return;            // still converting this tape
+        // this tape is over
+        const char* tape = info_path + strlen(sd_cwd) + 1;
+        if (stopping) {
+            batch_end_msg = "Stopped with BREAK";
+            batch_log("Stopped at ", tape);
+        } else {
+            batch_tape_over();
+            if (batch_start_next(keep)) return;
+        }
+    }
+    if (batch_phase == 2) {
+        batch_phase = 3;
+        batch_on = false;
+        char n[3][8];
+        snprintf(n[0], sizeof(n[0]), "%u", (unsigned) batch_saved);
+        snprintf(n[1], sizeof(n[1]), "%u", (unsigned) batch_skipped);
+        snprintf(n[2], sizeof(n[2]), "%u", (unsigned) batch_failed);
+        batch_log("Saved ", n[0], ", already done ", n[1]);
+        batch_log(batch_kind == 1 ? "Not converted " : "Not loaded ", n[2]);
+        conv_end();                     // (the list and the information are read again)
+    }
+    batch_on = false;
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer) + INFO_SCREEN_OFFSET;
+    batch_summary(screen);
+    preview_screen = screen;
+    conv_overlay_on = false;
+    nmi_rom_data[1] = 0;                // the ROM waits for a key: X leaves
+    nmi_rom_data[3] = 0;
+    nmi_rom_data[0] = 1;                // one page, no pictures
+}
+
+// ---- Menu grabs: a double press of the button with a menu up (menushot.h) ----
+// The main loop sets menu_shot in the ROM; the ROM's key scan sees it and sends the screen
+// (screentopico, ACTION_SCREEN_STASH pieces), which go here instead of over the game's screen.
+// With the last piece the screen is saved as /Scraper/Screen Grabs/<menu>.png (<menu> 2.png
+// ... if that is there), and the answer is the border colour: 4 green saved, 2 red not.
+// It is kept in a part of snap_load_buffer that nothing else uses while a menu is up (the
+// place of the 128K bank 4); not while a snapshot to be saved is there (sna_in_buffer).
+static const uint32_t MENU_SHOT_OFFSET = 82944;
+static_assert(MENU_SHOT_OFFSET + menushot::SCR_SIZE <= SNAP_LOAD_BUFFER_SIZE, "the menu grab fits");
+
+struct ShotSink {
+    FileHandle* f;
+    bool write(const void* p, size_t n) { return f->write(p, n) == (int) n; }
+};
+
+__attribute__((noinline)) static bool menu_shot_save(const uint8_t* scr) {
+    if (!sd_card_mounted || sna_in_buffer) return false;
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, screengrab::SCRAPER_FOLDER) != fsops::KIND_DIR) {
+        if (list_pool_busy) return false;          // making it borrows list_pool, which a screen is using
+        if (!grab_folder_make()) return false;
+        walk_stop();
+    }
+    char name[menushot::NAME_MAX + 1];
+    menushot::name_of(scr, menu_font(), name);
+    bool free_name = false;
+    for (int k = 1; k <= 99 && !free_name; k++) {
+        char suffix[4] = "";
+        if (k > 1) snprintf(suffix, sizeof(suffix), " %d", k);
+        int n = snprintf(grab_path, sizeof(grab_path), "%s/%s%s.png", screengrab::SCRAPER_FOLDER, name, suffix);
+        if (n < 0 || n >= (int) sizeof(grab_path)) return false;
+        free_name = fsops::kind(Drive::EXTERNAL_SD_CARD, grab_path) == fsops::KIND_NONE;
+    }
+    if (!free_name) return false;
+    FileHandle& f = *notes_handle();
+    if (!f.open(Drive::EXTERNAL_SD_CARD, grab_path, false)) return false;
+    ShotSink sink{ &f };
+    bool ok = menushot::write_png(sink, scr);
+    ok = f.close() && ok;
+    if (!ok) fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path);
+    LOG("Menu grab %s: %s\n", grab_path, ok ? "saved" : "not saved");
+    return ok;
+}
+
+// A piece of the screen for a menu grab (ACTION_SCREEN_STASH while menu_shot is set): true
+// if it was taken (the status is set)
+static bool menu_shot_piece() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint16_t buffer = nmi_rom_data[2] | (nmi_rom_data[3] << 8);
+    uint16_t address = nmi_rom_data[4] | (nmi_rom_data[5] << 8);
+    uint16_t length = nmi_rom_data[6] | (nmi_rom_data[7] << 8);
+    uint8_t* shot = reinterpret_cast<uint8_t*>(snap_load_buffer) + MENU_SHOT_OFFSET;
+    if (address < 16384 || address - 16384 + length > menushot::SCR_SIZE || buffer + length > 16384) {
+        return false;
+    }
+    uint32_t at = address - 16384;
+    if (!sna_in_buffer && conv_phase != CONV_RUN) memcpy(shot + at, nmi_rom_data + buffer, length);
+    if (at + length < menushot::SCR_SIZE) {
+        nmi_rom_data[0] = 0;
+        return true;
+    }
+    nmi_rom_data[START_MENUSHOT] = 0;           // (the ROM reads its answer after the last piece)
+    bool ok = !sna_in_buffer && conv_phase != CONV_RUN && menu_shot_save(shot);
+    if (!ok) set_last_error("Cannot save", "menu grab (.png)");
+    nmi_rom_data[0] = ok ? 4 : 2;               // the border: green, red
+    return true;
+}
+
+// Two quick presses of the button: with no menu up, the game's screen is saved with no menu
+// (STARTUP_ACTION_GRAB, the border shows how it went); with a menu up, the menu's screen as a
+// .png (menu_shot_piece). False if neither could be done.
+bool button_double_press() {
+    if (rom_state.nmi_active) {
+        if (conv_phase == CONV_RUN) return false;          // (converting: the buffer is the Spectrum's)
+        rom_data[16384 + START_MENUSHOT] = 1;               // the ROM sends the screen (getkeypress)
+        return true;
+    }
+    return sendNmiRequest(STARTUP_ACTION_GRAB, 0, 0);
 }
 
 
@@ -6351,7 +10042,7 @@ int main() {
 
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_PROC1_BITS;
 
-    memcpy(rom_data + 16384, NMI_ROM, NMI_ROM_SIZE);
+    nmi_rom_unpack(rom_data + 16384);
     rom_state.flags = 0;
 
     multicore_launch_core1(do_my_pio);
@@ -6428,20 +10119,23 @@ int main() {
         }
 
         tape_service_poll();
+        level_loaders_poll();
 
         bool isup = gpio_get(PIN_USER_SWITCH);
         if (!isup) {
 
             extras::Press press = extras::classify_press(
-                [] { return !gpio_get(PIN_USER_SWITCH); }, [](uint32_t ms) { sleep_ms(ms); });
+                [] { return !gpio_get(PIN_USER_SWITCH); }, [](uint32_t ms) { sleep_ms(ms); },
+                cfg.long_press_ms, cfg.double_press);
 
             if (press == extras::Press::SHORT) {
                 if (!sendNmiRequest(0, 0, 0)) {
                     LOG("Couldn't send NMI because an NMI is already active.\n");
                 }
             } else if (press == extras::Press::DOUBLE) {
-                // Two quick presses: save the screen with no menu (the border shows how it went)
-                if (!sendNmiRequest(STARTUP_ACTION_GRAB, 0, 0)) {
+                // Two quick presses: save the screen with no menu (the border shows how it went);
+                // with a menu up, the menu's screen as a .png (menu_shot_piece)
+                if (!button_double_press()) {
                     LOG("Couldn't send the screen grab because an NMI is already active.\n");
                 }
                 while (!gpio_get(PIN_USER_SWITCH)) {

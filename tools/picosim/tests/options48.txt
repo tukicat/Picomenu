@@ -1,0 +1,99 @@
+# O-Options on the NMI menu: the settings of Picomenu.ini changed with Q/A and C, the screen grab
+# order with U/D and H; leaving with changes asks to save; only the changed values are written
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/options-a.ini
+sd /Games/Green.tzx {OUT}/test.pok
+boot
+nmi
+wait 30
+expect O-Options
+key o
+wait 40
+expect Options (Picomenu.ini)
+expect theme
+expect dark
+expect [Display] dark or light menus
+expect sort
+expect waste_bin
+expect N-Grab order  D-Diagnostics
+# D: the Diagnostics page, any key back to the settings
+key d
+wait 30
+expect Diagnostics
+expect Firmware
+expect Rev 2.0
+expect Any key: back to Options
+key x
+wait 30
+expect Options (Picomenu.ini)
+# no changes: X leaves at once
+key x
+wait 40
+expect O-Options
+key o
+wait 40
+# down to sort (theme, show_all, details, sort) and change it
+key a
+key a
+key a
+wait 10
+expect [Browse] the order of names
+key c
+wait 20
+expect reverse
+# the theme too, and long_press (row 12)
+key q
+key q
+key q
+key c
+wait 20
+expect light
+# the order page: From File (first) hidden, Loading Screen moved down
+key n
+wait 30
+expect Options: Screen grab order
+expect 1 From File
+key h
+wait 20
+expect hidden
+key a
+key d
+wait 20
+expect 3 Loading Screen
+# leaving: save? N stays nothing; BREAK stays on the screen
+key x
+wait 30
+expect Save changes?
+key BREAK
+wait 30
+expectnot Save changes?
+key x
+wait 30
+key y
+wait 60
+expect O-Options
+get sd /Picomenu.ini {OUT}/options-saved.ini
+# open it again: what was saved is shown
+key o
+wait 40
+expect reverse
+expect light
+key n
+wait 30
+expect 1 Menu Screen
+expect 2 Loading Screen
+# a change, then N: forgotten
+key p
+wait 20
+key c
+wait 20
+key x
+wait 30
+key n
+wait 40
+expect O-Options
+key o
+wait 40
+expect light
+key x
+wait 30

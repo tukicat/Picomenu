@@ -18,10 +18,11 @@ It also prints the instructions run, the loop passes skipped and the blocks flas
 
     TZXNOACCEL=1 ./tzxconv_host ...     # no loader acceleration (every pass of every loop is run)
     TZXNOFLASH=1 ./tzxconv_host ...     # no flash loading (the ROM's blocks are played edge by edge)
+    TZXNOEDGE=1 ./tzxconv_host ...      # no edge-routine shortcut (LD-EDGE copies run instruction by instruction)
 
 `TZXGRAB=file.scr` saves the loading screen when the converter sees it loaded (it prints "loading screen at ... s").
 
-The acceleration is exact: with TZXNOFLASH, a snapshot made with and without TZXNOACCEL must be the same, byte for byte. Flash loading is not: it leaves out the time the ROM's blocks take, so the snapshot is taken at another moment of the same game.
+The acceleration is exact: with TZXNOFLASH, a snapshot made with and without TZXNOACCEL (or TZXNOEDGE) must be the same, byte for byte. Flash loading is not: it leaves out the time the ROM's blocks take, so the snapshot is taken at another moment of the same game.
 
 **A real tape to try:** convert it here, load the .z80 in Fuse (or on the Picoface) and see whether the game runs. Also load the .tzx in Fuse to compare.
 
@@ -37,7 +38,7 @@ This needs `sjasmplus` and `python3`. It assembles `tests/game.asm` and `tests/t
     PROF=1 MAXCYC=3000000000 node ... bench.bin 50 0x20000000 syms.txt   # where the time goes, by function
                                                                        # (syms.txt: arm-none-eabi-nm -S -C bench.elf)
 
-(`reg.mjs` and `hook.mjs`, also in `bench/`, let Node load rp2040js's TypeScript: they map `./x.js` imports to `./x.ts`. Copy them too.) Results are in `Docs/Tape-converter-notes.md`.
+(`reg.mjs` and `hook.mjs`, also in `bench/`, let Node load rp2040js's TypeScript: they map `./x.js` imports to `./x.ts`. Copy them too.)
 
 ## ../stackdepth.py
 This gives the worst-case stack from a build made with `-fcallgraph-info=su`:

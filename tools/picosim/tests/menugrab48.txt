@@ -1,0 +1,48 @@
+# A double press of the button with a menu up saves the menu's screen as a .png in
+# /Scraper/Screen Grabs, named after the menu (read off the screen): NMI Menu, Browse Games,
+# Options (Picomenu.ini), Help - <page>; a second of the same name is "<name> 2.png". The menu
+# carries on, and the game's own screen is still there when the menu is left.
+sd /48.rom {ROM48}
+sd /Games/Green.tzx {OUT}/test.pok
+boot
+nmi
+wait 30
+double
+wait 60
+get sd /Scraper/Screen Grabs/NMI Menu.png {OUT}/grab-nmi.png
+double
+wait 60
+get sd /Scraper/Screen Grabs/NMI Menu 2.png {OUT}/grab-nmi2.png
+key b
+wait 50
+double
+wait 60
+get sd /Scraper/Screen Grabs/Browse Games.png {OUT}/grab-browse.png
+# the menu still works after a grab
+key 1
+wait 50
+expect SD:/Games
+key x
+wait 30
+key o
+wait 40
+double
+wait 60
+get sd /Scraper/Screen Grabs/Options (Picomenu.ini).png {OUT}/grab-options.png
+# D on Options: the Diagnostics page
+key d
+wait 30
+double
+wait 60
+get sd /Scraper/Screen Grabs/Diagnostics.png {OUT}/grab-diag.png
+key x
+wait 30
+key x
+wait 30
+# leaving: the game's screen is back (not a menu's)
+key x
+wait 60
+# (the copyright line, in the Spectrum's own font, which the simulator shows as dots)
+expect . .... ........ ........ ...
+expectnot PICOMENU
+expectnot Help

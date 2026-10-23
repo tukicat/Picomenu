@@ -1,0 +1,37 @@
+# Save slots on a 128K game: saved as a .z80 (auto), and loaded again from the question
+sd /48.rom {ROM48}
+sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 200
+nmi
+wait 30
+key s
+wait 30
+expect Save slots: Athena
+key 1
+wait 200
+get sd /Save Games/Athena/Slot 1.z80 {OUT}/athena-slot1.z80
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect Saved games: Athena
+expect 1 Saved game        .z80
+key 1
+wait 200
+nmi
+wait 30
+expect Reload: Slot 1
+key s
+wait 30
+expect Save slots: Athena
+expect last

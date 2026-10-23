@@ -1,0 +1,8 @@
+#Test order: Menu Screen and Game Screen are left out, so not shown
+
+Ending Screen
+   standard screen number  
+#Menu Screen
+Loading Screen
+Not a category
+From File

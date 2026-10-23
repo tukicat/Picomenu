@@ -49,6 +49,9 @@ static BYTE ra_last_pdrv;
 static LBA_t ra_last;           /* the last single sector asked for */
 static bool ra_last_valid;
 
+/* PicoMenu: reads tried again, and reads that failed even so (Help > Diagnostics) */
+unsigned long sd_read_retries = 0, sd_read_failures = 0;
+
 static void readahead_discard(void) {
     ra_count = 0;
     ra_last_valid = false;
@@ -156,6 +159,18 @@ DRESULT disk_read(BYTE pdrv,  /* Physical drive nmuber to identify the drive */
         }
     }
     int rc = p_sd->read_blocks(p_sd, buff, sector, count);
+    // PicoMenu: a read that fails (a CRC error from a noisy line, no answer) is tried twice
+    // more. If it still fails, the card is marked as needing initialising again, so FatFs
+    // starts it afresh (CMD0 ...) at its next request instead of failing from then on.
+    for (int retry = 0; retry < 2 && rc != SD_BLOCK_DEVICE_ERROR_NONE; retry++) {
+        sd_read_retries++;
+        rc = p_sd->read_blocks(p_sd, buff, sector, count);
+    }
+    if (rc != SD_BLOCK_DEVICE_ERROR_NONE) {
+        sd_read_failures++;
+        readahead_discard();
+        p_sd->m_Status |= STA_NOINIT;
+    }
     return sdrc2dresult(rc);
 }
 
@@ -175,6 +190,14 @@ DRESULT disk_write(BYTE pdrv, /* Physical drive nmuber to identify the drive */
     if (!p_sd) return RES_PARERR;
     readahead_discard();
     int rc = p_sd->write_blocks(p_sd, buff, sector, count);
+    if (rc != SD_BLOCK_DEVICE_ERROR_NONE) {        /* PicoMenu: once more, then afresh (as reads) */
+        sd_read_retries++;
+        rc = p_sd->write_blocks(p_sd, buff, sector, count);
+        if (rc != SD_BLOCK_DEVICE_ERROR_NONE) {
+            sd_read_failures++;
+            p_sd->m_Status |= STA_NOINIT;
+        }
+    }
     return sdrc2dresult(rc);
 }
 

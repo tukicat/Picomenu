@@ -1,7 +1,9 @@
-# The game information: a software house longer than its 15 letters scrolls in its place
+# The game information: a software house longer than its 15 letters scrolls in its place; F (the
+# picture on the whole screen, here an empty one) shows no part of it
 sd /48.rom {ROM48}
 sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
 sd /Scraper/Instructions.txt {OUT}/Instructions.txt
+sd /Scraper/Screen Grabs/Green.scr {OUT}/blank.scr
 boot
 nmi
 wait 30
@@ -13,8 +15,16 @@ key v
 wait 10
 key 1
 wait 5
-expect Imagine Softwar
+expect Rescue the prisoners
 wait 160
 expect Software (
 wait 160
 expect Software Ltd
+key f
+wait 200
+expectnot Software
+expectnot Ocean
+expectnot Ltd
+key f
+wait 20
+expect Rescue the prisoners

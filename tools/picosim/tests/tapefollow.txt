@@ -1,0 +1,82 @@
+# Tape notes follow their tape: a snapshot's note says which tape it was taken on, and when the
+# tape is renamed, moved, or its folder renamed, or it goes in the Waste Bin, the note says where
+# it is now. Then I on the menu (the last game loaded) shows that game's screen grabs, as V does.
+flash /48.rom {ROM48}
+sd /Old/game.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Tape Files/Old~game.z80.tape {HERE}/follow-note.tape
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+sd /Scraper/Screen Grabs/game1.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/game Loading Screen.scr {OUT}/dummy.scr
+boot
+nmi
+wait 30
+key b
+wait 50
+# rename the tape
+key 3
+wait 50
+key r
+wait 20
+key 1
+wait 40
+key 2
+wait 6
+key ENTER
+wait 60
+expect 1-tapein2
+expectfile sd /Tape Files/Old~game.z80.tape|tape /Tapes/tapein2.tap
+expectfile sd /Tape Files/Old~game.z80.tape|snap /Old/game.z80
+# rename its folder
+key u
+wait 50
+key r
+wait 20
+key 3
+wait 40
+key 2
+wait 6
+key ENTER
+wait 60
+expect 3-Tapes2/
+expectfile sd /Tape Files/Old~game.z80.tape|tape /Tapes2/tapein2.tap
+# move the tape into Old
+key 3
+wait 50
+key m
+wait 20
+key 1
+wait 30
+key u
+wait 50
+key 1
+wait 50
+key m
+wait 30
+expect Y-Yes, move it
+key y
+wait 60
+expectfile sd /Tape Files/Old~game.z80.tape|tape /Old/tapein2.tap
+nofile sd /Tapes2/tapein2.tap
+# erase it: it goes in the Waste Bin, and the note says so
+key e
+wait 20
+key 2
+wait 40
+key y
+wait 100
+expectfile sd /Tape Files/Old~game.z80.tape|tape /Waste Bin/
+expectfile sd /Tape Files/Old~game.z80.tape|tapein2.tap
+# load the game, then I on the menu: its two screen grabs
+key 1
+wait 200
+nmi
+wait 30
+key i
+wait 40
+expect Pic 1/2
+key f
+wait 20
+key f
+wait 20
+key x
+wait 30

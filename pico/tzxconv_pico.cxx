@@ -50,5 +50,7 @@ void no_screen_watch(void* s) { m(s)->no_screen_watch(); }
 uint8_t port_7ffd(void* s) { return m(s)->port_7ffd(); }
 const uint8_t* ay_registers(void* s) { return m(s)->ay_registers(); }
 uint8_t ay_selected(void* s) { return m(s)->ay_selected(); }
+uint32_t tape_position(void* s) { return m(s)->tape().loaded_position(); }
+bool stopped_early(void* s) { return m(s)->stats().early_frame != 0; }
 
 }

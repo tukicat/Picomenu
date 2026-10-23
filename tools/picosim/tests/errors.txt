@@ -2,6 +2,8 @@
 sd /48.rom {ROM48}
 flash /Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
 flash /Snap.sna {ROM48}
+# a slice of 2 frames, so BREAK comes before the (fast) conversion ends
+slice 2
 boot
 nmi
 wait 30
@@ -36,6 +38,7 @@ wait 30
 expect Stopped: nothing was saved
 ls flash /
 # now for real
+slice 0
 key c
 wait 10
 key a

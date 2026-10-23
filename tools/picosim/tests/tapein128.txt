@@ -1,0 +1,52 @@
+# Tape in (T in Browse Games) on a 128K: the tape goes in with no reset, and the 128's own
+# Tape Loader loads it. The Pico takes over at the fetch of 0x0562 in LD-BYTES for each block
+# (tapein.tap: 10 LOAD ""CODE: BORDER 2: PAUSE 0: LOAD ""CODE: BORDER 4: PAUSE 0, then two
+# CODE blocks of 4 bytes at 30000 and 30004). Six blocks are asked for in all.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+sd /Tapes/zz.sna {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect Fav T-Tape
+key t
+wait 20
+expect Put in which tape? 1-0
+key 1
+wait 50
+expectnot Browse Games
+key ENTER
+wait 300
+expectmem 30000 0x55
+expectmem 30003 0x34
+expecttape 4
+key a
+wait 200
+expectmem 30004 0x66
+expectmem 30007 0x99
+expecttape 6
+# the tape position screen knows it was put in with T
+nmi
+wait 30
+key v
+wait 40
+expect tapein.tap
+expect In with T
+key x
+wait 30
+key x
+wait 30
+# T on a file that is not a tape says so
+nmi
+wait 30
+key b
+wait 50
+key t
+wait 20
+key 2
+wait 30
+expect That is not a .tap or .tzx

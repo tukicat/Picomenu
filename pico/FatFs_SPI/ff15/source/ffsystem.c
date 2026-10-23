@@ -17,6 +17,10 @@
 /* A block of memory the caller can lend to FatFs (ff_pool, ff_pool_size): blocks are taken from
    it first, then from the heap.  Making a directory clears a whole cluster, which is much
    quicker with a big buffer than with whatever the small heap has left. */
+#ifndef FF_HEAP_MAX
+#define FF_HEAP_MAX 2048		/* the biggest block asked of the heap */
+#endif
+
 unsigned char* ff_pool = 0;
 size_t ff_pool_size = 0;
 static size_t pool_used = 0;
@@ -27,12 +31,35 @@ void* ff_memalloc (	/* Returns pointer to the allocated memory block (null if no
 )
 {
 	size_t n = ((size_t)msize + 7) & ~(size_t)7;
-	if (ff_pool != 0 && pool_used + n <= ff_pool_size) {
-		void* p = ff_pool + pool_used;
+	unsigned char* base = ff_pool;
+	size_t size = ff_pool_size;
+#ifdef FF_HOST_ODD_POOL
+	if (base != 0) { base++; size--; }	/* the simulator: memory lent at an odd address, as in test 9 */
+#endif
+	/* blocks start 8-aligned whatever the address lent: the long name buffer is read and written
+	   16 bits at a time, which stops a Cortex-M0+ (a HardFault) at an odd address */
+	size_t skip = (size_t)((8 - ((size_t)base & 7)) & 7);
+#ifdef FF_NO_ALIGN
+	skip = 0;							/* the simulator: as before the fix */
+#endif
+	if (base != 0 && skip + pool_used + n <= size) {
+		void* p = base + skip + pool_used;
 		pool_used += n;
 		pool_blocks++;
 		return p;
 	}
+	/* The heap is small on the Pico (a few KB; see pico/check_heap.py) and its malloc halts the
+	   Pico when it can't give the memory (PICO_MALLOC_PANIC), where FatFs expects a null: so a big
+	   block (a buffer to clear a new folder's cluster, which FatFs asks for at up to 32 KB and
+	   then smaller) is only taken from the lent memory. FatFs then asks for less, down to
+	   writing one sector at a time. The long name buffer (about 1.1 KB) comes from the heap. */
+	if (msize > FF_HEAP_MAX) return 0;
+#ifdef FF_HOST_HEAP_LIMIT
+	{	/* the simulator: as the Pico's malloc does when the heap is too small */
+		extern void ff_host_heap_check(size_t n);
+		ff_host_heap_check((size_t)msize);
+	}
+#endif
 	return malloc((size_t)msize);	/* Allocate a new memory block */
 }
 

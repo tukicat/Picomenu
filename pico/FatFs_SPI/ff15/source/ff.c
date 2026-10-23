@@ -470,6 +470,8 @@ static BYTE CurrVol;				/* Current drive set by f_chdrive() */
 
 #if FF_FS_LOCK != 0
 static FILESEM Files[FF_FS_LOCK];	/* Open object lock semaphores */
+/* PicoMenu: how many files and directories are open (for Diagnostics, and to find one left open) */
+int ff_open_objects(void) { int n = 0; for (int i = 0; i < FF_FS_LOCK; i++) if (Files[i].fs) n++; return n; }
 #if FF_FS_REENTRANT
 static BYTE SysLock;				/* System lock flag (0:no mutex, 1:unlocked, 2:locked) */
 #endif

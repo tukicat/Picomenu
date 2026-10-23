@@ -6,65 +6,24 @@ Picomenu has been built using Brian Apps original code, an AI (Claude) has then 
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
-The ethos of the Picomenu is to make as much functionality as possible available on the Spectrum without a PC. It may be quicker or more convenient to use a PC for some things (creating .z80 snapshots from .tzx or .tap files for example), but convenience is not the aim. 
-
-### Setting up the SD Card
-
-On first start of the Picomenu you can choose D - Set up the SD card (this needs to be in exFAT or FAT32 format), this will populate the card with the folders it requires for some of the functionality to work. For instance it will create a /Favourites folder which you can use to add favourite games to quickly. It also creates a sample "Instructions.txt" which you can use to add the game information showed on the Game View Screen. 
-
-You can also create the folders yourself, they need to be on the root of the SD card and named: -
-/Favourites 
-/Save Games
-/Screen Grabs
-/Scraper
-/Game Notes
-/Poke List
-
-"instruction-example.txt" in the /docs section of the repo shows the headings you should include in the "instructions.txt" file. The "instructions.txt" file should be placed in the root of the SD card or the /Scraper folder. 
-
-If you want to create the "instruction.txt" file yourself, here are the headings you need to include: 
-
-Game Name (delete Game Name and replace with you game name)
-Software house: (delete this bracked text and write software house here)
-Year: (delete this bracked text and write year here)
-Controls
-(delete this bracked text and write controls here)
-Instructions
-(delete this bracked text and write instructions here)
-
-In order to use .tap functionality and the .tap/.tzx conversion to .z80 feature you need to place 48.rom and 128.rom (or 128-0.rom and 128-0.rom) on the root of the flash or SD card. I can't provide these files so you will need to provide your own. 
-
-For the T-Test ROM functionality you need to provide testrom.rom and/or DiagROM.rom and place them on the root of the flash. 
-
-### Updating to a Newer Firmware
-
-You can update Picomenu by placeing the .uf2 file from the releases section on the root of the Pico flash, Then run U-Update from the NMI menu. it will run through copying and writing and then ask you to power the spectrum off and on. You can verify the update has worked by using the U-Update screen (which shows the current version), or the H-Help section. Press D in the help section to take you to a diagnositic page that will show the version number.
-
-Only put one .uf2 in the root of SD card or internal flash. I have not yet tried what will happen if two are present. 
-
-If for any reason the update bricks the Picoface, switch off the spectrum and unplug the Picoface from it. Plug a USB cable into a PC, and before you plug the other end into the Pico hold down the BOOTSEL button. Once you have plugged the cable into the Pico release the BOOTSEL button. The pico will appear on your PC as drive named: RPI-RP2. Copy the .uf2 file onto that drive. The Pico will reset and you should now be able to plug the Picoface back into the Sspectrum, switch it on and the Picoface should work.
-
-### User Guide
-
-The /docs folder contains a help.txt which is also in the help section of the NMI Picomenu. 
-
-
 ![The NMI menu](images/1-nmi-menu.png)
 
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
 * Load and save snapshots, 48K and 128K, as `.sna`, `.z80` and `.szx`; load `.tap` and `.tzx` tapes.
-* Controls and instructions for each game from a text file `Instructions.txt` in the folder `Scraper` on the SD card (or in the root, if there is none there): shown beside a small copy of the game's screen (V in Browse Games, where D deletes a screen grab) and from the menu with I (Game Instructions) after the game has loaded (see `Docs/Instructions-example.txt`).
+* Convert a `.tap` or `.tzx` into a `.z80` snapshot on the Pico itself, for turbo and protected loaders too (Speedlock and others): C on a tape's information (V in Browse Games), then A (Auto), 4 (48K) or 1 (128K). The tape is loaded by its own loader on a Spectrum the Pico emulates, using `48.rom` and `128.rom` (or `128-0.rom` and `128-1.rom`) that you put in the root of the flash, the SD card's `ROMS` folder, or the root of the card. While it converts, the tape's loading screen is saved by itself in `/Scraper/Screen Grabs` as `<game> Loading Screen.scr`, and S saves the screen at any time (also as `<game> Loading Screen<n>.scr`, the lowest number free).
+* Multi-load 48K tapes (`.tap` and `.tzx` games that load their levels with the ROM's loader, such as Out Run and Gauntlet) play through a ROM trap: each later level loads at once from the tape file, found by name or in order as the game asks. **T** in Browse Games puts a tape in without a reset for the Spectrum's own loading (the 128's Tape Loader, `LOAD ""`), for 128K tapes. **V - Virtual Tape Player** on the NMI menu lists the tape's blocks, moves the tape to any of them (1-0), rewinds it (R) or ejects it (E); **W** there records a new tape: each SAVE goes straight into `/Recordings/<name>.tap` on the SD card (a new file each time, never over another). A tape is ejected by itself before it (or its folder) is erased, moved or renamed, and a snapshot saved while a tape plays remembers where the tape was (in `/Tape Files`), so loading it carries on with the next level; the note follows the tape when the tape (or its folder) is renamed, moved or put in the Waste Bin. A game that loads its levels with its own copy of the ROM's loader (Out Run's Speedlock releases) is found and patched to load from the tape file too: when a tape is put in with T, when a snapshot carries on with its tape, and in each block the trap loads (`level_loaders` in Picomenu.ini). Levels loaded by other turbo or protected loaders are not trapped (convert those instead).
+* Controls and instructions for each game from a text file `Instructions.txt` in the folder `Scraper` on the SD card (or in the root, if there is none there): shown beside a small copy of the game's screen (V in Browse Games, where D deletes a screen grab) and from the menu with I (Game Instructions) after the game has loaded, with the game's screen grabs as V shows them (its screen as it was, if it has none) (see `Docs/Instructions-example.txt`).
 * Quick save keeps earlier saves: Q asks to overwrite, or N saves as "<game> Save Game 2", 3 ...
 * Each game's information can also show its software house and year, and your own notes on the game (M while the information shows, E to edit them; kept in a `Game Notes` folder that you make in the root of the SD card).
 * A list of the last 10 games played (E on the menu), kept after power off; 1 to 9 and 0 load one, V then a number shows its picture and instructions.
-* G on the menu saves the running game's screen (`.scr`) in a `Screen Grabs` folder on the SD card; V in Browse Games cycles through a game's own screen and its grabs.
+* G on the menu saves the running game's screen (`.scr`) in `/Scraper/Screen Grabs` on the SD card, asking its category: `<game> Loading Screen.scr`, `<game> Menu Screen.scr`, `<game> Game Screen.scr`, `<game> Ending Screen.scr` (then `...1.scr`, `...2.scr`, the lowest number free), or Standard Screen Number, `<game>.scr`, `<game>1.scr` ... (as a double press saves). V in Browse Games (on a `.tap`, `.tzx`, `.sna`, `.z80` or `.szx`) cycles through a game's pictures category by category in the order of the `[Screen grab order]` part of `Picomenu.ini` (or, without one, the older `/Scraper/Screen Grabs/order.txt`), and by number in each; the screen in the game's own file (a snapshot's, a tape's loading screen) is the category From File. A category the order file leaves out (or comments out with `#`) is not shown.
 * The SD card shows up as a USB drive on a PC when the Pico is plugged in with the Spectrum off (copy files without taking the card out; eject before unplugging).
 * Browse the SD card and the internal flash (both with folders, search, move files and folders, copy files and folders (a folder copy stays on one drive; the SD card and the flash are not mixed), copy files between the drives, rename files and folders, erase files and folders): preview a game's screen, show file sizes and which machine (48 or 128) each snapshot needs.
 * Quick save (`<game> Save Game`) and reload the last game with one key.
 * Apply pokes to loaded games, typed in or from a `.pok` file.
 * Reset into 48K or 128K from the menu.
-* Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (U on the menu; if it fails, BOOTSEL still works).
+* Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (T-Tools then U on the menu; if it fails, BOOTSEL still works).
 * on-screen help
 
 
@@ -72,26 +31,53 @@ Picomenu can be used to:
 
 | Key | Does |
 |---|---|
-| S | Save snapshot (type auto, .sna, .z80, .szx, same) |
-| Q | Quick save as `<game> Save Game` in the `Save Games` folder of the SD card |
-| B | Browse Games (O for info: Type, Size and Mode columns) |
+| B | Browse Games (T puts a tape in for the Spectrum's own LOAD; O for info: Type, Size and Mode columns; H-Hide/Unhide hides a file or folder or shows it again (the SD card's hidden attribute, as Windows sets it; a littlefs attribute on the flash); L-All also lists the hidden ones, dimmed, and those always hidden because they can't be loaded: `Poke List`, `Tape Files`, `.scr` files and `.txt` files: a `.txt`'s number shows it a page at a time, and E edits it on the SD card, up to 3 KB with lines of 30 letters) |
+| S | Save slots: nine saves of the game being played in `/Save Games/<game>` on the SD card (1-9 save, L label, V view, E erase); S there is the Save snapshot screen (type auto, .sna, .z80, .szx, same) |
+| Q | Quick save: over the save slot used last, or (no slot used yet) as `<game> Save Game` in the `Save Games` folder of the SD card |
 | R | Reload last game (shows its name, scrolling a long one; remembered after power off) |
-| C | Change ROM |
+| V | Virtual Tape Player: the blocks of the tape being played; 1-0 move to one, R rewind, E eject (or stop recording), W record a new tape into `/Recordings` |
+| C | Change ROM: the `.rom` files in the root of the internal flash, or (2 - Show SD card /ROMS) those in the SD card's `ROMS` folder; 1 - Internal Rom goes back to the Spectrum's own ROM |
 | P | Poke (L for the game's `.pok` list) |
 | 4 / 1 | Reset into 48K / 128K |
-| D | Set up SD card: makes `Scraper` (with an example `Instructions.txt`), `Game Notes`, `Save Games`, `Screen Grabs`, `Favourites`, `Poke List` on a new card; replaces nothing |
-| U | Update PicoMenu from a `.uf2` file in the root of the SD card (listed nowhere else) |
-| T | Test ROM: choose zx-diagnostics (`testrom.rom`) or DiagROM (`DiagROM.rom`), kept on the flash, and reset into it |
-| H | Help (D for diagnostics) |
+| O | Options: the settings of `Picomenu.ini` on one page (Q/A move, C changes to the next choice; start_folder: the folder last browsed or /) and the screen grab order on another (N; U/D move a kind, H hides or shows it). Leaving after a change asks to save (Y), forget (N) or stay (BREAK); only the changed values are written, the file's notes stay. **D** shows the Diagnostics page (firmware, flash, SD card, the last error, where Picomenu.ini was read from) |
+| T | Tools (each goes back to Tools when done; X there goes back to the menu): |
+| &nbsp;&nbsp;T-T | Test ROM: choose zx-diagnostics (`testrom.rom`) or DiagROM (`DiagROM.rom`), kept in the root of the flash or the SD card's `ROMS` folder, and reset into it |
+| &nbsp;&nbsp;T-D | Set up SD card: makes `Scraper` (with an example `Instructions.txt`), `Scraper/Screen Grabs`, `Picomenu.ini` (the settings, all at their defaults), `Game Notes`, `Save Games`, `Favourites`, `Poke List`, `Tape Files`, `Recordings`, `Waste Bin` (hidden), `ROMS` (hidden: ROM files) on a new card; replaces nothing |
+| &nbsp;&nbsp;T-U | Update PicoMenu from a `.uf2` file in the root of the SD card (listed nowhere else) |
+| &nbsp;&nbsp;T-W | Waste Bin: Browse Games in `/Waste Bin` (hidden, on the SD card), where erased files and folders go; erasing there is for good, B empties it (after Y) |
+| &nbsp;&nbsp;T-C | Batch convert: choose a folder on the SD card (1-0 open, U up, N/P page). C converts each `.tap` and `.tzx` in it (not in folders below) as C - Convert does with Auto, into `Converted/` inside that folder. A tape whose `.z80` is already there is skipped, so running it again after BREAK carries on; `Converted/Batch convert.txt` lists what was saved and what did not load (and why), and a summary shows at the end. **T** does the opposite: each `.z80` in the folder becomes a `.tap` in `Tapes/` there, for loading on a real Spectrum with LOAD "" at the normal speed (a BASIC line, a 1 KB loader, then the memory; runs of one byte are filled in, not loaded; a 48K game takes 4-5 minutes, a 128K one, which needs a 128K Spectrum, up to 12). See `tools/z80tap` |
 | X | Exit |
 
-# The NMI button
+The NMI button: a short press opens the menu; a **double press** saves the screen as a screen grab, `<game>.scr`, `<game>1.scr` ... in `/Scraper/Screen Grabs` (green border: saved, red: not); holding it for one second resets into the Spectrum's own ROM. With a menu up, a double press saves **the menu's own screen as a `.png`** (256×192, 16 colours) in `/Scraper/Screen Grabs`, named after the menu as its title reads (`NMI Menu.png`, `Browse Games.png`, `Tools.png`, `Options (Picomenu.ini).png`, `Diagnostics.png` ...; `<name> 2.png` and on if taken), for documentation or sharing; the border flashes green (saved) or red (not). See `Picomenu.ini` below to change these. See `CHANGELOG.md` for what changed, and the full user guide at github.com/tukicat/Picomenu for how to use it. Features have been tested in simulation; check anything important on your own hardware.
 
-The NMI button (top right of the Picoface) has three functions. 
+## Save slots
+S on the menu shows nine slots for the game being played, kept on the SD card in `/Save Games/<game>` as `Slot 1.z80`, `Slot 2 - Zone 3.sna` and so on (the type follows `save_type`; auto is .sna for 48K and .z80 for 128K). A number saves to a slot (one already used asks first); L labels a slot (an empty one is saved there with the label); V shows a slot's screen; E erases one (to the Waste Bin); S opens the Save snapshot screen as before. The slot used last is marked and Q saves over it. Loading a game that has slots asks: 1-9 carries on from a slot, 0 starts the game itself, BREAK goes back to the list. A slot keeps a tape position (multi-load games) like any save. The game is known by its name (without ` Save Game`), so a slot loaded is still that game's. Without an SD card S is the Save snapshot screen.
 
-1.) a short press will take you into the NMI menu
-2.) a three second press will reset the spectrum
-3.) a double press will take a quick screen grab and place it in the /Screen Grabs folderardware.
+## Picomenu.ini: settings
+A text file in the root of the SD card (if there is no card, or none on it, the root of the internal flash) that sets how PicoMenu starts. Set up SD card writes one with every setting at its default. Sections in `[brackets]`, then `key = value`; `#` starts a note; case does not matter. A line PicoMenu does not understand is skipped, that setting keeps its default, and Diagnostics (D on O - Options) shows the first such line. With L-All on it is listed in the root of the card; its number shows it and E edits it on the Spectrum (lines of up to 30 letters), and it is used as soon as it is saved (the theme, the save type and the sort at once; how Browse Games starts, `show_all`, `details`, `start_drive`, `start_folder`, when the menu next opens). A change made through the USB drive is used when the PC gives the card back; after taking the card out to a PC, switch off and on (PicoMenu can't tell the card was changed).
+
+| Section | Setting | Choices (default first) | What it does |
+|---|---|---|---|
+| `[Display]` | `theme` | `dark`, `light` | the menus' colours: light is dark ink on white (the title and key bars keep theirs); pictures are never changed |
+| `[Browse]` | `show_all` | `off`, `on`, `last` | L-All when Browse Games opens; `last`: as it was left |
+| | `details` | `off`, `on`, `last` | O-Info (type, size, 48/128 columns), the same way |
+| | `sort` | `name`, `reverse`, `type` | A to Z; Z to A; by extension, then A to Z |
+| | `folders` | `first`, `last`, `mixed` | folders above the files, below them, or sorted in with them |
+| | `start_drive` | `sd`, `flash`, `last` | the drive B opens on (with no card always the flash) |
+| | `start_folder` | `/` or a folder such as `/Games` | where Browse Games starts on the SD card after power on (a folder that isn't there: the root) |
+| `[Saving]` | `save_type` | `auto`, `sna`, `z80`, `szx` | the type the Save snapshot screen starts on (`<`/`>` still change it) |
+| | `quick_save` | `ask`, `overwrite`, `new` | Q when the save is there already: ask (overwrite or a new number); overwrite it; always the next number (a game with a save slot used always goes over that slot) |
+| | `save_screen` | `slots`, `named` | what S opens: the save slots, or the Save snapshot screen |
+| | `slots_on_load` | `ask`, `never` | when a game with save slots is loaded, ask whether to carry on from one |
+| | `grab_format` | `scr`, `png`, `both` | what a screen grab is saved as (double press, G, the loading screens C saves): a `.scr`, a `.png` (16 colours, any PC shows it), or both with the same name; V shows each grab once and reads the `.png` ones PicoMenu saved |
+| `[Buttons]` | `long_press` | `1.0`, then `0.5` to `5`, or `off` | seconds the NMI button is held to reset |
+| | `double_press` | `grab`, `off` | a double press saves a screen grab; `off` also opens the menu a third of a second sooner |
+| `[Converting]` | `loading_grab` | `on`, `off` | C saves the loading screen by itself (S still saves one) |
+| `[Waste Bin]` | `waste_bin` | `on`, `off` | erased files go to `/Waste Bin`; `off`: erased for good |
+| `[Tapes]` | `level_loaders` | `patch`, `off` | a game's own copy of the ROM loader is made to load its levels from the tape file |
+| `[Tapes]` | `lock_48k` | `tapes`, `always`, `off` | on a 128K Spectrum, a 48K program is locked in 48K mode: with a tape playing through the trap (a tape loaded with its number, or a 48K snapshot that carries on with its tape), every 48K snapshot, or never |
+| `[Screen grab order]` | a category on each line | `From File`, `Loading Screen`, `Menu Screen`, `Game Screen`, `Ending Screen`, `Standard Screen Number` | the order V shows a game's pictures in; a category left out or commented out is not shown. Without this section `/Scraper/Screen Grabs/order.txt` is read, as before |
+
 
 ![Browse Games](images/2-browse-games.png)
 
@@ -111,6 +97,8 @@ The firmware build relies on the following being installed and on the path:
 - Raspberry Pi Pico SDK 
 - VSCode and VSCode Pico plugin.
 
+PC tools, not needed for the firmware: `tools/tzxconv` runs the tape converter on a PC and has its tests; `tools/picosim` runs the firmware and the NMI ROM together on a PC with an emulated Spectrum, for testing the menus (see the README in each).
+
 
 ## License
 
@@ -124,7 +112,7 @@ See the GNU General Public License for more details.
 
 A copy of the license is provided in the [LICENSE](./LICENSE) file.
 
-Third-party parts (FatFs, littlefs, LZ4, the Apache 2.0 SD driver, the Pico SDK, TinyUSB and the C runtime) keep their own, GPL-compatible licences. They are listed with their full texts in [THIRD-PARTY-NOTICES.txt](./THIRD-PARTY-NOTICES.txt); the Apache 2.0 text is in [pico/FatFs_SPI/LICENSE-Apache-2.0.txt](./pico/FatFs_SPI/LICENSE-Apache-2.0.txt).
+Third-party parts (FatFs, littlefs, LZ4, the Apache 2.0 SD driver, the Pico SDK, TinyUSB, the C runtime, and the Z80 emulator used by the tape converter, which is GNU LGPL v3) keep their own, GPL-compatible licences. They are listed with their full texts in [THIRD-PARTY-NOTICES.txt](./THIRD-PARTY-NOTICES.txt); the Apache 2.0 text is in [pico/FatFs_SPI/LICENSE-Apache-2.0.txt](./pico/FatFs_SPI/LICENSE-Apache-2.0.txt).
 
 
 ## Acknowledgments
@@ -134,5 +122,6 @@ The picoface firmware includes the following libraries:
 * [pico-littlefs](https://github.com/lurk101/pico-littlefs) by lurk101
 * [no-OS-FatFS-SD-SDIO-SPI-RPi-Pico](https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico) by Carl J Kugler III
 * [lz4](https://github.com/lz4/lz4) by Yann Collet.
-* [Carton](https://damieng.com/typography/zx-origins/carton/) font by Damien Guard
+* [Z80](https://github.com/redcode/Z80) CPU emulator and [Zeta](https://github.com/redcode/Zeta) headers by Manuel Sainz de Baranda y Goñi (GNU LGPL v3), for the tape converter
+* [Unscii](http://viznut.fi/unscii/) 8 font by Viznut (public domain / CC0), for the menu and the Pico's own screens
 

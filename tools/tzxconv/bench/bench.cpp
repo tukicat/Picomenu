@@ -67,6 +67,9 @@ extern "C" int main() {
 #ifdef BENCH_NOACCEL
     m.no_acceleration();
 #endif
+#ifdef BENCH_NOEDGE
+    m.no_edge_waits();
+#endif
 #ifdef BENCH_NOFLASH
     m.no_flash();
 #endif

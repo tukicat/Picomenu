@@ -621,18 +621,20 @@ enum class Press { SHORT, DOUBLE, LONG };
 static const uint32_t HOLD_MS = 1000;
 static const uint32_t DOUBLE_WINDOW_MS = 350;
 static const uint32_t SETTLE_MS = 25;
+// hold_ms (Picomenu.ini's long_press) 0: no long press, however long it is held; doubles
+// false: no double press, so a short one is known as soon as the button is let go.
 template <class Down, class Wait>
-inline Press classify_press(Down down, Wait wait) {
+inline Press classify_press(Down down, Wait wait, uint32_t hold_ms = HOLD_MS, bool doubles = true) {
     uint32_t held = 0;
-    while (held < HOLD_MS && down()) {
+    while ((hold_ms == 0 || held < hold_ms) && down()) {
         wait(1);
         held++;
     }
-    if (held >= HOLD_MS) {
+    if (hold_ms != 0 && held >= hold_ms) {
         return Press::LONG;
     }
     wait(SETTLE_MS);
-    for (uint32_t t = 0; t < DOUBLE_WINDOW_MS; t++) {
+    for (uint32_t t = 0; doubles && t < DOUBLE_WINDOW_MS; t++) {
         wait(1);
         if (down()) {
             wait(SETTLE_MS);

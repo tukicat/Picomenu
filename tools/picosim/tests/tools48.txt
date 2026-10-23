@@ -1,0 +1,30 @@
+# T-Tools on the NMI menu: Test ROM, Set up SD card, Update PicoMenu and Waste Bin, each going
+# back to Tools when done; X there goes back to the NMI menu
+sd /48.rom {ROM48}
+boot
+nmi
+wait 30
+text
+expect T-Tools
+expectnot D-Set up SD card
+expectnot W-Waste Bin
+key t
+wait 30
+text
+expect T-Test ROM (diagnostics)
+expect D-Set up SD card
+expect U-Update PicoMenu
+expect W-Waste Bin
+expect X-Back
+# D, then X: back to Tools
+key d
+wait 50
+expect D-Set up
+key x
+wait 30
+expect U-Update PicoMenu
+# X: the NMI menu again
+key x
+wait 30
+expect B-Browse Games
+expect T-Tools

@@ -1,0 +1,85 @@
+# C - Batch convert in Tools: a folder is chosen (1-0 open, U up), C converts each .tap/.tzx in it
+# (not below it) into Converted/ there; one already there is skipped, one that does not load is
+# listed; Converted/Batch convert.txt says what happened; BREAK stops (and C again carries on)
+flash /48.rom {ROM48}
+sd /Games/Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+sd /Games/Broken.tap {OUT}/test.pok
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Games/Converted/Green.z80 {OUT}/test.pok
+sd /Games/Sub/Other.tap {OUT}/test.pok
+sd /More/Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+boot
+nmi
+wait 30
+key t
+wait 30
+expect C-Batch convert
+key c
+wait 40
+expect Batch convert: which folder?
+expect SD:/
+expect 0 tapes, 0 .z80 here
+expect 1-Games/
+expect 2-More/
+# C with no tapes here: says so
+key c
+wait 20
+expect No .tap or .tzx in this folder
+key 1
+wait 30
+expect SD:/Games
+expect 3 tapes, 0 .z80 here
+expect 1-Sub/
+expectnot 2-Converted
+# into Sub and back up
+key 1
+wait 30
+expect SD:/Games/Sub
+key u
+wait 30
+expect SD:/Games
+key c
+wait 30
+text
+wait 900
+expect Batch convert: done
+expect Saved:          1
+expect Already done:   1
+expect Did not load:   1
+text
+get sd /Games/Converted/Mikie.z80 {OUT}/batch-mikie.z80
+get sd /Games/Converted/Batch convert.txt {OUT}/batch-log.txt
+nofile sd /Games/Converted/Broken.z80
+nofile sd /Games/Mikie.z80
+key x
+wait 30
+expect T-Test ROM (diagnostics)
+# again: everything is done now (the broken one is tried again)
+key c
+wait 40
+expect SD:/Games
+key c
+wait 300
+expect Already done:   2
+expect Did not load:   1
+key x
+wait 30
+# BREAK while converting stops the batch
+key c
+wait 40
+key u
+wait 30
+key 2
+wait 30
+expect SD:/More
+slice 2
+key c
+wait 20
+key BREAK
+wait 40
+expect Batch convert: stopped
+expect Stopped with BREAK
+expect Not looked at:  1
+nofile sd /More/Converted/Mikie.z80
+key x
+wait 30

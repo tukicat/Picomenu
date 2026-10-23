@@ -23,10 +23,21 @@ not, see <https://www.gnu.org/licenses/>.
 #define SECTORS (64 * 1024 * 2)            // 64 MB of 512-byte sectors
 static uint8_t* disk;
 
-DSTATUS disk_initialize(BYTE pdrv) { if (!disk) disk = (uint8_t*) calloc(SECTORS, 512); return pdrv == 0 ? 0 : STA_NOINIT; }
+// sim_card_stuck (the sim's "cardstuck" command): every read fails, as a real card that has
+// stopped answering after an error, until the card is initialised again
+int sim_card_stuck = 0;
+long sim_read_us = -1;
+void sleep_us(uint64_t us);
+DSTATUS disk_initialize(BYTE pdrv) { if (!disk) disk = (uint8_t*) calloc(SECTORS, 512); if (pdrv == 0) sim_card_stuck = 0; return pdrv == 0 ? 0 : STA_NOINIT; }
 DSTATUS disk_status(BYTE pdrv) { return pdrv == 0 && disk ? 0 : STA_NOINIT; }
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
     if (pdrv || sector + count > SECTORS) return RES_PARERR;
+    if (sim_card_stuck) return RES_ERROR;
+    {   // SIM_READ_US=n, or the sim's "slowcard n": each sector takes n microseconds of the
+        // simulated clock (a slow card)
+        if (sim_read_us < 0) { const char* e = getenv("SIM_READ_US"); sim_read_us = e ? atol(e) : 0; }
+        if (sim_read_us) sleep_us((uint64_t) sim_read_us * count);
+    }
     memcpy(buff, disk + sector * 512, count * 512); return RES_OK;
 }
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {

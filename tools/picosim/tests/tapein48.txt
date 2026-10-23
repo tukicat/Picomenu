@@ -1,0 +1,24 @@
+# Tape in on a 48K: T in Browse Games, then LOAD "" typed in 48 BASIC loads through the takeover
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 50
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 300
+expectmem 30000 0x55
+key a
+wait 200
+expectmem 30007 0x99
+expecttape 6

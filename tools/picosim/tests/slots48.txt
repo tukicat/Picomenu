@@ -1,0 +1,185 @@
+# Save slots. S on the menu shows the game's nine slots (/Save Games/<game>); a number saves to
+# one (asking before saving over one); L labels a slot (an empty one is saved with the label);
+# Q then saves over the slot used last; V shows a slot's screen; E erases one (to the Waste Bin);
+# S goes on to the Save snapshot screen. Loading a game with slots asks: a slot, 0 the game
+# itself, or BREAK back to the list. A slot loaded is still the game's (S shows its slots).
+sd /48.rom {ROM48}
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 100
+# no slots yet
+nmi
+wait 30
+key s
+wait 30
+expect Save slots: Alpha
+expect 2 - empty -
+expect L-Label  V-View  E-Erase
+key 2
+wait 100
+get sd /Save Games/Alpha/Slot 2.sna {OUT}/slot2.sna
+ls sd /Save Games/Alpha
+# slot 2 is there: saving over it asks
+nmi
+wait 30
+key s
+wait 30
+expect 2 Saved game
+expect last
+key 2
+wait 20
+expect Save over slot 2?
+key n
+wait 20
+expectnot Save over slot 2?
+# a label for slot 2
+key l
+wait 20
+expect Label which slot? 1-9
+key 2
+wait 20
+expect Label for slot 2:
+key z
+wait 5
+key o
+wait 5
+key n
+wait 5
+key e
+wait 5
+key ENTER
+wait 30
+expect Label saved
+expect 2 zone
+get sd /Save Games/Alpha/Slot 2 - zone.sna {OUT}/slot2.sna
+nofile sd /Save Games/Alpha/Slot 2.sna
+# a label for an empty slot saves it at once
+key l
+wait 20
+key 5
+wait 20
+key b
+wait 5
+key ENTER
+wait 100
+get sd /Save Games/Alpha/Slot 5 - b.sna {OUT}/slot5.sna
+# Q: over slot 5, the one used last (no Save Game file)
+nmi
+wait 30
+key q
+wait 100
+nofile sd /Save Games/Alpha Save Game.sna
+get sd /Save Games/Alpha/Slot 5 - b.sna {OUT}/slot5.sna
+# V: a slot's screen; E: erase one
+nmi
+wait 30
+key s
+wait 30
+expect 5 b
+key v
+wait 20
+key 2
+wait 30
+expectnot Save slots
+key SPACE
+wait 30
+expect Save slots: Alpha
+key v
+wait 20
+key 7
+wait 30
+expect That slot is empty
+key e
+wait 20
+key 5
+wait 20
+expect Erase slot 5?
+key y
+wait 30
+expect Moved to the Waste Bin
+expect 5 - empty -
+nofile sd /Save Games/Alpha/Slot 5 - b.sna
+get sd /Waste Bin/Slot 5 - b.sna {OUT}/slot5.sna
+# S: the Save snapshot screen
+key s
+wait 30
+expect Save Snapshot
+key BREAK
+wait 30
+# loading Alpha asks
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Saved games: Alpha
+expect 2 zone
+expectnot - empty -
+expect 0   Start the game
+expect V   View a slot's screen
+# V: a slot's own screen, any key back to the question (not loading that slot)
+key v
+wait 20
+expect View which slot? 1-9
+key 2
+wait 30
+expectnot Saved games: Alpha
+key 1
+wait 30
+expect Saved games: Alpha
+expectnot View which slot?
+# V then an empty slot, and V then BREAK: the question stays
+key v
+wait 20
+key 9
+wait 30
+expect That slot is empty
+expect Saved games: Alpha
+key v
+wait 20
+key BREAK
+wait 30
+expect Saved games: Alpha
+expectnot View which slot?
+# BREAK: back to the list
+key BREAK
+wait 50
+expect Browse Games
+expect 1-Alpha
+# 2: slot 2
+key 1
+wait 50
+key 2
+wait 150
+nmi
+wait 30
+key s
+wait 30
+expect Save slots: Alpha
+expect 2 zone
+key x
+wait 30
+# 0: the game itself
+key b
+wait 50
+key u
+wait 50
+key u
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+key 0
+wait 150
+nmi
+wait 30
+expect Reload: Alpha

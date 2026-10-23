@@ -1,0 +1,36 @@
+# Out Run (U.S. Gold, the Speedlock 3 release, 48K): its stages load with the game's own copy of
+# LD-BYTES at 0x8795, which the tape trap never saw (it stayed at PRESS PLAY unless a .pok
+# patched it). Converted with C, the .z80 carries on with the tape after the main game; the
+# Pico finds the loader as the .z80 starts and patches it, and pressing 1 (start) loads stage 1
+# from the tape: the 11-byte block and the stage. Needs the tape in TAPEDIR.
+sd /48.rom {ROM48}
+sd /Games/OutRun.tzx {TAPES}/Out_Run_1987U.S._Gold48K-128KSpeedLock_3.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key n
+wait 20
+key c
+wait 20
+key a
+wait 3000
+expect Saved OutRun.z80
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+key 2
+wait 300
+key 1
+wait 1500
+expecttape 2

@@ -68,3 +68,7 @@ void pollUsbCommandHandler() {}
 bool usb_msc_busy() { return false; }
 bool usb_msc_pc_holds_card() { return false; }
 void usb_msc_task() {}
+
+// FatFs_SPI's glue.c (not in the simulator, which has a RAM disk): its counts of card reads
+// tried again and failed, for Help > Diagnostics
+extern "C" { unsigned long sd_read_retries = 0, sd_read_failures = 0; }

@@ -30,15 +30,15 @@ wait 30
 expect A screen picture
 key x
 wait 50
+# V: only for games
 key v
 wait 10
 key 2
 wait 50
+expect Only .tap .tzx .sna .z80 .szx
 key ENTER
-wait 30
-expect A screen picture
-key x
 wait 50
+expect 2-Picture
 # L again: the .scr is not listed
 key l
 wait 50

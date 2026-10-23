@@ -2,14 +2,197 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
-## Rev 1.9.1 test 1 (2026-10-16, a test build, not a release)
-NMI ROM space: 707 bytes free (Rev 1.9 had none). Nothing on screen changes; the same keys do the same things.
-- **Smaller transfer buffers** (384 bytes): the screen goes to and from the Pico in 768-byte pieces (9 of them; were 1,152), snapshots load in 1,024-byte blocks (were 2,048) and are sent for saving in 1,760-byte pieces (were 2,112). The Pico takes the length from each request, so it needs no change. `spare_space` is now fixed at 0x3900 (the last 1,792 bytes), with `INFO_HOUSE` and `SCROLL_WINDOW` placed in it by `equ`; the free bytes sit between the code and it, and the build prints them (`NMI ROM: N bytes free`). A few more requests per screen or snapshot (a 128K load is 128 instead of 64): a few milliseconds at most.
-- **One wait-for-the-Pico routine** (199 bytes): `waitpico` replaces the 23 copies of the wait loop written out in full and the two routines that did the same (`save128_wait`, `loadscreen.waitpico`).
-- **No padding spaces in prompts** (43 bytes): the "which file? 1-0" prompts, "Searching..." and the update's "1 of 2" line are drawn by `putline`, which blanks the rest of the row, instead of being padded with spaces. The border names keep theirs (a fixed-size table, where it saves nothing).
-- **Repeated text stored once** (81 bytes): "Press any key", "Browse Games", "Exit" (four times), "New folder", "Rename", "Name:", "Poke", "Next" and "Find" are each stored once; the other names are `equ`s to it.
-- **Checked:** the 11 simulator scripts pass, and three walks through the menus (Browse Games with copy, move, rename, new folder, erase, find, favourites, view and L-All; the top menu, help, poke, save, quick save, screen grab, reload, update and resets, on a 48K and a 128K) give the same 182 screens byte for byte as Rev 1.9, apart from the version on the Diagnostics page; so do the firmware update screens.
-- **Simulator fixes** (`tools/picosim/sim.cpp`, test tool only): the menu ends when `exitnmi` is read by any read, as the Picoface does (a snapshot load ends with a JP whose last byte is there, which the simulator missed, so the NMI ROM stayed paged in under the game); and `nmi` fires no NMI while the menu is open, as the Picoface doesn't.
+## Rev 2.0 (2026-10-23)
+Everything since Rev 1.9. `FIRMWARE_ID` is `Rev 2.0 (tapeloader v200)`: Diagnostics shows "Rev 2.0".
+
+### Tapes and multi-load games
+- **48K multi-load games** (a `.tap` or `.tzx` loaded with its number in Browse Games) load their later levels at once through the tape trap. Each level is found by name or in order, as the game asks, when the game uses the ROM's tape loader. Out Run, Gauntlet and Gauntlet II are tested.
+  - The trap's hook now starts at 0x0562, after LD-BYTES' first 12 bytes, so loaders that do that part themselves land on it. The source is `tools/picosim/tests/tapehook.asm`.
+  - The end of the tape rewinds it, so a search by name goes round.
+  - A tape whose blocks load over each other (Gauntlet's levels) is no longer converted at once.
+- **Games with their own level loader.** Some games load their levels with their own copy of the ROM's LD-BYTES in RAM; Out Run's Speedlock releases (48K and 128K) do. Before, they stayed at PRESS PLAY, because the Pico only sees fetches from the ROM. PicoMenu now finds such a copy and makes it load from the tape file, with no poke.
+  - **How the copy is found:** by how LD-BYTES starts reading the tape (`LD HL,<return> / PUSH HL / IN A,(FE) / RRA / AND 20`), with its own LD-EDGE within 256 bytes.
+  - **The patch:** its `IN A,(FE) / RRA` becomes `JP 0x0562`, where the trap's hook is. The game has already set the flag, IX and DE and pushed its own return, so the hook loads the block and returns there as LD-BYTES would.
+  - **When it looks:**
+    - in each block the trap loads;
+    - just after a tape is put in with T;
+    - when a snapshot carries on with its tape.
+
+    For the last two, the Pico reads the Spectrum's memory and writes the 3 bytes back.
+  - **When it doesn't:** a 128K game known to have the editor ROM paged is left alone, because 0x0562 is not LD-BYTES there.
+  - **Without a tape in,** the patched loader runs the ROM's own LD-BYTES, so a real cassette then loads at the normal speed, not the game's.
+  - **Setting:** `level_loaders` (`patch`, the default, or `off`) in `[Tapes]`.
+  - **Out Run, Speedlock 3:** convert the tape with C (4 - 48K on a 128), load the `.z80` and press 1. The stages load from the full tape.
+  - **Out Run, Speedlock 4 (128K):** load its `.z80`, put the stage tape in with T and press 1.
+- **48K mode on a 128K Spectrum.** These now run with the 128 locked in 48K mode (port 0x7FFD = 0x30, as 48 BASIC does):
+  - a 48K snapshot that carries on with its tape;
+  - a tape loaded with its number.
+
+  Unlocked, a 48K/128K game found the 128's memory and played as the 128K version; Out Run then took its 48K stage for a 128K one and crashed.
+  - **Setting:** `lock_48k` in `[Tapes]`: `tapes` (the default), `always` (every 48K snapshot) or `off`.
+  - **While locked,** a long press resets into 48 BASIC. The Spectrum's own reset button gets back to the 128's menu.
+- **T - Tape in Browse Games** (then a tape's number) puts a tape in without a reset, for loading through the Spectrum's own ROMs as from a cassette:
+  - the 128's Tape Loader;
+  - `LOAD ""` in 128 or 48 BASIC;
+  - a game already running.
+
+  Each block loads at once, so 128K tapes and 128K multi-loads that use the ROM's loader work.
+  - Resets into 128K or 48K (1, 4) and the long press keep the tape in. E ejects it, so a real tape in the EAR socket works again.
+  - It doesn't work with a changed ROM.
+  - **How:** the bus handler (`piohandler.S`) watches for the instruction fetch at 0x0562 in LD-BYTES, only while a tape is in and the internal ROM is serving. It then serves the trap's hook from `rom_data` and hands back at the hook's RET.
+- **V - Virtual Tape Player** on the NMI menu shows the tape's blocks ten to a page, with a header and its data on one line. The next load is marked `>`, and the blocks already loaded are dim.
+  - 1-0 moves the tape to a block, R rewinds, E ejects (its file is closed, so it can be erased or moved), and N/P turn pages.
+  - The Pico draws the screen.
+- **Recording:** W on the Virtual Tape Player asks for a name. Every SAVE after that goes at once onto the end of `/Recordings/<name>.tap` on the SD card: BASIC, CODE, SCREEN$, DATA, or a program calling SA-BYTES.
+  - E stops it ("Saved <name>.tap"), and T puts it in to load back.
+  - A name already used is refused, so nothing is recorded over.
+  - SD card only, and not with a changed ROM. A game's own (turbo) saver can't be caught.
+  - The hook is at 0x04C2 in SA-BYTES; its source is `tools/picosim/tests/savehook.asm`.
+- **The tape is ejected by itself** before it, or a folder it is in, is erased, moved or renamed.
+- **Snapshots remember the tape position.** A note of the tape's drive, path and block is kept with:
+  - a snapshot saved with S or Q while a tape plays;
+  - a `.z80` made with C that stopped with more still on the tape.
+
+  Loading the snapshot puts the tape back in at that block.
+  - **Where the notes live:** in `/Tape Files` in the root of the snapshot's drive, named after the snapshot's path with `/` as `~`, and ending `snap <path>` so a note is only used for its own snapshot.
+  - **Following the snapshot:** a note goes with its snapshot, and with the snapshot's folder, when it is erased, renamed, moved, copied or added to Favourites.
+  - **Following the tape:** it is rewritten when its tape, or the tape's folder, is renamed, moved or put in the Waste Bin.
+  - **Older notes:** a note an earlier build left beside its snapshot is moved into `/Tape Files` the first time it is used.
+  - **Missing tape:** if the tape has gone, Diagnostics says "Tape not found".
+
+### Converting
+- **Batch convert** (Tools, C) converts all the `.tap` and `.tzx` files of a folder on the SD card, as C - Convert does with A - Auto.
+  - **Choosing the folder:** it opens on the folder Browse Games was last in. 1-0 opens a folder, U goes up, N/P turn pages.
+  - **Output:** each `.z80` goes in a `Converted` folder made inside the chosen folder. A tape already converted is skipped, so a batch stopped with BREAK carries on when it is run again.
+  - **Report:** `Converted/Batch convert.txt` gets a line for each tape and the totals, and a summary is shown at the end.
+- **Snapshots to tapes:** T on the Batch convert screen turns each `.z80` (48K or 128K) in the folder into a `.tap` in a `Tapes` folder made there. The tape loads on a real Spectrum at the normal speed (LOAD "", or the 128's Tape Loader).
+  - **The tape holds, in order:**
+    1. a BASIC line;
+    2. a 1 KB loader;
+    3. the screen;
+    4. the rest of the memory (a 128K game bank by bank);
+    5. the loader's own 1 KB of the game.
+
+    Runs of 512 or more of one byte are filled in rather than loaded.
+  - **The loader** keeps interrupts off throughout. A 90-byte stub just below the game's stack pointer sets every register, the paging and the sound chip.
+  - **Load times:** a 48K game takes about 4-5 minutes to load, a 128K one up to 12.
+  - **Proof:** checked on the PC through the ROM's own loader (`tools/z80tap/roundtrip.py`).
+- **C - Convert is about 3½ to 5 times faster** on turbo tapes, with exactly the same result.
+  - **How:** the converter recognises a loader's copy of the ROM's edge routine and works out from the tape what it would do. Every register, flag and T-state comes out as if each instruction had run.
+  - **Measured:** Green Beret 104 s → 25 s, Athena 281 s → 79 s, Platoon (128K) 356 s → 74 s.
+- **720 Degrees and Football Director II convert completely.** The converter holds the tape in a pause while nothing reads it, and counts a loader-sized loop's scattered stores as loading. Football Director II needs its complete `.tap` (88 blocks) and a 128K.
+- **Loading screens** saved by a conversion are Loading Screen grabs. The `loading_grab` setting in `[Converting]` turns the automatic one off.
+
+### Screen grabs
+- **All grabs go in `/Scraper/Screen Grabs`** on the SD card. Grabs left in the old `/Screen Grabs` still show in V.
+- **Categories, in the name:**
+  - `<game> Loading Screen.scr`, `<game> Menu Screen.scr`, `<game> Game Screen.scr`, `<game> Ending Screen.scr`, each then `...1.scr`, `...2.scr` (the lowest number free);
+  - Standard Screen Number, the older `<game>.scr`, `<game>1.scr`;
+  - From File, the screen in the game's own file.
+- **G - Screen grab** asks the category: 1 Loading, 2 Menu, 3 Game, 4 Ending, 5 Standard Screen Number. A double press of the NMI button saves as Standard Screen Number.
+- **The order** V shows a game's pictures in is set by `[Screen grab order]` in Picomenu.ini, or by `/Scraper/Screen Grabs/order.txt`. A category left out or commented out is not shown.
+- **V** shows up to 15 pictures for a game (it was 8), and finds them by reading the folder once.
+- **`.png` grabs:** `grab_format` (`scr`, `png` or `both`) in `[Saving]`. A `.png` is the screen as a 256x192 picture in the 16 Spectrum colours.
+  - V shows a grab saved as both formats once, and reads PicoMenu's own `.png` files back.
+  - D - Del deletes both files.
+- **Menu grabs:** a double press while a menu is up saves that menu's screen as a `.png` in `/Scraper/Screen Grabs`, named after the menu (`NMI Menu.png`, `Browse Games.png`, `Diagnostics.png`, ...).
+  - The border flashes green when it is saved, red when it is not.
+  - Outside the menu, a double press still grabs the game's screen.
+- **I - Game Instructions** shows the game's screen grabs, as V does. A game with no grabs shows its screen as it was when the button was pressed.
+
+### Browse Games
+- **.txt files** are listed with L-All. A .txt's number shows it a page at a time (N/P), and a file of any size can be read. On the SD card, E edits it: up to 3 KB, lines of up to 30 letters; BREAK, then Y saves.
+- **H - Hide/Unhide** hides a file or folder or shows it again. On the SD card it uses the FAT hidden attribute (as Windows sets it); on the flash, a littlefs attribute.
+  - L-All lists hidden files and folders dimmed.
+  - Some are always hidden: `.scr` and `.txt` files, the Poke List, Tape Files and old Screen Grabs folders, system folders and names starting with a dot.
+- **The Waste Bin:** E moves a file or folder into `/Waste Bin`, a hidden folder on the SD card. On the card this is a rename, so even a big folder goes at once. A folder on the flash is still erased for good.
+  - W - Waste Bin (in Tools) opens Browse Games in the bin, where erasing is for good.
+  - B - Empty asks first.
+  - `waste_bin = off` in `[Waste Bin]` erases for good everywhere.
+- **V - View is only for games** (`.tap`, `.tzx`, `.sna`, `.z80`, `.szx`).
+
+### The NMI menu, settings and saves
+- **T - Tools** holds the things used now and then:
+  - T - Test ROM (diagnostics);
+  - D - Set up SD card;
+  - U - Update PicoMenu;
+  - W - Waste Bin;
+  - C - Batch convert.
+
+  The NMI menu is shorter, and B - Browse Games is now at the top of it (then S, Q, R and the rest as before).
+- **H - Help is gone from the NMI menu; O - Options takes its place.** The full user guide is at github.com/tukicat/Picomenu.
+- **`Picomenu.ini`** in the root of the SD card (or, if it has none, the flash) sets how PicoMenu starts. It uses `[sections]`, `key = value` lines and `#` for a note. A line it doesn't understand is skipped, and Diagnostics (D on O - Options) shows the first one.
+  - **Where it can be changed:** with L-All on, its number shows it and E edits it on the Spectrum. It is used as soon as it is saved, or when the PC gives the card back.
+  - **The settings:**
+    - `[Display]` `theme`;
+    - `[Browse]` `show_all`, `details`, `sort`, `folders`, `start_drive`, `start_folder`;
+    - `[Saving]` `save_type`, `quick_save`, `save_screen`, `slots_on_load`, `grab_format`;
+    - `[Buttons]` `long_press`, `double_press`;
+    - `[Converting]` `loading_grab`;
+    - `[Waste Bin]` `waste_bin`;
+    - `[Tapes]` `level_loaders`, `lock_48k`;
+    - `[Screen grab order]`.
+- **O - Options** on the NMI menu changes Picomenu.ini on the Spectrum. Each setting is on a line: Q/A move the bar and C changes the value. N shows the screen grab order, where U/D move a category and H hides it.
+  - **D shows the Diagnostics page:** the firmware version, the internal flash, the SD card (and any trouble put right), the last error, and where Picomenu.ini was read from with the first line it didn't understand. Any key goes back to the settings.
+  - Leaving after a change asks whether to save.
+  - Only the changed lines are written; comments and the rest of the file stay as they were.
+- **Light theme:** `theme = light` gives dark ink on white paper, in the ROM's menus and the Pico's own screens. Game pictures are never changed.
+- **Save slots:** S shows nine save slots for the game being played, in `/Save Games/<game>`.
+  - **Keys:** 1-9 saves, L labels, V shows a slot's screen, E erases, and S goes on to the Save snapshot screen.
+  - **Q** saves over the slot used last.
+  - **Loading a game with slots asks** whether to carry on from one: 1-9 carries on from that slot, 0 (or ENTER) starts the game itself, **V then a slot's number shows that slot's screen** (any key goes back to the question), BREAK goes back to Browse Games.
+- **Set up SD card** makes `Scraper/Screen Grabs`, `Tape Files`, `Recordings`, `Waste Bin` (hidden), `ROMS` (hidden) and `Picomenu.ini` (if there is none). It no longer makes `/Screen Grabs`.
+- **A 128K game's sound stops while the NMI menu is up.** The menu turns the sound chip's three volumes down and puts them back as it closes. A snapshot saved from the menu keeps the game's volumes.
+
+### ROMs
+- **A `ROMS` folder on the SD card** can hold these ROM files, which are looked for in the root of the flash, then in `/ROMS`, then in the card's root:
+  - `48.rom` and `128.rom` (or `128-0.rom` and `128-1.rom`) for converting and tape loading;
+  - `testrom.rom` and `DiagROM.rom` for T - Test ROM.
+- **C - Change ROM** lists the `.rom` files of the flash's root. 2 switches to the card's `ROMS` folder, and 1 goes back to the internal ROM. The lists are in order (A-Z).
+
+### Fixes
+- **The SD card could go "empty" until switched off and on.**
+  - A failed read or write is now tried twice more, then the card is started afresh.
+  - A folder that can't be read is closed again.
+  - Each time the menu opens the card is checked, and mounted again if anything is wrong.
+  - Diagnostics shows the retries, failures and remounts.
+- **Copying a folder froze the Pico.** FatFs now takes at most 2 KB from the heap, and the memory lent to it is 8-aligned. The same problem could stop New folder, Set up SD card and the first screen grab on some cards.
+- **A search could run until BREAK** while the file details were shown, and the list was garbled while it ran. Each file now shows "..." for its details until the search is over.
+- **Going back from V - View, Help, a text file or other full screens** no longer shows the old screen (the 128K menu or a game) for a moment.
+- **A key could be read wrongly** when two keys went down together. The menu now takes a key only when two keyboard scans agree.
+- **A long software house name** no longer shows over a full-screen picture.
+- **"Press any key"** no longer stays on the screen after emptying the Waste Bin.
+- **The firmware was too big to install** at one point during testing. The NMI ROM and the Help text are now kept packed (LZSS) and unpacked when needed, and the build fails if the program would not fit.
+
+### NMI ROM and firmware space
+- **NMI ROM space** came from:
+  - smaller transfer buffers (`spare_space` fixed at 0x3900);
+  - one shared wait-for-the-Pico routine (`waitpico`);
+  - prompts without padding spaces, and repeated text stored once;
+  - the Pico drawing more of the screens (`picoscreen`);
+  - `cp 0` written as `or a`;
+  - `jr` where `jp` was not needed.
+
+  9 bytes are left.
+- **Firmware space** came from:
+  - the NMI ROM and the Help text kept packed;
+  - no floating-point printf;
+  - the debug messages left out (`cmake -DPICOMENU_LOG=1` puts them back);
+  - a small sort in place of qsort;
+  - the Pico drawing with the NMI ROM's font.
+
+  The program is 245.5 KB of the 248 KB before the flash's file system (2.5 KB left). The build fails with less than 5 KB of heap, with `list_pool` not 8-aligned, or with a program too big for the flash.
+
+### Help, licences and tests
+- **Help:** the on-screen help pages are removed; the full user guide is at github.com/tukicat/Picomenu. `Docs/Help.txt` now holds only the Diagnostics page, which `pico/make_help.py` packs into the firmware. Messages that pointed to Help now say where to look ("No 48.rom (flash or SD /ROMS)", "Saved: see Diagnostics (O, D)").
+- **Licences:** the GPL v3 and the components' licences are in LICENSE and THIRD-PARTY-NOTICES.txt (the Help Licences page went with the rest of Help).
+- **Third-party code:** none new was added. THIRD-PARTY-NOTICES.txt:
+  - names PicoMenu's own new parts and the PC scripts' dependencies;
+  - explains `pico/lwipopts.h`;
+  - says how to share the firmware (with LICENSE, this file and the source).
+
+  Commercial tapes named by simulator scripts are not included. The level-loader test uses a made-up game (`make_levelloader.py`) with no ROM code in it.
+- **Simulator** (`tools/picosim`): 53 scripts, all passing. It models the tape trap, tape in, recording, double presses, the Kempston joystick, the 128's sound chip and SD card faults.
 
 ## Rev 1.9 (2026-10-16)
 New: convert a `.tap` or `.tzx` to a `.z80` snapshot on the Pico, for turbo and protected loaders too. Development notes: `Docs/Tape-converter-notes.md`.

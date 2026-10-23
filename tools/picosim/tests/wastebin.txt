@@ -1,0 +1,144 @@
+# The Waste Bin. Erasing a file or folder moves it into /Waste Bin (hidden, on the SD card), as
+# "<name> (2)" if the name is taken there; a file on the flash is copied there. W on the menu
+# lists the bin; erasing in it is for good; B asks "Are you sure ...?" and empties it on Y.
+sd /48.rom {ROM48}
+sd /Games/a.tap {HERE}/tapein.tap
+sd /Games/b.tap {HERE}/tapein.tap
+sd /Games/Sub/a.tap {HERE}/tapein.tap
+sd /Games/Sub/x.tap {HERE}/tapein.tap
+flash /c.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect 1-Sub/
+expect 2-a
+expectnot B-Empty
+# erase /Games/a.tap: into the bin
+key e
+wait 30
+key 2
+wait 40
+expect Y-Yes, erase it
+key y
+wait 60
+nofile sd /Games/a.tap
+get sd /Waste Bin/a.tap {OUT}/bin1.tap
+# erase /Games/Sub/a.tap: the name is taken in the bin, so a (2).tap
+key 1
+wait 50
+key e
+wait 30
+key 1
+wait 40
+key y
+wait 60
+get sd /Waste Bin/a (2).tap {OUT}/bin2.tap
+nofile sd /Games/Sub/a.tap
+# erase the folder Sub (with "ok"): into the bin, with what is in it
+key u
+wait 50
+key e
+wait 30
+key 1
+wait 40
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 100
+get sd /Waste Bin/Sub/x.tap {OUT}/bin3.tap
+nofile sd /Games/Sub/x.tap
+# the flash: c.tap is copied into the bin
+key i
+wait 50
+expect 1-c
+key e
+wait 30
+key 1
+wait 40
+key y
+wait 60
+get sd /Waste Bin/c.tap {OUT}/bin4.tap
+nofile flash /c.tap
+# W: the bin
+key x
+wait 30
+key t
+wait 30
+key w
+wait 60
+expect SD:/Waste Bin
+expect 1-Sub/
+expect 2-a
+expect 3-a (2)
+expect 4-c
+expect B-Empty
+# erasing in the bin is for good
+key e
+wait 30
+key 4
+wait 40
+key y
+wait 60
+nofile sd /Waste Bin/c.tap
+nofile sd /Waste Bin/c (2).tap
+# B, then N: nothing happens
+key b
+wait 40
+expect Are you sure you want to empty
+expect the waste bin?
+expect Y-Yes  N-No
+key n
+wait 50
+expect 2-a
+get sd /Waste Bin/a.tap {OUT}/bin1.tap
+# B, then Y: emptied
+key b
+wait 40
+key y
+wait 80
+expect The Waste Bin is empty.
+key a
+wait 60
+expect SD:/Waste Bin
+expectnot 1-
+nofile sd /Waste Bin/a.tap
+nofile sd /Waste Bin/Sub/x.tap
+ls sd /Waste Bin
+# out of the bin, B is not offered
+key u
+wait 50
+expectnot B-Empty
+get sd /Games/b.tap {OUT}/b.tap
+# the bin is hidden: not in the root without L-All
+key u
+wait 50
+expect 1-Games/
+expectnot Waste Bin
+# leaving the bin: Browse Games goes back to where it was before W, not the bin
+key 1
+wait 50
+expect SD:/Games
+key x
+wait 30
+key w
+wait 60
+expect SD:/Waste Bin
+expect B-Empty
+expectnot H-Hide
+key x
+wait 30
+# out of the bin: back to Tools, X to the NMI menu
+expect T-Test ROM (diagnostics)
+key x
+wait 30
+key b
+wait 60
+expect SD:/Games
+expectnot Waste Bin
+expect H-Hide/Unhide

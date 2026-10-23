@@ -1,4 +1,5 @@
 # 128K: no Scraper folder on the card; it is made, and the loading screen saved in it
+# (Ren128 Loading Screen.scr)
 sd /128-0.rom {ROM128_0}
 sd /128-1.rom {ROM128_1}
 flash /48.rom {ROM48}
@@ -20,4 +21,4 @@ key a
 wait 1500
 expect Saved Ren128.z80
 ls sd /Scraper/Screen Grabs
-get sd /Scraper/Screen Grabs/Ren128.scr {OUT}/Ren128.scr
+get sd /Scraper/Screen Grabs/Ren128 Loading Screen.scr {OUT}/Ren128.scr

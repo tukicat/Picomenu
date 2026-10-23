@@ -1,0 +1,102 @@
+# H in Browse Games hides a file or folder, or shows it again. Hidden ones are listed only with
+# L-All, dimmed (bright blue: attribute 0x41 at the name's first letter, column 4 of the entry's
+# row; the others 0x07). .txt (and .scr) files are always hidden; one hidden by Windows (pre.tap)
+# can be shown with H. On the flash the same, with a littlefs attribute.
+sd /48.rom {ROM48}
+sd /Games/Sub/x.tap {HERE}/tapein.tap
+sd /Games/a.tap {HERE}/tapein.tap
+sd /Games/b.tap {HERE}/tapein.tap
+sd /Games/notes.txt {HERE}/short.txt
+sd /Games/pre.tap {HERE}/tapein.tap
+hide /Games/pre.tap
+flash /c.tap {HERE}/tapein.tap
+flash /d.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect 1-Sub/
+expect 2-a
+expect 3-b
+expectnot pre
+expectnot notes
+expect H-Hide
+# hide a
+key h
+wait 20
+expect Hide or show which? 1-0
+key 2
+wait 50
+expect 2-b
+expectnot 3-
+# L-All: all of them, a, notes and pre dimmed
+key l
+wait 50
+expect 2-a
+expect 3-b
+expect 4-notes
+expect 5-pre
+expectmem 0x58C4 0x41
+expectmem 0x58E4 0x07
+expectmem 0x5904 0x41
+expectmem 0x5924 0x41
+expectmem 0x58A4 0x07
+# show a again
+key h
+wait 20
+key 2
+wait 50
+expectmem 0x58C4 0x07
+# notes.txt can't be shown
+key h
+wait 20
+key 4
+wait 50
+expect Always hidden: can't be loaded
+key a
+wait 50
+expectmem 0x5904 0x41
+# pre.tap, hidden by Windows, is shown
+key h
+wait 20
+key 5
+wait 50
+expectmem 0x5924 0x07
+# hide the folder Sub
+key h
+wait 20
+key 1
+wait 50
+expectmem 0x58A4 0x41
+# L-All off: Sub and notes are not listed; a, b and pre are
+key l
+wait 50
+expect 1-a
+expect 2-b
+expect 3-pre
+expectnot Sub
+expectnot notes
+# the flash: hide c
+key i
+wait 50
+expect 1-c
+expect 2-d
+key h
+wait 20
+key 1
+wait 50
+expect 1-d
+expectnot c.tap
+key l
+wait 50
+expect 1-c
+expectmem 0x58A4 0x41
+expectmem 0x58C4 0x07
+key h
+wait 20
+key 1
+wait 50
+expectmem 0x58A4 0x07

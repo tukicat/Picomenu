@@ -1,5 +1,5 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 1.9
-==================================================
+THIRD-PARTY NOTICES - PicoMenu Rev 2.0
+===============================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
 and the changes in this fork are licensed under the GNU General Public
@@ -43,18 +43,47 @@ Summary
                             toolchain                    with exception)
 
 Not linked: lwIP, cyw43 and mbedtls are not in the firmware (WiFi is
-disabled in this build). The sjasmplus assembler that builds the Z80 ROM is
-a separate tool you install yourself and is not part of the source or the firmware.
+disabled in this build). pico/lwipopts.h, which came with picoFace, is the
+lwIP settings file from Raspberry Pi's pico-examples (BSD 3-clause, the same
+licence as the Pico SDK, section 5); this build does not use it. The sjasmplus assembler that builds the Z80 ROM (and the
+loader of the snapshot-to-tape converter, tools/z80tap/loader.asm) is a separate tool you
+install yourself and is not part of the source or the firmware.
+
+PicoMenu's own code, under the GPL v3 with the rest of this fork, includes: the LZSS packer
+and unpacker of the NMI ROM and the Help text (pico/lzss_pack.py, asm_to_c_file.py), the
+.png writer and reader of the screen grabs (pico/menushot.h; stored, uncompressed, with its
+own CRC-32 and Adler-32), the snapshot-to-tape converter and its loader (pico/z80tap.h,
+tools/z80tap), the settings and Options (pico/settings.h, options.h) and the simulator's test
+files (tools/picosim/tests, including the made-up game of make_levelloader.py). No new
+third-party code was added for Rev 2.0.
 
 The Spectrum ROM images and any games or snapshots you use with the
 Picoface are not covered by any licence here. None are in this source: the
 tape converter reads 48.rom and 128.rom (or 128-0.rom and 128-1.rom) that you
-put on the card or flash yourself.
+put on the card or flash yourself, in its root or in /ROMS. The firmware only
+holds a few bytes that match the 48K ROM, to check it before changing it in
+memory (the start of LD-BYTES and of the start up) and to put back the 8 bytes of
+its (c) character that the tape hook's mailbox borrows. Some simulator scripts
+name commercial tapes (Out Run, Gauntlet, Athena ...): they are not included,
+and the scripts look for them in a folder you give.
 
 PC tools only (not in the firmware): tools/picosim/pico_hal_host.c is a copy
 of pico/littlefs-lib/pico_hal.c changed to run on a PC (BSD 3-clause, its
 notice kept); tools/tzxconv/bench/bench-run.ts runs on rp2040js
 (https://github.com/wokwi/rp2040js, MIT), which is not included.
+`SIM_SANITIZE=1 tools/picosim/build.sh` builds the simulator with GCC's
+undefined-behaviour checks; their runtime (libubsan) comes with your own
+GCC and is not in the source or the firmware. The PC scripts in scripts/
+(file manager, uploader, snapshot converters) use Python packages you install
+yourself (requirements.txt), none of which are included: PySide6 (Qt for
+Python, GNU LGPL v3), pyserial (BSD 3-clause) and lz4 (python-lz4, BSD
+3-clause). scripts/filemanager_ui.py is generated from filemanager.ui by
+PySide6's uic tool and is part of PicoMenu.
+
+Sharing the firmware: the .uf2 contains the components above, so pass it on
+together with LICENSE and this file (the firmware zip has all three), and with
+the source (the source zip) or a written offer of it, as the GPL v3 and the
+LGPL v3 (for the Z80 emulator) ask.
 
 
 ================================================================
@@ -85,6 +114,12 @@ FatFs has being developped as a personal project of the author, ChaN. It is free
 /----------------------------------------------------------------------------*/
 
 Therefore FatFs license is one of the BSD-style licenses, but there is a significant feature. FatFs is mainly intended for embedded systems. In order to extend the usability for commercial products, the redistributions of FatFs in binary form, such as embedded code, binary library and any forms without source code, do not need to include about FatFs in the documentations. This is equivalent to the 1-clause BSD license. Of course FatFs is compatible with the most of open source software licenses include GNU GPL. When you redistribute the FatFs source code with changes or create a fork, the license can also be changed to GNU GPL, BSD-style license or any open source software license that not conflict with FatFs license.
+
+Changes in PicoMenu: pico/FatFs_SPI/ff15/source/ff.c (f_opendir_last, marked
+"picoFace:") and ffsystem.c (ff_memalloc takes blocks from memory the firmware
+lends it, 8-aligned, and asks the heap for at most 2 KB). The rest of FatFs is
+as ChaN released it. The licence above allows changes and keeps the GPL v3
+compatible.
 
 
 ================================================================

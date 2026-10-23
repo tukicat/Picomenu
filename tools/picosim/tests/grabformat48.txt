@@ -1,0 +1,73 @@
+# grab_format in Picomenu.ini: both saves a grab as a .scr and a .png of the same name, png only
+# a .png (numbered past both); V shows each grab once (the .scr when there are both) and reads
+# a .png grab; D deletes both
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/grabs-both.ini
+sd /Games/Screen.tap {OUT}/test.pok
+boot
+# a double press with no menu: Screen.scr and Screen.png
+nmi2
+wait 60
+get sd /Scraper/Screen Grabs/Screen.scr {OUT}/gf-screen.scr
+get sd /Scraper/Screen Grabs/Screen.png {OUT}/gf-screen.png
+# Options: grab_format (the 12th) to png
+nmi
+wait 30
+key o
+wait 40
+expect grab_format
+expect both
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+wait 10
+expect [Saving] screen grab files
+key c
+key c
+wait 20
+expect png
+key x
+wait 30
+key y
+wait 40
+key x
+wait 30
+# png: Screen1.png only
+nmi2
+wait 60
+get sd /Scraper/Screen Grabs/Screen1.png {OUT}/gf-screen1.png
+nofile sd /Scraper/Screen Grabs/Screen1.scr
+# V on Screen.tap: its grabs, Screen (once) and Screen1 (the .png)
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 60
+text
+expect Pic 1/2
+# D deletes the grab shown, the first: Screen (its .scr and its .png)
+key d
+wait 20
+key y
+wait 40
+expectnot Pic 1/2
+nofile sd /Scraper/Screen Grabs/Screen.png
+nofile sd /Scraper/Screen Grabs/Screen.scr
+# the one left is the .png: full screen (F) it is the screen that was grabbed
+key f
+wait 30
+expect . .... ........ ........ ...
+shot {OUT}/gf-full.scr

@@ -1,0 +1,40 @@
+# Picomenu.ini edited on the Spectrum is used at once, with no restart: from the dark theme,
+# "light" typed after "theme = " (tests/theme-b.ini) and saved makes the text viewer and then
+# the list light; the note says the settings are in use.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/theme-b.ini
+boot
+nmi
+wait 30
+key b
+wait 50
+key l
+wait 50
+expect 2-Picomenu        ini
+expectmem 0x58A4 0x07
+key 2
+wait 50
+expect theme =
+key e
+wait 30
+key l
+wait 5
+key i
+wait 5
+key g
+wait 5
+key h
+wait 5
+key t
+wait 5
+key BREAK
+wait 40
+key y
+wait 30
+expect Saved: settings in use now
+expect theme = light
+expectmem 0x5841 0x38
+key x
+wait 50
+expect 2-Picomenu        ini
+expectmem 0x58A4 0x38

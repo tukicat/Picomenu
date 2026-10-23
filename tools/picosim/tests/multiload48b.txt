@@ -1,0 +1,21 @@
+# Out Run through the tape trap: its first parts load with CALL 0x0556, its stages with its
+# own copy of the start of LD-BYTES and CALL 0x0562 (an 11-byte block, then the stage)
+flash /48.rom {ROM48}
+sd /Games/OutRun.tap {TAPES}/Out_Run_1987U.S._Gold48K-128K.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 2600
+expecttape 6
+hold 1 50
+wait 500
+hold 1 50
+wait 500
+# stage 1 (the first 1 leaves the title, the second picks OUT RUN)
+expecttape 8
+shot {OUT}/outrun-stage1.scr

@@ -1,0 +1,36 @@
+Line 1: lambda kappa gamma zeta lambda
+Line 2: omicron lambda beta lambda alpha iota epsilon kappa delta
+Line 3: sigma iota kappa kappa iota
+Line 4: omicron gamma delta omicron gamma kappa theta sigma
+Line 5: omicron upsilon
+Line 6: gamma upsilon lambda
+Line 7: epsilon upsilon
+Line 8: epsilon iota
+Line 9: sigma theta sigma upsilon theta theta sigma upsilon lambda iota gamma
+Line 10: beta alpha gamma iota delta epsilon omicron
+Line 11: upsilon omicron epsilon theta kappa theta lambda zeta
+Line 12: lambda theta lambda delta zeta omicron alpha epsilon lambda omicron
+Line 13: gamma sigma zeta kappa lambda lambda beta sigma omicron delta omicron lambda epsilon
+Line 14: beta beta iota omicron iota beta
+Line 15: upsilon beta theta gamma alpha epsilon theta
+Line 16: theta beta alpha lambda lambda upsilon alpha theta sigma lambda zeta kappa epsilon kappa
+Line 17: alpha epsilon alpha beta beta
+Line 18: kappa alpha delta theta epsilon lambda epsilon gamma sigma alpha zeta
+Line 19: zeta gamma theta theta iota kappa theta
+Line 20: lambda omicron kappa beta lambda upsilon kappa epsilon theta omicron sigma sigma
+Line 21: epsilon theta epsilon kappa epsilon
+Line 22: zeta alpha upsilon theta lambda zeta alpha theta lambda lambda
+Line 23: gamma alpha omicron omicron zeta iota zeta omicron zeta lambda sigma epsilon
+Line 24: iota alpha lambda alpha omicron alpha zeta epsilon omicron iota epsilon lambda lambda
+Line 25: gamma zeta gamma zeta upsilon zeta lambda
+Line 26: epsilon upsilon theta beta upsilon alpha
+Line 27: omicron sigma gamma epsilon kappa delta omicron upsilon epsilon delta zeta
+Line 28: omicron theta omicron sigma
+Line 29: beta lambda zeta
+Line 30: omicron delta iota upsilon gamma beta zeta
+Line 31: omicron delta lambda iota epsilon delta upsilon beta alpha kappa delta zeta upsilon
+Line 32: gamma epsilon zeta upsilon omicron beta upsilon lambda zeta lambda gamma
+Line 33: epsilon kappa upsilon epsilon iota zeta omicron theta
+Line 34: theta lambda theta alpha theta gamma
+Line 35: alpha iota lambda kappa theta
+Line 36: sigma delta alpha sigma iota upsilon omicron sigma kappa epsilon

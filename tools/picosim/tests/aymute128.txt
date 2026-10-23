@@ -1,0 +1,59 @@
+# The 128's sound chip is quiet while the NMI menu is up: the volumes of its three channels
+# (registers 8-10) are kept and set to 0 as the menu opens, and written back as it closes. A
+# snapshot saved from the menu has the game's volumes, not the 0s. Then emptying the Waste Bin:
+# its "Press any key" goes when the screen closes.
+sd /48.rom {ROM48}
+sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+sd /Waste Bin/old.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 200
+ay 8 13
+ay 9 14
+ay 10 15
+nmi
+wait 30
+expectay 8 0
+expectay 9 0
+expectay 10 0
+# a quick save from the menu: the .z80's sound chip registers (byte 39 on) have the game's volumes
+key q
+wait 200
+ls sd /Save Games
+expectbyte sd /Save Games/Athena Save Game.z80|47|13
+expectbyte sd /Save Games/Athena Save Game.z80|48|14
+expectbyte sd /Save Games/Athena Save Game.z80|49|15
+nmi
+wait 30
+expectay 8 0
+ay 8 13
+ay 9 14
+ay 10 15
+key x
+expectay 8 13
+expectay 9 14
+expectay 10 15
+wait 30
+# W - Waste Bin, B empties it: "Press any key" goes with its screen
+nmi
+wait 30
+key t
+wait 30
+key w
+wait 50
+expect 1-old
+key b
+wait 30
+key y
+wait 60
+expect Press any key
+key SPACE
+wait 60
+expectnot Press any key
+expectnot 1-old

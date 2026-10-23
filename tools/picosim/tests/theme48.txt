@@ -1,0 +1,23 @@
+# The light theme (Picomenu.ini [Display] theme = light): the menus (the ROM's) and the pico's
+# screens have white paper and dark ink; the title bar keeps its colours.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/theme-a.ini
+boot
+nmi
+wait 30
+# the menu: an item's letter (red) and text (black), on white; the title bar blue
+expectmem 0x5863 0x3A
+expectmem 0x5865 0x38
+expectmem 0x5800 0x4C
+key o
+wait 40
+key d
+wait 30
+# the Diagnostics page (drawn by the pico): text black on white
+expectmem 0x5841 0x38
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

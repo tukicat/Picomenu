@@ -1,0 +1,24 @@
+# Picomenu.ini on the internal flash is used when the SD card has none (tests/settings-c.ini:
+# sort = reverse); Diagnostics says where it was read from
+sd /48.rom {ROM48}
+sd /Games/a.sna {OUT}/dummy.scr
+sd /Games/b.sna {OUT}/dummy.scr
+flash /Picomenu.ini {HERE}/settings-c.ini
+boot
+nmi
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Flash: 1 settings read
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect 1-b
+expect 2-a

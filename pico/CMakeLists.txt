@@ -22,6 +22,7 @@ cmake_minimum_required(VERSION 3.13)
 # ====================================================================================
 
 set(WIFI_ENABLE 0 CACHE BOOL "Enable wifi server, needs pico-w board.")
+set(PICOMENU_LOG 0 CACHE STRING "1: the firmware sends its log messages on the USB serial port (about 6 KB more)")
 
 if("${WIFI_ENABLE}")
         message(STATUS "Wifi is enabled")
@@ -73,7 +74,7 @@ add_custom_command(
 add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/nmi.h ${CMAKE_CURRENT_BINARY_DIR}/nmi.c
         COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/asm_to_c_file.py
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/nmirom.bin ${CMAKE_CURRENT_BINARY_DIR}/nmirom.sym
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/nmirom.bin ${CMAKE_CURRENT_BINARY_DIR}/nmirom.sym ${CMAKE_CURRENT_SOURCE_DIR}/asm_to_c_file.py
 )
 
 
@@ -128,6 +129,11 @@ target_compile_definitions(picoface PRIVATE
         Z80_STATIC
         WIFI_SSID=\"${WIFI_SSID}\"
         WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
+        # PicoMenu: nothing prints a float, so printf leaves out the code for them (about 2 KB)
+        PICO_PRINTF_SUPPORT_FLOAT=0
+        PICO_PRINTF_SUPPORT_EXPONENTIAL=0
+        # the messages on the USB serial port: cmake -DPICOMENU_LOG=1 for a build with them
+        PICOMENU_LOG=${PICOMENU_LOG}
         )
 
 # Add any user requested libraries
@@ -148,11 +154,17 @@ set_source_files_properties(piohandler.S picoface.cxx PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/nmi.h"
 )
 # picoface.cxx is built for size like the rest (it was -O3): about 55 KB smaller, room for the
-# tape converter. Its stack was measured again for this (see Docs/Tape-converter-notes.md).
+# tape converter. Its stack was measured again for this.
 set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-Os")
 # The tape converter's emulation (tzxconv.h and the Z80 emulator) is built for speed: -O2 is
-# about 30% faster than -Os on the Pico and hardly bigger (see Docs/Tape-converter-notes.md)
+# about 30% faster than -Os on the Pico and hardly bigger
 set_source_files_properties(tzxconv_pico.cxx z80/Z80.c PROPERTIES COMPILE_OPTIONS "-O2")
 
 pico_add_extra_outputs(picoface)
+
+# The RAM left over is the heap, which littlefs and FatFs need: fail the build if there is too
+# little (see check_heap.py)
+add_custom_command(TARGET picoface POST_BUILD
+    COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/check_heap.py ${CMAKE_NM} $<TARGET_FILE:picoface>
+    VERBATIM)
 

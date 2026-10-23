@@ -91,6 +91,8 @@ int main(int argc, char** argv) {
     if (getenv("TZXFULL")) m.play_to_end();
     if (getenv("TZXNOACCEL")) m.no_acceleration();
     if (getenv("TZXNOFLASH")) m.no_flash();
+    if (getenv("TZXNOEDGE")) m.no_edge_waits();
+    if (getenv("TZXNOHOLD")) m.no_hold();
     if (getenv("TZXSWITCH")) m.test_switches(getenv("TZXSWITCH")[0] == '1', getenv("TZXSWITCH")[1] == '1');
     tzxconv::Status s;
     while ((s = m.run(getenv("TZXSTEP") ? atoi(getenv("TZXSTEP")) : 50)) == tzxconv::Status::RUNNING) {
@@ -122,10 +124,12 @@ int main(int argc, char** argv) {
     printf("result: %s\n", status_name(s));
     printf("emulated: %.1f s (tape ended at %.1f s), host time %.2f s\n",
         st.frames / 50.0, st.tape_end_frame / 50.0, secs);
-    printf("instructions: %.1f million (loop passes skipped: %.1f million, blocks flash-loaded: %u)\n", st.ops / 1e6, st.skipped / 1e6, st.flashed);
+    printf("instructions: %.1f million (loop passes skipped: %.1f million, blocks flash-loaded: %u, edge waits: %u)\n", st.ops / 1e6, st.skipped / 1e6, st.flashed, st.edge_waits);
+    if (st.held) printf("tape held in pauses while not read: %.1f s\n", st.held / 50.0);
     if (st.early_frame)
         printf("stopped early: nothing loaded the signal for 5 s (at %.1f s; the rest is not needed)\n",
             st.early_frame / 50.0);
+    printf("tape position (data blocks loaded): %u (played: %u)\n", m.tape().loaded_position(), m.tape().data_position());
     printf("blocks: %u, stops played through: %u, not played: %u\n",
         m.tape().blocks(), m.tape().stops(), m.tape().unsupported_);
     printf("after the tape: most EAR reads in a frame %u, last frame %u, pc %04X-%04X\n",

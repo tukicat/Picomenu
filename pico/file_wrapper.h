@@ -47,6 +47,8 @@ public:
 
     bool open(const char* filename, bool readOnly);
     bool open(Drive drive, const char* filename, bool readOnly);
+    // for writing on the end of the file (made if it is not there)
+    bool openAppend(Drive drive, const char* filename);
 
     int read(void* buffer, size_t bufferSize) {
         if (drive == Drive::EXTERNAL_SD_CARD) {
@@ -155,6 +157,14 @@ public:
         return drive == Drive::EXTERNAL_SD_CARD ?
             (sdFileInfo.fattrib & (AM_HID | AM_SYS)) != 0 :
             false;
+    }
+
+    // The SD card's hidden attribute alone (H in Browse Games sets it), and its system one
+    bool isHiddenSet() {
+        return drive == Drive::EXTERNAL_SD_CARD && (sdFileInfo.fattrib & AM_HID) != 0;
+    }
+    bool isSystem() {
+        return drive == Drive::EXTERNAL_SD_CARD && (sdFileInfo.fattrib & AM_SYS) != 0;
     }
 
     bool close() {

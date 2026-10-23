@@ -1,0 +1,38 @@
+# T on the Batch convert screen: each .z80 of the folder becomes a tape in Tapes/ there (a 48K
+# and a 128K one); one already there is skipped, one that is not a .z80 is listed; the summary
+sd /48.rom {ROM48}
+sd /Snaps/Mikie.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+sd /Snaps/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+sd /Snaps/Broken.z80 {OUT}/test.pok
+sd /Snaps/Green.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Snaps/Tapes/Green.tap {OUT}/test.pok
+sd /Snaps/Old.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+boot
+nmi
+wait 30
+key t
+wait 30
+key c
+wait 40
+key 1
+wait 40
+expect SD:/Snaps
+expect 1 tape, 4 .z80 here
+expect T-.z80 here to tapes
+expectnot 1-Tapes/
+key t
+wait 300
+expect Batch convert: done
+expect Saved:          2
+expect Already done:   1
+expect Not converted:  1
+expect Tapes/Batch convert.txt
+text
+get sd /Snaps/Tapes/Mikie.tap {OUT}/batchtap-mikie.tap
+get sd /Snaps/Tapes/Athena.tap {OUT}/batchtap-athena.tap
+get sd /Snaps/Tapes/Batch convert.txt {OUT}/batchtap-log.txt
+nofile sd /Snaps/Tapes/Broken.tap
+nofile sd /Snaps/Converted/Mikie.z80
+key x
+wait 30
+expect T-Test ROM (diagnostics)

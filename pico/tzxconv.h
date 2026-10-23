@@ -29,8 +29,8 @@ not, see <https://www.gnu.org/licenses/>.
 // with int read(void*, uint32_t), bool seek(uint32_t) and uint32_t tell(); it is the
 // Pico's FileHandle there and a FILE* wrapper on a PC, where this is tested.
 //
-// Not done here (yet): memory contention, the floating bus, 128K machines, and CSW blocks
-// compressed with Z-RLE (CSW with plain RLE works).
+// Not done here (yet): memory contention, the floating bus, and CSW blocks compressed with
+// Z-RLE (CSW with plain RLE works).
 
 #ifndef INCLUDED_TZXCONV_H
 #define INCLUDED_TZXCONV_H
@@ -55,8 +55,11 @@ static const uint32_t MS = 3500;                    // T-states in a millisecond
 
 enum class TapeEnd : uint8_t { PLAYING, ENDED, BAD };
 
+template <class File> class Machine;
+
 template <class File>
 class Player {
+    template <class> friend class Machine;     // (edge_wait's test build looks ahead and goes back)
 public:
     // tzx false: a .tap file (only standard speed blocks)
     bool begin(File* f, bool tzx) {
@@ -79,6 +82,9 @@ public:
             return false;
         }
         block_ = 0;
+        data_started_ = 0;
+        in_data_ = false;
+        read_in_ = loaded_ = 0;
         return true;
     }
 
@@ -118,6 +124,43 @@ public:
         }
     }
     uint32_t stops() const { return stops_; }       // "stop the tape" blocks played through
+    // Where the tape is, in data blocks (standard and turbo speed and pure data: those the
+    // Picoface's tape trap hands over, counted as it counts them): the next one a load would
+    // take. A data block that has begun but not ended is taken again from its start.
+    uint32_t data_position() const {
+        return data_started_ - (in_data_ && !quiet() && data_started_ > 0 ? 1 : 0);
+    }
+    // What has been loaded: the data blocks up to the last one a loader took in (counted as
+    // data_position counts them). A block counts when the tape port was read while its data
+    // played, in a frame in which the Spectrum was loading (Machine::frame_checks: bytes
+    // stored one after another, or the ROM's loader), or when it was flash loaded. The blocks
+    // after it played to no one (a game waiting for a key while the tape runs on), so a load
+    // made later (a multi-load game's next level) wants the first of them.
+    uint32_t loaded_position() const { return loaded_; }
+    void note_read() {
+        if (in_data_ && playing_now() == 2) read_in_ = data_started_;
+    }
+    void note_loading() {
+        if (read_in_ > loaded_) loaded_ = read_in_;
+    }
+    // In a silence (a pause, or between blocks) with another block that makes a signal after
+    // it (not only the end of the tape): the tape can be held here (Machine::hold_tape)
+    bool silent() const { return quiet(); }
+    bool silence_before_signal() {
+        if (!quiet() || end_ != TapeEnd::PLAYING) return false;
+        Saved sv;
+        save(sv);
+        bool found = false;
+        for (int i = 0; i < 8 && end_ == TapeEnd::PLAYING; i++) {
+            if (!next_block()) break;
+            if (!quiet()) {
+                found = true;
+                break;
+            }
+        }
+        restore(sv);
+        return found;
+    }
     uint32_t blocks() const { return block_; }      // blocks started
 
     // ---- flash loading (the ROM's LD-BYTES done at once: see Machine::flash_load)
@@ -166,6 +209,7 @@ public:
     }
     // After flash_ready: the rest of the block is skipped, and its pause starts
     void flash_done() {
+        read_in_ = loaded_ = data_started_;
         level_ = flash_level();
         if (s_.data_left > 0 && !skip(s_.data_left)) {
             bad();
@@ -494,6 +538,8 @@ private:
         if (!get(&flag, 1) || !f_->seek(f_->tell() - 1)) return bad();
         standard(len, 1000, flag);
         block_++;
+        data_started_++;
+        in_data_ = true;
         return true;
     }
 
@@ -523,6 +569,7 @@ private:
     // Reads blocks until one that makes a signal has been started
     bool next_block() {
         if (!tzx_) return next_tap_block();
+        in_data_ = false;
         while (true) {
             if (++s_.idle > 4000) return bad();             // a control block loop that never ends
             uint8_t id;
@@ -538,6 +585,8 @@ private:
                     if (len > 0 && (!get(&flag, 1) || !f_->seek(f_->tell() - 1))) return bad();
                     standard(len, le(h, 2), flag);
                 }
+                data_started_++;
+                in_data_ = true;
                 return started();
             case 0x11:
                 if (!get(h, 18)) return bad();
@@ -545,17 +594,21 @@ private:
                 s_.zero = le(h + 6, 2); s_.one = le(h + 8, 2); s_.tone_left = le(h + 10, 2);
                 s_.used_last = h[12]; s_.pause_ms = le(h + 13, 2); s_.data_left = le(h + 15, 3);
                 s_.phase = TONE;
+                data_started_++;
+                in_data_ = true;
                 return started();
             case 0x12:
                 if (!get(h, 4)) return bad();
                 s_.pilot = le(h, 2); s_.tone_left = le(h + 2, 2);
                 s_.sync1 = s_.sync2 = 0; s_.data_left = 0; s_.pause_ms = 0;
                 s_.phase = TONE;            // then SYNC1, SYNC2 and DATA, which give nothing
+                in_data_ = false;
                 return started();
             case 0x13:
                 if (!get(h, 1)) return bad();
                 s_.pulses_left = h[0];
                 s_.phase = PULSES;
+                in_data_ = false;
                 return started();
             case 0x14:
                 if (!get(h, 10)) return bad();
@@ -563,12 +616,15 @@ private:
                 s_.pause_ms = le(h + 5, 2); s_.data_left = le(h + 7, 3);
                 s_.sync1 = s_.sync2 = 0; s_.tone_left = 0;
                 s_.phase = TONE;
+                data_started_++;
+                in_data_ = true;
                 return started();
             case 0x15:
                 if (!get(h, 8)) return bad();
                 s_.sample_t = le(h, 2); s_.pause_ms = le(h + 2, 2); s_.used_last = h[4];
                 s_.data_left = le(h + 5, 3); s_.bits_left = 0;
                 s_.phase = DIRECT;
+                in_data_ = false;
                 return started();
             case 0x18: {
                 if (!get(h, 14)) return bad();
@@ -683,16 +739,19 @@ private:
 
     struct Saved {
         State s;
-        uint32_t pos, block, stops, unsupported;
+        uint32_t pos, block, stops, unsupported, data_started, read_in, loaded;
+        bool in_data;
         uint8_t level, closing;
         TapeEnd end;
     };
     void save(Saved& v) const {
         v.s = s_; v.pos = f_->tell(); v.block = block_; v.stops = stops_; v.unsupported = unsupported_;
+        v.data_started = data_started_; v.in_data = in_data_; v.read_in = read_in_; v.loaded = loaded_;
         v.level = level_; v.closing = closing_; v.end = end_;
     }
     void restore(const Saved& v) {
         s_ = v.s; block_ = v.block; stops_ = v.stops; unsupported_ = v.unsupported;
+        data_started_ = v.data_started; in_data_ = v.in_data; read_in_ = v.read_in; loaded_ = v.loaded;
         level_ = v.level; closing_ = v.closing; end_ = v.end;
         if (!f_->seek(v.pos)) bad();
     }
@@ -704,6 +763,9 @@ private:
     TapeEnd end_ = TapeEnd::BAD;
     uint32_t block_ = 0;
     uint32_t stops_ = 0;
+    uint32_t data_started_ = 0;     // data blocks begun (see data_position)
+    bool in_data_ = false;          // the block playing is one of them
+    uint32_t read_in_ = 0, loaded_ = 0;     // see loaded_position
     uint8_t closing_ = 0;
 public:
     uint32_t unsupported_ = 0;      // blocks that make a signal but are not played (CSW Z-RLE)
@@ -750,6 +812,8 @@ public:
         uint64_t ops;                           // instructions run (what the time on the Pico goes by)
         uint64_t skipped;                       // loop passes skipped by the loader acceleration
         uint32_t flashed;                       // blocks taken in at once by flash_load
+        uint32_t edge_waits;                    // edge waits done at once (edge_wait)
+        uint32_t held;                          // frames the tape was held in a pause (hold_tape)
         uint32_t unstored_frames;               // frames in a row of data with nothing stored
         uint32_t early_frame;                   // when the tape was given up as no longer read (0: not)
         uint32_t ear_reads_last;                // port 0xFE reads in the last whole frame
@@ -812,6 +876,7 @@ public:
 private:
     bool start(File* tape, bool tzx, uint32_t after_ms) {
         memset(&st_, 0, sizeof(st_));
+        ec_ok_ = false;
         after_frames_ = after_ms / 20;
         keys_step_ = 0;
         keys_frame_ = 0;
@@ -850,6 +915,7 @@ private:
     // 128K paging: port 0x7FFD
     void page(uint8_t v) {
         if (locked_) return;
+        ec_ok_ = false;
         p7ffd_ = v;
         slot_[3] = bank_[v & 7];
         slot_[0] = const_cast<uint8_t*>(rom128_[(v >> 4) & 1]);
@@ -934,7 +1000,9 @@ public:
     void play_to_end() { early_ = false; }      // never stop before the end of the tape
     void no_acceleration() { accel_ = false; set_flags(); }    // run every pass of a loader's loops
     void no_flash() { flash_ = false; }         // play the ROM's blocks too, edge by edge
+    void no_hold() { hold_ = false; }           // never hold the tape in a pause
     void test_switches(bool delays, bool learned) { delays_ = delays; learned_ = learned; set_flags(); }  // (for tests)
+    void no_edge_waits() { edges_ = false; set_flags(); }   // (for tests) edge_wait off: the loop acceleration only
 
     const Stats& stats() const { return st_; }
     Suspect suspect() const { return suspect_; }
@@ -985,6 +1053,7 @@ private:
         keyboard_frame();
         reads_ = 0;
         seq_writes_ = 0;
+        fresh_writes_ = 0;
         pc_lo_ = 0xFFFF;
         pc_hi_ = 0;
         z80_int(&cpu_, true);
@@ -1014,6 +1083,7 @@ private:
             }
         }
         else if (playing_) {
+            hold_tape();
             advance_tape(t_);           // so the end of the tape is seen even if not read
             // Data is playing but nothing is loading it: the tape port is hardly read, or read
             // in a loop too small to be taking the bits in, such as a game's "press SPACE". After IGNORED_FRAMES of that the load is over:
@@ -1027,7 +1097,22 @@ private:
             // with the tape still running). Not while the ROM's loader runs: it reads a block
             // with the wrong flag without storing it. This one waits 10 s.
             bool rom_loader = basic_rom() && pc_lo_ <= 0x0605 && pc_hi_ >= 0x04C2;
-            if (now == 2 && seq_writes_ < FEW_STORES && !rom_loader) {
+            // A loop of a loader's size that stores bytes in new places is loading too, a
+            // byte at a time all over (720 Degrees). Not a game running (its code is all
+            // over, and what it stores proves nothing).
+            bool scattered = pc_hi_ >= pc_lo_ && (uint32_t) (pc_hi_ - pc_lo_) < BUSY_RANGE &&
+                             fresh_writes_ >= FEW_STORES;
+            // a frame of loading, for loaded_position: the ROM's loader (only: BASIC's PAUSE and
+            // the interrupt routine span its addresses too), or a loop of a
+            // loader's size reading the port and storing (a game waiting for a key runs its
+            // interrupt routine and more, all over the memory)
+            bool compact = pc_hi_ >= pc_lo_ && (uint32_t) (pc_hi_ - pc_lo_) < BUSY_RANGE;
+            bool in_ld_bytes = basic_rom() && pc_lo_ >= 0x04C2 && pc_hi_ <= 0x0605 && pc_hi_ >= pc_lo_;
+            if (in_ld_bytes || (compact && reads_ >= FEW_READS &&
+                               (seq_writes_ >= FEW_STORES || fresh_writes_ >= FEW_STORES))) {
+                tape_.note_loading();
+            }
+            if (now == 2 && seq_writes_ < FEW_STORES && !rom_loader && !scattered) {
                 if (++st_.unstored_frames >= UNSTORED_FRAMES && early_) {
                     st_.early_frame = st_.frames;
                     st_.tape_end_frame = st_.frames;
@@ -1068,6 +1153,7 @@ private:
     }
 
     static const uint32_t FEW_READS = 50;       // a loader reads the port 700+ times a frame
+    static const uint32_t HOLD_FRAMES = 500;    // 10 s: the longest a pause is held
     static const uint32_t TINY_LOOP = 16;       // bytes: a loop reading the port and nothing else
     static const uint32_t IGNORED_FRAMES = 250; // 5 s of signal not loaded
     static const uint32_t FEW_STORES = 1;       // a loader stores 2+ bytes a frame (3 at ROM speed)...
@@ -1103,6 +1189,29 @@ private:
             run_base_ = t_;
             t_ += z80_run(&cpu_, 1);
         }
+    }
+
+    // A pause on the tape is held while nothing reads the tape port, as an emulator's tape
+    // stops when no loader is running: a frame without a read doesn't count towards it.
+    // Some tape files have the pauses of the real tape cut short, and a loader that spends
+    // longer between blocks (720 Degrees decrypts itself and draws for 6 s, in a pause of
+    // 1.8 s) would miss the next block's pilot. Only in a silence with a block after it (not
+    // at the end of the tape), and at most HOLD_FRAMES for one pause (a game that has loaded
+    // and runs while the tape plays on to a next level's blocks).
+    void hold_tape() {
+        if (!hold_ || reads_ != 0 || !tape_.silent()) {
+            if (reads_ != 0) hold_frames_ = 0;
+            return;
+        }
+        if (hold_block_ != tape_.blocks()) {
+            hold_block_ = tape_.blocks();
+            hold_ok_ = tape_.silence_before_signal();
+            hold_frames_ = 0;
+        }
+        if (!hold_ok_ || hold_frames_ >= HOLD_FRAMES) return;
+        hold_frames_++;
+        st_.held++;
+        next_change_ += frame_t_;
     }
 
     void advance_tape(uint64_t now) {
@@ -1197,6 +1306,235 @@ private:
             c.q = 0;
             st_.skipped += k;
         }
+    }
+
+    // ---- edge waits: LD-EDGE and its copies, recognised by their code
+    // Nearly every loader (the ROM's, Speedlock 1 to 7, Power-Load, SoftLock, the Erbe and
+    // Ocean loaders seen so far) waits for an edge with the ROM's own loop, and most then go on
+    // with the ROM's own ending:
+    //     L: INC B / RET Z / LD A,hi / IN A,(lo) / RRA / [RET NC or NOP] / XOR C / AND $20 / JR Z,L
+    //        LD A,C / CPL / LD C,A / AND m / OR o / OUT (p),A / SCF / RET
+    // (B counts the passes, RET Z gives up when it wraps; the edge is the level in bit 6 of the
+    // port differing from bit 5 of C; the ending turns C round for the next edge and sets the
+    // border.) Seen at its INC B, the tape tells which pass will see the edge, so the passes
+    // before it are done at once: they leave B (+1 each), R (an M1 per instruction), the time
+    // (dt each), and after one or more A = 0, F = 0x54 (AND $20 of 0) and MEMPTR = L (the JR).
+    // With the ending recognised too, the pass that sees the edge and the ending are done as
+    // well, instruction by instruction (registers, flags, MEMPTR, R, the time, the border), up
+    // to the RET; or, if B wraps first, the INC B and RET Z of that pass. The CPU goes on at the
+    // return address. Without the ending the CPU runs the pass that sees the edge itself. The
+    // result is the same as running every pass (checked: the snapshots are the same byte for
+    // byte). Only with interrupts off and within the run (as the loop acceleration), and not
+    // if a key would stop the loop (RET NC: SPACE down).
+    // True: the routine is done, and the CPU goes on at its (new) PC.
+    static uint8_t szp_flags(uint8_t a) {
+        return (uint8_t) ((a & 0xA8) | (a == 0 ? 0x40 : 0) | (__builtin_parity(a) ? 0 : 0x04));
+    }
+
+    // The routine last recognised (its code is read once, then kept until a store into it, or
+    // paging, could have changed it)
+    struct EdgeCode {
+        uint16_t pc, end;                   // the INC B, and the ending after the JR Z
+        uint16_t port;
+        uint8_t dt, m1, xt;                 // a pass: T-states, M1 cycles; the RET NC or NOP's T
+        uint8_t and_m, or_o, out_p;         // the ending's AND, OR and OUT
+        bool retnc, ending, no_border;
+    };
+    EdgeCode ec_ = {};
+    bool ec_ok_ = false;
+
+    bool edge_code(uint16_t pc) {
+        // the loop's code
+        if (peek((uint16_t) (pc + 1)) != 0xC8 || peek((uint16_t) (pc + 2)) != 0x3E || peek((uint16_t) (pc + 4)) != 0xDB ||
+            peek((uint16_t) (pc + 6)) != 0x1F) return false;
+        uint8_t hi = peek((uint16_t) (pc + 3)), lo = peek((uint16_t) (pc + 5));
+        if (lo & 1) return false;                                   // the ULA's port: even
+        EdgeCode e = {};
+        uint8_t extra = peek((uint16_t) (pc + 7));
+        uint16_t at = (uint16_t) (pc + 7);
+        e.dt = 54;
+        e.m1 = 8;
+        e.retnc = extra == 0xD0;
+        if (extra == 0xD0 || extra == 0x00) {                       // RET NC (5 T) or NOP (4 T)
+            at++;
+            e.xt = e.retnc ? 5 : 4;
+            e.dt = (uint8_t) (e.dt + e.xt);
+            e.m1++;
+        }
+        if (peek(at) != 0xA9 || peek((uint16_t) (at + 1)) != 0xE6 || peek((uint16_t) (at + 2)) != 0x20 ||
+            peek((uint16_t) (at + 3)) != 0x28 || (uint16_t) (at + 5 + (int8_t) peek((uint16_t) (at + 4))) != pc) return false;
+        e.pc = pc;
+        e.port = (uint16_t) ((hi << 8) | lo);
+        // the ending: LD A,C / CPL / LD C,A / AND m / OR o / OUT (p),A (or NOP / NOP: no border,
+        // as New Generation's loader) / SCF / RET
+        const uint16_t end = (uint16_t) (at + 5);
+        e.end = end;
+        e.no_border = peek((uint16_t) (end + 7)) == 0x00 && peek((uint16_t) (end + 8)) == 0x00;
+        e.ending = peek(end) == 0x79 && peek((uint16_t) (end + 1)) == 0x2F && peek((uint16_t) (end + 2)) == 0x4F &&
+            peek((uint16_t) (end + 3)) == 0xE6 && peek((uint16_t) (end + 5)) == 0xF6 &&
+            (peek((uint16_t) (end + 7)) == 0xD3 || e.no_border) &&
+            peek((uint16_t) (end + 9)) == 0x37 && peek((uint16_t) (end + 10)) == 0xC9;
+        e.and_m = peek((uint16_t) (end + 4));
+        e.or_o = peek((uint16_t) (end + 6));
+        e.out_p = peek((uint16_t) (end + 8));
+        ec_ = e;
+        ec_ok_ = true;
+        return true;
+    }
+
+    TZXCONV_NOINLINE bool edge_wait(uint16_t pc) {
+        Z80& c = cpu_;
+        if (c.iff1) return false;
+        if (!(ec_ok_ && ec_.pc == pc) && !edge_code(pc)) return false;
+        const EdgeCode& e = ec_;
+        const uint32_t dt = e.dt, m1 = e.m1, xt = e.xt;
+        const bool retnc = e.retnc, ending = e.ending, no_border = e.no_border;
+        const uint16_t end = e.end, port = e.port;
+        if (retnc && !(port_value(port) & 1)) return false;         // SPACE down: the loop would stop
+        // passes that can be done: B not to wrap (that pass ends the loop), and the run's end
+        // not passed, with room for the last pass and the ending (105 T)
+        const uint8_t b = Z80_B(c);
+        const uint32_t kwrap = 255u - b;
+        uint32_t kmax = kwrap;
+        zusize left = c.cycle_limit > c.cycles + 64 + 110 ? c.cycle_limit - c.cycles - 64 - 110 : 0;
+        if (c.cycle_limit <= c.cycles + 64 + 110) return false;
+        if (kmax * dt > left) kmax = (uint32_t) (left / dt);
+        // the read of pass j is at the pass's start + 23 (INC B, RET Z, LD A,n, then 7 T into
+        // the IN), and sees the level at that time + 2 (as in())
+        const uint8_t level = (uint8_t) ((Z80_C(c) >> 5) & 1);
+        const uint64_t start = run_base_ + c.cycles;
+        // times from here on are counted from start, in 32 bits (all within kmax passes)
+        auto rel = [&](uint64_t t) -> uint32_t {
+            return t <= start ? 0 : t - start > 0x7FFFFFFFu ? 0x7FFFFFFFu : (uint32_t) (t - start);
+        };
+#ifdef TZXCONV_EDGE_CHECK
+        typename Player<File>::Saved saved_tape;
+        tape_.save(saved_tape);
+        const uint8_t saved_ear = ear_;
+        const uint64_t saved_change = next_change_;
+#endif
+        uint32_t k = 0, s = 25;                                     // pass k's read (from start)
+        uint32_t change = rel(next_change_);
+        bool edge = false;
+        while (k < kmax) {
+            if (s >= change) {
+                advance_tape(start + s);
+                change = rel(next_change_);
+            }
+            if (ear_ != level) {                                    // pass k sees the edge
+                edge = true;
+                break;
+            }
+            tape_.note_read();                                      // (each read notes the block playing)
+            // the level stays as it is until next_change_: the passes up to it see no edge
+            uint32_t more = change > s ? (change - s + dt - 1) / dt : 1;
+            if (more > kmax - k) more = kmax - k;
+            k += more;
+            s += more * dt;
+        }
+#ifdef TZXCONV_EDGE_CHECK
+        tape_.restore(saved_tape);
+        ear_ = saved_ear;
+        next_change_ = saved_change;
+        TZXCONV_EDGE_CHECK(st_.frames, pc, end, b, k, kmax, start, next_change_, ear_, level);
+        return false;
+#endif
+        // The tape may now be past the read of pass k (at the edge): the loop acceleration
+        // must not take that read as one more pass of a loop it knows (it would jump on to
+        // the next edge), so what it has seen is forgotten.
+        acc_.count = 0;
+        acc_.regs.pc = 0xFFFF;
+        // the passes that see no edge
+        uint8_t nb = (uint8_t) (b + k);
+        uint8_t a = Z80_A(c), f = Z80_F(c);
+        if (k > 0) {
+            a = 0;
+            f = 0x54;
+            reads_ += k;
+            st_.skipped += k;
+        }
+        const bool wrap = !edge && k == kwrap;
+        if (!(edge && ending) && !wrap) {
+            if (k == 0) return false;
+            Z80_B(c) = nb;
+            c.r = (uint8_t) (c.r + k * m1);
+            c.cycles += (zusize) (k * dt);
+            Z80_A(c) = a;
+            Z80_F(c) = f;
+            Z80_MEMPTR(c) = pc;
+            st_.edge_waits++;
+            return false;                                           // the CPU runs on from pass k
+        }
+        uint32_t t = k * dt;
+        uint32_t r = k * m1;
+        uint16_t sp = Z80_SP(c);
+        uint16_t ret = (uint16_t) (peek(sp) | (peek((uint16_t) (sp + 1)) << 8));
+        // INC B (the carry stays)
+        nb++;
+        f = (uint8_t) ((f & 0x01) | (nb & 0xA8) | (nb == 0 ? 0x40 : 0) | ((nb & 0x0F) == 0 ? 0x10 : 0) | (nb == 0x80 ? 0x04 : 0));
+        if (wrap) {
+            // B has wrapped: RET Z is taken (no edge in time)
+            t += 4 + 11;
+            r += 2;
+        } else {
+            // the rest of the pass that sees the edge: RET Z (not taken), LD A,hi, IN A,(lo) (its
+            // read was taken above), RRA, [RET NC or NOP], XOR C, AND $20, JR Z (not taken)
+            uint8_t v = port_value(port);
+            reads_++;
+            tape_.note_read();
+            uint8_t cin = f & 0x01;
+            a = (uint8_t) ((v >> 1) | (cin << 7));
+            f = (uint8_t) ((f & 0xC4) | (a & 0x28) | (v & 0x01));
+            a ^= Z80_C(c);
+            f = szp_flags(a);
+            a &= 0x20;
+            f = (uint8_t) (szp_flags(a) | 0x10);
+            t += 4 + 5 + 7 + 11 + 4 + xt + 4 + 7 + 7;
+            r += m1;
+            // the ending: LD A,C / CPL / LD C,A / AND m / OR o / OUT (p),A / SCF / RET
+            a = (uint8_t) ~Z80_C(c);
+            f = (uint8_t) ((f & 0xC5) | (a & 0x28) | 0x12);
+            Z80_C(c) = a;
+            a &= e.and_m;
+            f = (uint8_t) (szp_flags(a) | 0x10);
+            a |= e.or_o;
+            f = szp_flags(a);
+            if (no_border) {
+                t += 4 + 4;                                         // NOP / NOP
+                r += 2;
+            } else {
+                out(this, (uint16_t) ((a << 8) | e.out_p), a);            // (the border; out() doesn't use the time)
+                t += 11;
+                r += 1;
+            }
+            f = (uint8_t) ((f & 0xC4) | (a & 0x28) | 0x01);
+            t += 4 + 4 + 4 + 7 + 7 + 4 + 10;
+            r += 7;
+            if (pc_hi_ < (uint16_t) (end + 10)) pc_hi_ = (uint16_t) (end + 10);
+        }
+        // RET
+        Z80_B(c) = nb;
+        Z80_A(c) = a;
+        Z80_F(c) = f;
+        Z80_SP(c) = (uint16_t) (sp + 2);
+        Z80_PC(c) = ret;
+        Z80_MEMPTR(c) = ret;
+        c.r = (uint8_t) (c.r + r);
+        c.cycles += (zusize) t;
+        st_.edge_waits++;
+        return true;
+    }
+
+    // What a read of the port gives (as in(), for a port with A0 low, without its side effects)
+    uint8_t port_value(uint16_t port) const {
+        uint8_t v = 0x1F;
+        if (keys_) {
+            uint8_t high = (uint8_t) (port >> 8);
+            for (int r = 0; r < 8; r++) {
+                if (!(high & (1 << r))) v &= rows_[r];
+            }
+        }
+        return (uint8_t) (v | 0xA0 | (ear_ ? 0x40 : 0));
     }
 
     // The flags INC B (db 1) or DEC B (db -1) leave for the result b, with the carry of f
@@ -1367,6 +1705,13 @@ private:
         m->ops_++;
         if (a < m->pc_lo_) m->pc_lo_ = a;
         if (a > m->pc_hi_) m->pc_hi_ = a;
+        if (op == 0x04 && m->edge_on_ && m->edge_wait(a)) {
+            // LD-EDGE done up to its RET: this fetch is of the instruction at the return address
+            a = Z80_PC(m->cpu_);
+            op = m->slot_[a >> 14][a & 0x3FFF];
+            if (a < m->pc_lo_) m->pc_lo_ = a;
+            if (a > m->pc_hi_) m->pc_hi_ = a;
+        }
         if ((op == 0x3D || op == 0x10) && m->delay_on_) m->delay_loop(a);
         if ((a & 0xFFF7) == 0 || a == 0x056C || a == 0x0970) return m->trap(a, op);
         return op;
@@ -1416,6 +1761,7 @@ private:
     static void write(void* c, zuint16 a, zuint8 v) {
         Machine* m = self(c);
         m->writes_++;
+        if ((uint16_t) (a - m->ec_.pc) <= 24) m->ec_ok_ = false;    // the edge routine's code may change
         if (a >= 0x4000) m->slot_[a >> 14][a & 0x3FFF] = v;
         if (m->scr_state_ < 2 && m->playing_) m->screen_watch(a);
 #ifdef TZXCONV_DEBUG_WRITES
@@ -1432,6 +1778,21 @@ private:
         // is still loading, so it counts. (The runs below are followed as before: what they
         // count depends on which of them are kept, so that is left alone.)
         if (a < 0x4000) m->seq_writes_++;
+        // A store to a place not stored to in the last 8 stores: a loader that puts each
+        // byte somewhere else (720 Degrees' loading screen goes in byte by byte, scattered)
+        // makes one for every byte, a loop waiting for a key none (see the frame's checks)
+        bool fresh = true;
+        for (int i = 0; i < 8; i++) {
+            if (m->recent_[i] == a) {
+                fresh = false;
+                break;
+            }
+        }
+        if (fresh) {
+            m->fresh_writes_++;
+            m->recent_[m->recent_next_] = a;
+            m->recent_next_ = (uint8_t) ((m->recent_next_ + 1) & 7);
+        }
         Stream* st = m->streams_;
         for (int i = 0; i < 4; i++) {
             Stream& r = st[i];
@@ -1465,6 +1826,7 @@ private:
             uint64_t now = m->run_base_ + m->cpu_.cycles + z80_in_cycle(&m->cpu_);
             if (m->accel_) now += m->accelerate(port, now);
             if (now + 2 >= m->next_change_) m->advance_tape(now + 2);
+            m->tape_.note_read();
         }
         uint8_t v = 0x1F;
         if (m->keys_) {
@@ -1509,11 +1871,16 @@ private:
     struct Stream { uint16_t last; int8_t dir; uint8_t len; };
     Stream streams_[4] = {};
     uint8_t stream_next_ = 0;
-    uint32_t seq_writes_ = 0;
+    uint32_t seq_writes_ = 0, fresh_writes_ = 0;
+    uint16_t recent_[8] = {};
+    uint8_t recent_next_ = 0;
     uint32_t writes_ = 0;
     Accel acc_ = {};
     bool accel_ = true, delays_ = true, learned_ = true;
     bool flash_ = true, flash_rom_ = false;
+    bool hold_ = true;
+    uint32_t hold_block_ = ~0u, hold_frames_ = 0;
+    bool hold_ok_ = false;
     uint32_t reads_ = 0, after_frames_ = 100, keys_step_ = 0, keys_frame_ = 0;
     uint16_t pc_lo_ = 0, pc_hi_ = 0;
     uint8_t ear_ = 0, border_ = 7;
@@ -1521,8 +1888,10 @@ private:
     bool keys_ = false;                         // a key is down (rows_ not all 0xFF)
     bool playing_ = false;
     bool delay_on_ = false;                     // accel_ && delays_ && playing_
+    bool edges_ = true;
+    bool edge_on_ = false;                      // accel_ && edges_ && playing_
     uint32_t ops_ = 0;                          // instructions this frame (to st_.ops at its end)
-    void set_flags() { delay_on_ = accel_ && delays_ && playing_; }
+    void set_flags() { delay_on_ = accel_ && delays_ && playing_; edge_on_ = accel_ && edges_ && playing_; }
     // the loading screen: 0 watching, 1 covered (waiting for a store elsewhere), 2 done
     uint8_t scr_state_ = 0;
     bool scr_new_ = false, flashing_ = false;

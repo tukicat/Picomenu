@@ -1,0 +1,126 @@
+# Tape positions are kept in /Tape Files ("<snapshot's path, / as ~>.tape"), not beside the
+# snapshots. A note an earlier build left beside its snapshot is moved there when it is used, and
+# the notes follow their snapshots' folder when it is renamed, copied, erased or moved. Browse
+# Games doesn't list /Tape Files; Set up SD card makes it (and /Recordings).
+flash /48.rom {ROM48}
+sd /Old/game.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+sd /Old/game.z80.tape {HERE}/legacy-note.tape
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+sd /Other/x.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 200
+get sd /Tape Files/Old~game.z80.tape {OUT}/legacy-moved.txt
+nofile sd /Old/game.z80.tape
+nmi
+wait 30
+key v
+wait 40
+expect tapein.tap
+expect 2> Bytes: partA
+key x
+wait 30
+# rename the folder Old to Old2
+key b
+wait 50
+key u
+wait 50
+key r
+wait 20
+key 1
+wait 40
+key 2
+wait 6
+key ENTER
+wait 60
+expect Old2/
+get sd /Tape Files/Old2~game.z80.tape {OUT}/n1.txt
+nofile sd /Tape Files/Old~game.z80.tape
+# copy it into Other, then erase the copy
+key c
+wait 20
+key 1
+wait 30
+key 2
+wait 50
+key c
+wait 60
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 300
+get sd /Tape Files/Other~Old2~game.z80.tape {OUT}/n2.txt
+get sd /Tape Files/Old2~game.z80.tape {OUT}/n3.txt
+key e
+wait 20
+key 1
+wait 40
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 100
+nofile sd /Tape Files/Other~Old2~game.z80.tape
+get sd /Tape Files/Old2~game.z80.tape {OUT}/n4.txt
+# move Old2 into Other
+key u
+wait 50
+key m
+wait 20
+key 1
+wait 30
+key 2
+wait 50
+key m
+wait 60
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 100
+get sd /Tape Files/Other~Old2~game.z80.tape {OUT}/n5.txt
+nofile sd /Tape Files/Old2~game.z80.tape
+# Browse Games doesn't list the folder; Set up SD card makes it
+key u
+wait 50
+expect 1-Other/
+expectnot Tape Files
+key x
+wait 30
+key t
+wait 30
+key d
+wait 50
+expect Tape Files/   tape positions
+expect Recordings/   recorded tapes
+expect An example Instructions.txt
+expect Picomenu.ini (the settings)
+key d
+wait 30
+key y
+wait 100
+expect Recordings/      made
+expect SD card created.
+expect Picomenu.ini            made
+expect ROMS/            made
+# ROMS is made hidden: Browse Games lists it only with L-All
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+expectnot ROMS/
+key l
+wait 50
+expect ROMS/

@@ -15,7 +15,8 @@ not, see <https://www.gnu.org/licenses/>.
 
 
 // C on the NMI menu: set up the SD card. It makes the folders the Picoface uses and, if there
-// is no Instructions file yet, a small example one in the folder Scraper. Nothing that is
+// is no Instructions file yet, a small example one in the folder Scraper, and if there is no
+// Picomenu.ini, one with every setting at its default (settings.h). Nothing that is
 // already there is changed. The tables and the text are here, so they are tested on a PC;
 // the work itself (picoface.cxx, sd_setup_run) uses the file system.
 
@@ -26,16 +27,21 @@ namespace sdsetup {
 struct Folder {
     const char* path;           // in the root of the card
     const char* what;           // shown on the screen (15 letters at most)
-    bool hidden;                // no folder is made hidden now
+    bool hidden;                // made hidden (the Waste Bin)
+    const char* label = nullptr;    // shown instead of the path (without its /), if given
 };
 
 static const Folder FOLDERS[] = {
     { "/Scraper",      "Instructions.txt", false },
+    { "/Scraper/Screen Grabs", " screen grabs", false, " Screen Grabs" },     // under Scraper/ on the screen
     { "/Game Notes",   "your game notes",  false },
     { "/Save Games",   "quick saves",      false },
-    { "/Screen Grabs", "grabs",            false },
     { "/Favourites",   "favourite games",  false },
     { "/Poke List",    ".pok cheat files", false },
+    { "/Tape Files",   "tape positions",   false },
+    { "/Recordings",   "recorded tapes",   false },
+    { "/Waste Bin",    "erased files",     true },      // hidden: Browse Games shows it with L-All
+    { "/ROMS",         "ROM images",       true },      // hidden too: 48.rom, 128.rom, testrom.rom, DiagROM.rom, others for C-Change ROM
 };
 static const int FOLDER_COUNT = (int) (sizeof(FOLDERS) / sizeof(FOLDERS[0]));
 

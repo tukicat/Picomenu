@@ -86,7 +86,8 @@ SNAPLIST_HASPARENT equ 22
 SNAPLIST_BUSY equ 23
 SNAPLIST_PATH equ 24
 SNAPLIST_PATH_SIZE equ 32
-SNAPLIST_STRINGS equ SNAPLIST_PATH + SNAPLIST_PATH_SIZE
+SNAPLIST_HIDDEN equ SNAPLIST_PATH + SNAPLIST_PATH_SIZE    // WORD: bit n set, entry n is hidden (drawn dimmed)
+SNAPLIST_STRINGS equ SNAPLIST_HIDDEN + 2
 
 
 ACTION_SNA_SAVE equ 0x06
@@ -324,9 +325,61 @@ ACTION_RECENT_LIST equ 0x21
 // (status 0: ready, else the screen says why not), 1 copy the firmware to the internal
 // flash (status 0 done, else a screen), 2 install it (does not come back)
 ACTION_UPDATE equ 0x22
-// Saves the game's screen (the pico has it from when the menu opened) in the hidden
-// Screen Grabs folder of the SD card, named after the game last loaded.
+// The Virtual Tape Player (V on the menu): where the tape being played (the tape trap's)
+// has got to, its blocks by name, and the keys to move it. The pico draws it as a screen for
+// ACTION_PREVIEW_READ and does what each key says.
+// BYTE param1 = the key pressed (0: the screen is opened)
+// Status: 0 the screen stays (shown again), 1 it is closed
+ACTION_TAPE_POSITION equ 0x23
+// T in Browse Games: puts a tape in for the Spectrum's own ROMs (tape in), with no reset.
+// WORD param1 = the list entry's name, BYTE param2 = the drive, WORD param3 = where the pico
+// writes why it can't (a line of the menu)
+// Status: 0 it is in (the menu then goes back to the program), 1 not
+ACTION_TAPE_INSERT equ 0x24
+// A .txt file (L-All lists them; ENTER or V on one): the pico shows it a page at a time and, on
+// the SD card, E edits it. It draws the screen and does what each key says.
+// BYTE param1 = the key (0: open it: WORD param2 = the list entry's name, BYTE param4 = the drive)
+// Status: 0 the screen stays (shown again), 1 it is closed
+ACTION_TEXT_FILE equ 0x25
+// H in Browse Games: hides a file or folder, or shows it again (listed only with L-All, dimmed).
+// WORD param1 = the list entry's name, BYTE param2 = the drive, WORD param3 = where the pico
+// writes why not. Status 0 changed (the pico reads the folder again), 1 not
+ACTION_SNAP_HIDE equ 0x26
+// The Waste Bin (/Waste Bin, hidden, on the SD card), where erased files and folders go.
+// BYTE param1 = 0 open it (W: Browse Games then lists it), 2 leave it (Browse Games has the
+// folder it had before W again)
+// WORD param2 = where the pico writes why not. Status 0 done, 1 not
+// (ACTION_SNAP_LIST sets bit 1 of SNAPLIST_HASPARENT when the folder listed is in the Waste Bin)
+ACTION_WASTE_BIN equ 0x27
+// B in the Waste Bin: the pico asks "Are you sure ...?" and empties it on Y. It draws the screen
+// and takes the keys (picoscreen). BYTE param1 = the key (0: the screen is opened)
+// Status 0 the screen stays, 1 it is closed
+ACTION_BIN_EMPTY equ 0x28
+// G on the menu: the pico asks which category the screen grab is (1-5) and saves it in
+// Scraper/Screen Grabs (as ACTION_SCREEN_GRAB), then says how it went. A screen the pico draws
+// and works (picoscreen). BYTE param1 = the key (0: opened). Status 0 stays, 1 closed
+ACTION_GRAB_MENU equ 0x29
+// S on the menu: the save slots of the game being played, drawn by the pico (picoscreen).
+// BYTE param1 = the key (0: opened). Status 0 stays, 1 closed, 2 the Save snapshot screen
+// instead, 3 save to the slot chosen (the snapshot, then ACTION_SNA_SAVE with param3 = 3)
+ACTION_SLOTS equ 0x2A
+// A game with save slots chosen in Browse Games: "carry on from a slot?" (picoscreen).
+// BYTE param1 = the key (0: chosen; WORD param2 = the name in the list, BYTE param4 = the
+// drive). Status 0 stays, 1 load it as chosen, 2 the game or a slot is ready (load with no
+// name), 3 back to the list
+ACTION_SLOT_ASK equ 0x2B
+// O in Tools: the settings of Picomenu.ini and the screen grab order, drawn by the pico
+// (picoscreen). BYTE param1 = the key (0: opened). Status 0 stays, 1 closed
+ACTION_OPTIONS equ 0x2C
+// C in Tools: choose a folder for the batch converter (picoscreen). BYTE param1 = the key
+// (0 or 1: opened; 1 the Spectrum can page memory, so Auto tries a 128K first). Status 0 stays, 1 closed, 3 convert: the ROM then shows the game information
+// in mode 3 (showgameinfo), where the pico runs the tapes one after another (op 6)
+ACTION_BATCH equ 0x2D
+// Saves the game's screen (the pico has it from when the menu opened) in the folder
+// Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
+// BYTE param2 = the category: 0 Standard Screen Number (<game>.scr, <game>1.scr ...: a double
+//               press), 1 Loading Screen, 2 Menu Screen, 3 Game Screen, 4 Ending Screen
 // Status: 0 saved, 1 no SD card (or the PC has it), 2 could not save, 3 too many grabs
 // of the game, 4 no screen to save
 
@@ -350,11 +403,29 @@ INFO_ATTR equ 0b01000110           // the instruction lines: bright yellow on bl
 
 // Menu colours: the key letter of each option and the option's text
 KEY_ATTR equ 0b01000010         // bright red ink, black paper
+DIM_ATTR equ 0b01000001         // a hidden file or folder in Browse Games: bright blue ink, black paper
+LIST_ATTR equ 0b00000111        // the others: white ink, black paper
 OPTION_ATTR equ 0b01000100      // bright green ink, black paper
+MOVE_INFO equ 1024          // where in spare_space the move description goes (a list is under 600 bytes)
+
+// spare_space: the last 1792 bytes of the 16K, a work area for lists, messages and the
+// transfers to and from the pico (nothing in it is kept between uses). Fixed, so that
+// the free bytes are between the end of the code and it (ROM_FREE, at the end).
+// The screen goes to and from the pico in pieces of SCREEN_PIECE bytes (at
+// spare_space + MOVE_INFO, above a list), snapshots are loaded LOAD_BLOCK bytes at a
+// time, and sendsnapshottopico sends the memory after the screen in SNAP_SEND_BLOCKS
+// pieces of SNAP_SEND_BLOCK bytes, each copied through spare_space.
+SCREEN_PIECE equ 768           // 9 pieces (1152 in Rev 1.9 needed 384 bytes more)
+LOAD_BLOCK equ 1024
+SNAP_SEND_BLOCK equ 1760
+SNAP_SEND_BLOCKS equ (49152 - 6912) / SNAP_SEND_BLOCK
+spare_size equ MOVE_INFO + SCREEN_PIECE
+SPARE_SPACE equ 0x4000 - spare_size
+spare_space equ SPARE_SPACE
+
 // the Reload item of the menu scrolls a long name, see startmenu.scrollidle
 // the 28 letters of it shown now: in spare_space, which nothing uses while the top menu waits for a key
-SCROLL_WINDOW equ 0x3C00
-    ASSERT SCROLL_WINDOW + SCROLL_WIDTH + 1 <= 0x3D00
+SCROLL_WINDOW equ spare_space + 768
 SCROLL_ROW equ 6
 SCROLL_COL equ 4
 SCROLL_WIDTH equ 28
@@ -368,7 +439,6 @@ BANNER_ATTR equ 0b01001111      // the bars across the screens: bright white on 
 TITLE_ATTR equ 0b01001100       // the PICOFACE title on row 0: bright green on blue
 
 FOLDER_MAXLEN equ 28
-MOVE_INFO equ 1024          // where in spare_space the move description goes (a list is under 600 bytes)
 
 // The names in the Load snapshot list are shown NAME_WINDOW characters at a
 // time from column 4, with the extension in its own column (28-31). Longer
@@ -388,7 +458,7 @@ PICTURE_DELAY equ 5000
 // INFO_HOUSE_WIDTH letters at row INFO_HOUSE_ROW, column INFO_HOUSE_COL; a longer one scrolls
 // there as the Reload item does. In spare_space above a list page (at most about 860 bytes)
 // and below MOVE_INFO, where the screen comes through (see the ASSERTs at the end).
-INFO_HOUSE equ 0x3B10
+INFO_HOUSE equ spare_space + 880
 INFO_HOUSE_SIZE equ 64
 INFO_HOUSE_WIDTH equ 15
 INFO_HOUSE_ROW equ 1
@@ -495,10 +565,6 @@ nmientry:
     and 0x7
     ld (sna_on_entry + SNAHEADER.BORD), a    
 
-
-    ld (sna_on_entry + SNAHEADER.IX), IX
-    ld (sna_on_entry + SNAHEADER.IY), IY
-
     xor a
     ld (iff2save), a
     ld (sna_on_entry + SNAHEADER.IFF2), a
@@ -549,16 +615,19 @@ nmientry:
     call quickgrab
     jr .exitnoscreenrestore     // the screen was not touched
 
-1:  call startmenu
+1:  call ayswap               // the sound chip quiet while the menu is up
+    ld (menusp), sp           // T in Browse Games leaves from deep in the menus to here
+    call startmenu
 
 .exittopscreen
+    call ayswap               // and the game's sound back
     call screenfrompico
 
 .exitnoscreenrestore
     pop ix, hl, de, bc
 
     ld a, (iff2save)
-    cp 0
+    or a
     jr nz, .exitwithei
     pop af
     ld sp, (sna_on_entry + SNAHEADER.SP)
@@ -573,6 +642,30 @@ exitnmi:
 
 iff2save:
     .byte 0
+
+// The volumes of the sound chip's three channels (registers 8-10) and ayvols swapped: as the
+// menu opens the game's are kept and 0 written (ayvols starts at 0: the ROM is unpacked afresh
+// at each NMI), and as it closes they are written back. A held note of a 128K game would
+// otherwise sound all the time the menu is up. On a 48K Spectrum it does nothing. The pico puts
+// ayvols in a 128K snapshot saved from the menu (the chip says 0 then).
+ayswap:
+    ld hl, ayvols + 2
+    ld e, 10
+1:  ld bc, 0xfffd
+    out (c), e
+    in a, (c)
+    ld d, (hl)
+    ld (hl), a
+    ld b, 0xbf
+    out (c), d
+    dec hl
+    dec e
+    bit 3, e
+    jr nz, 1B
+    ret
+ayvols: BLOCK 3
+menusp:
+    .word 0
 
 ; start_up_action: BYTE 0    
 ; start_up_param1: WORD 0
@@ -604,16 +697,16 @@ quickgrab:
     ld ix, 0
     ld hl, spare_space
     ld (ix + 2), hl         // where the pico writes its message (not shown)
+    ld (ix + 4), 0          // Standard Screen Number: <game>.scr, <game>1.scr ...
     ld (ix + 1), ACTION_SCREEN_GRAB
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     or a
     ld a, 4                 // green: saved
-    jr z, 2F
+    jr z, grabborder
     ld a, 2                 // red: not saved
-2:  out (0xfe), a
+// The border in colour a for a moment, then the game's again (also a menu grab: getkeypress)
+grabborder:
+    out (0xfe), a
     ld de, GRAB_FLASH
 3:  ld b, 0
 4:  djnz 4B
@@ -646,10 +739,7 @@ startupactionloadmemory:
     ld (ix + 4), de
     ld (ix + 6), bc
     ld (ix + 1), ACTION_READ_DATA_FROM_PICO
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B 
+    call waitpico
     ldir
 
     pop bc
@@ -673,10 +763,7 @@ startupactionloadmemory:
     ld (ix + 4), de
     ld (ix + 6), bc
     ld (ix + 1), ACTION_READ_DATA_FROM_PICO
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B 
+    call waitpico
     ldir
     ret
 
@@ -705,10 +792,7 @@ startupactionsavememory:
     ld (ix + 6), bc
     ld (ix + 1), ACTION_WRITE_DATA_TO_PICO
     ldir
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     pop bc
 
     ld a, b
@@ -729,11 +813,7 @@ startupactionsavememory:
     ld (ix + 6), bc
     ld (ix + 1), ACTION_WRITE_DATA_TO_PICO
     ldir
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ret
+    jp waitpico
 
 
 ; -------------------------------------------
@@ -742,6 +822,9 @@ startupactionsavememory:
 startmenu:
 
 .showtopscreen
+    ld a, (.intools)
+    or a
+    jp nz, .showtools
     call .scrollinit
     ld hl, .startmenu_def
     call showmenu
@@ -866,11 +949,30 @@ startmenu:
 .scrolllen BYTE 0
 .scrolltimer WORD 0
 
+// S: the save slots (the pico draws them); S there, or no slots, is the Save snapshot screen
 .handle_save:
+    ld c, ACTION_SLOTS
+    xor a
+    call picoscreen
+    cp 3
+    jr z, .slotsave
+    cp 2
+    jp nz, .showtopscreen
     call savesnapshotscreen
-    cp 0
+    or a
     jp nz, .showtopscreen
     ret
+.slotsave
+    call savesnapshot
+    ld ix, 0
+    ld (ix + 5), 3          // a save slot: the pico has the name
+    ld (ix + 1), ACTION_SNA_SAVE
+    call waitpico
+    or a
+    ret z                   // saved: back to the game
+    ld hl, savesnapshotscreen.saveerror
+    call loadscreen.message
+    jp .showtopscreen
 
 .handle_exit:
     ret
@@ -881,7 +983,7 @@ startmenu:
     ld a, 1
     ld (savesnapshotscreen.quick), a
     call savesnapshotscreen
-    cp 0
+    or a
     jp nz, .showtopscreen
     ret
 
@@ -903,7 +1005,7 @@ startmenu:
     ld ix, 0
     ld (ix + 2), a
     ld (ix + 1), ACTION_PREPARE_LOAD
-    call loadscreen.waitpico
+    call waitpico
     or a
     ret
 
@@ -916,41 +1018,21 @@ startmenu:
 // T: reset the Spectrum into a diagnostic ROM kept on the flash: testrom.rom (zx-diagnostics)
 // or DiagROM.rom (Phil Ruston's DiagROM), whichever is chosen first
 .handle_test:
-    call clearscreen
-    ld de, 0x0101
-    ld hl, .testchoosetitle
-    call putstring
-    ld de, 0x0301
-    ld hl, .testchoose
-    call putstring
-    ld de, 0x0501
-    ld hl, .testchoose1
-    call putstring
-    ld de, 0x0601
-    ld hl, .testchoose2
-    call putstring
-    ld de, 0x0801
-    ld hl, .testchoosex
-    call putstring
-.testchoosekey:
-    call waitforkeypress
-    ld c, 0
-    cp '1'
-    jr z, .testchosen
-    inc c
-    cp '2'
-    jr z, .testchosen
-    cp 'x'
-    jr z, .testchoosequit
-    cp 0x18
-    jr nz, .testchoosekey
-.testchoosequit:
-    call waitforkeyrelease
-    jp .showtopscreen
-.testchosen:
-    ld a, c
+    ld hl, .testmenu_def
+    call showmenu
+    ld hl, .testmenu_def
+    ld de, 0
+    jp menuhandler_with_keydown_handler
+.testmenu_def:
+    MENU_ITEM 0, 1, 1, .testchoosetitle, 0
+    MENU_ITEM 0, 3, 1, .testchoose, 0
+    MENU_ITEM '1', 5, 1, .testchoose1, .testpick
+    MENU_ITEM '2', 6, 1, .testchoose2, .testpick
+    MENU_ITEM 'x', 8, 1, .backmsg, .showtopscreen
+    MENU_END
+.testpick:                  // a = '1' or '2'
+    sub '1'
     ld (.testwhich), a
-    call waitforkeyrelease
     call clearscreen
     ld de, 0x0101
     ld hl, .resettitle
@@ -1046,70 +1128,24 @@ startmenu:
     xor a
     ret
 
-// H: the help pages. The pico draws each page as a screen; N or SPACE goes to the
-// next, P to the previous, X, ENTER or BREAK back to the menu.
-.handle_help:
-    xor a
-    ld (.helppage), a
-.showhelp:
-    ld ix, 0
-    ld a, (.helppage)
-    ld (ix + 2), a
-    ld (ix + 1), ACTION_HELP_PAGE
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ld (.helppages), a
-    call previewfrompico
-.helpkey:
-    call waitforkeypress
-    push af
-    call waitforkeyrelease
-    pop af
-    ld hl, .helppage
-    cp 'n'
-    jr z, .helpnext
-    cp ' '
-    jr z, .helpnext
-    cp 8                    // CAPS SHIFT+8, cursor right
-    jr z, .helpnext
-    cp 'p'
-    jr z, .helpprev
-    cp 5                    // CAPS SHIFT+5, cursor left
-    jr z, .helpprev
-    cp 'd'                  // the Diagnostics page, the last one
-    jr z, .helpdiag
-    cp 'x'
-    jr z, .helpexit
-    cp 0x13                 // ENTER
-    jr z, .helpexit
-    cp 0x18                 // BREAK
-    jr z, .helpexit
-    jr .helpkey
-.helpnext:
-    ld a, (.helppages)
-    dec a
-    cp (hl)
-    jr z, .helpkey          // already on the last page
-    inc (hl)
-    jr .showhelp
-.helpprev:
-    ld a, (hl)
-    or a
-    jr z, .helpkey          // already on the first page
-    dec (hl)
-    jr .showhelp
-.helpdiag:
-    ld a, (.helppages)
-    dec a
-    ld (hl), a
-    jr .showhelp
+// back to the menu from a screen the pico drew (the game's screen again below the menu)
 .helpexit:
-    call screenfrompico     // the game's screen again under the menu
+    call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
-.helppage: BYTE 0
-.helppages: BYTE 0
+
+// V: the Virtual Tape Player (the tape position). The pico draws the screen and does what the keys say, until it
+// says the screen is closed
+.handle_tape:
+    ld c, ACTION_TAPE_POSITION
+.picoscreenexit:
+    xor a                   // the screen is opened
+    call picoscreen
+    jr .helpexit
+
+// O: Options, the pico draws it (as the tape player); D there shows the Diagnostics page
+.handle_options:
+    ld c, ACTION_OPTIONS
+    jr .picoscreenexit
 
 // C: set up the SD card. The pico draws it, and shows the same keys as the game information
 .handle_sdsetup:
@@ -1117,11 +1153,20 @@ startmenu:
     jr .infocall
 
 // I: the controls and instructions of the game last loaded
+// C in Tools: the batch converter. The folder is chosen (status 3: convert it), then the
+// game information screen in mode 3 runs the tapes
+.handle_batch:
+    call machine128         // a = 1 if it can page memory: opened with that (Auto makes 128K snapshots)
+    ld c, ACTION_BATCH
+    call picoscreen
+    cp 3
+    jr z, .infocall
+    jr .helpexit
 .handle_info:
     ld a, 1
 .infocall:
     call showgameinfo
-    call screenfrompico     // the game's screen again under the menu
+    call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
 
 // E: the last ten games loaded, 1 to 9 and 0 load one
@@ -1135,10 +1180,7 @@ startmenu:
     ld hl, spare_space
     ld (ix + 3), hl         // where the full names go
     ld (ix + 1), ACTION_RECENT_LIST
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     ld (.recentcount), a
     call previewfrompico
     call .recentscrollinit
@@ -1190,7 +1232,7 @@ startmenu:
     ld hl, .norecentmsg
     call loadscreen.message
 .recentexit:
-    call screenfrompico     // the game's screen again under the menu
+    call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
 // X: from the question which to view back to the list, from the list to the menu
 .recentback:
@@ -1207,10 +1249,7 @@ startmenu:
     add a, 2
     ld (ix + 2), a
     ld (ix + 1), ACTION_RECENT_LIST
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     xor a                   // the file just previewed
     call showgameinfo
     cp 0x13                 // ENTER
@@ -1362,7 +1401,7 @@ startmenu:
     cp 0x18                 // BREAK
     jr nz, .updatekey
 .updateexit:
-    call screenfrompico     // the game's screen again under the menu
+    call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
 .updatego:
     call clearscreen
@@ -1371,7 +1410,7 @@ startmenu:
     call putstring
     ld de, 0x0A01
     ld hl, .updatestep1
-    call putstring
+    call putline
     xor a
     call .updatebar
 .stageloop:
@@ -1388,7 +1427,7 @@ startmenu:
 .updateshowwhy:
     ld (.updatestatus), a
     call previewfrompico    // why not
-    jp .updatekey
+    jr .updatekey
 1:  ld de, 0x0A01
     ld hl, .updatestep2
     call putstring
@@ -1459,51 +1498,58 @@ startmenu:
     ld ix, 0
     ld (ix + 2), a
     ld (ix + 1), ACTION_UPDATE
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ret
+    jp waitpico
 .updatestatus: BYTE 0
 
-// G: saves the game's screen in the hidden Screen Grabs folder on the SD card
+// G: asks the category, then saves the game's screen in Scraper/Screen Grabs on the SD card
 .handle_grab:
-    ld ix, 0
-    ld hl, spare_space
-    ld (ix + 2), hl         // where the pico writes "Saved as <name>"
-    ld (ix + 1), ACTION_SCREEN_GRAB
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ld hl, spare_space
-    or a
-    jr z, 2F
-    ld hl, .grabnocard
-    dec a
-    jr z, 2F
-    ld hl, .grabtoomany
-    cp 2                    // status 3
-    jr z, 2F
-    ld hl, .grabnoscreen
-    cp 3                    // status 4
-    jr z, 2F
-    ld hl, .graberror
-2:  push hl
-    call clearscreen
-    pop hl
-    ld de, 0x0301
-    call putstring
-    ld de, 0x0501
-    ld hl, .grabanykey
-    call putstring
-    call waitforkeypress
-    call waitforkeyrelease
-    call screenfrompico     // the game's screen again under the menu
+    ld c, ACTION_GRAB_MENU  // the pico asks the category, saves and says how it went
+    xor a
+    call picoscreen
+    call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
 
 .handle_load:
     call loadscreen
+    jp .showtopscreen
+
+// W: Browse Games in the Waste Bin (the pico makes it if need be and goes into it)
+.handle_bin:
+    ld ix, 0
+    ld (ix + 2), 0
+    ld hl, spare_space + MOVE_INFO
+    ld (ix + 3), hl
+    ld (ix + 1), ACTION_WASTE_BIN
+    call waitpico
+    or a
+    jr z, 1F
+    ld hl, spare_space + MOVE_INFO
+    call loadscreen.message
+    jp .showtopscreen
+1:  ld a, 1                 // the SD card
+    ld (loadscreen.drive), a
+    xor a
+    ld (loadscreen.findtext), a
+    call loadscreen
+    ld ix, 0
+    ld (ix + 2), 2          // Browse Games goes back to the folder it had
+    ld (ix + 1), ACTION_WASTE_BIN
+    call waitpico
+    jp .showtopscreen
+
+.handle_tools:
+    ld a, 1
+    ld (.intools), a
+.showtools:
+    ld hl, .toolsmenu_def
+    call showmenu
+    ld hl, .toolsmenu_def
+    ld de, 0
+    jp menuhandler_with_keydown_handler
+
+.handle_toolsback:
+    xor a
+    ld (.intools), a
     jp .showtopscreen
 
 .handle_change_rom:
@@ -1515,38 +1561,54 @@ startmenu:
     jp .showtopscreen
 
 .startmenu_def:
-    MENU_ITEM 's', 3, 2, .savemsg, .handle_save
-    MENU_ITEM 'q', 4, 2, .quickmsg, .handle_quicksave
-    MENU_ITEM 'b', 5, 2, .loadmsg, .handle_load
+    MENU_ITEM 'b', 3, 2, .loadmsg, .handle_load
+    MENU_ITEM 's', 4, 2, .savemsg, .handle_save
+    MENU_ITEM 'q', 5, 2, .quickmsg, .handle_quicksave
     MENU_ITEM 'r', 6, 2, SCROLL_WINDOW, .handle_reload
     MENU_ITEM 'e', 7, 2, .recentmsg, .handle_recent
     MENU_ITEM 'c', 8, 2, .chamgemsg, .handle_change_rom
     MENU_ITEM 'p', 9, 2, .pokemsg, .handle_poke
     MENU_ITEM '4', 10, 2, .reset48menumsg, .handle_reset48
     MENU_ITEM '1', 11, 2, .reset128menumsg, .handle_reset128
-    MENU_ITEM 'h', 12, 2, .helpmsg, .handle_help
+    MENU_ITEM 'o', 12, 2, .optionsmsg, .handle_options
     MENU_ITEM 'i', 13, 2, .infomsg, .handle_info
     MENU_ITEM 'g', 14, 2, .grabmsg, .handle_grab
-    MENU_ITEM 'd', 15, 2, .sdsetupmsg, .handle_sdsetup
-    MENU_ITEM 'u', 16, 2, .updatemsg, .handle_update
-    MENU_ITEM 't', 17, 2, .testromshow, .handle_test
-    MENU_ITEM 'x', 18, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'v', 15, 2, .tapemsg, .handle_tape
+    MENU_ITEM 't', 16, 2, .toolsmsg, .handle_tools
+    MENU_ITEM 'x', 17, 2, .exitmsg,  .handle_exit
     MENU_END
+// T: Tools, the things used now and then. Each goes back to this menu when it is done
+// (.showtopscreen comes here while .intools is set); X goes back to the NMI menu.
+.toolsmenu_def:
+    MENU_ITEM 0, 1, 1, .toolsmsg, 0
+    MENU_ITEM 't', 3, 2, .testromshow, .handle_test
+    MENU_ITEM 'd', 4, 2, .sdsetupmsg, .handle_sdsetup
+    MENU_ITEM 'u', 5, 2, .updatemsg, .handle_update
+    MENU_ITEM 'w', 6, 2, .binmsg, .handle_bin
+    MENU_ITEM 'c', 7, 2, .batchmsg, .handle_batch
+    MENU_ITEM 'x', 9, 2, .backmsg, .handle_toolsback
+    MENU_END
+.toolsmsg: DZ "Tools"
+.backmsg: DZ "Back"
+.optionsmsg: DZ "Options"
+.batchmsg: DZ "Batch convert"
+.intools: BYTE 0
 .quickmsg: DZ "Quick save"
 .testromshow: DZ "Test ROM (diagnostics)"
+.tapemsg: DZ "Virtual Tape Player"
+.binmsg: DZ "Waste Bin"
 .testmsg: DZ "into the zx-diagnostics ROM?"
 .testmsg2: DZ "into the DiagROM?"
 .testchoosetitle: DZ "Test ROM"
 .testchoose: DZ "Which test ROM?"
-.testchoose1: DZ "1-zx-diagnostics (testrom)"
-.testchoose2: DZ "2-DiagROM (Phil Ruston)"
-.testchoosex: DZ "X-Back to the menu"
-.nodiagmsg: DZ "Save DiagROM.rom on the flash"
+.testchoose1: DZ "zx-diagnostics (testrom)"
+.testchoose2: DZ "DiagROM (Phil Ruston)"
+.nodiagmsg: DZ "DiagROM.rom: flash or SD /ROMS"
 .baddiagmsg: DZ "DiagROM.rom is too short"
 .testexit1: DZ "To exit the test ROM press"
 .testexit2: DZ "the NMI button, choose Change"
 .testexit3: DZ "ROM, then choose Internal Rom."
-.notestmsg: DZ "Save testrom.rom on the flash"
+.notestmsg: DZ "testrom.rom: flash or SD /ROMS"
 .badtestmsg: DZ "testrom.rom is too short"
 .reset48menumsg: DZ "Reset to 48K"
 .reset128menumsg: DZ "Reset to 128K"
@@ -1556,13 +1618,12 @@ startmenu:
 .reset128msg: DZ "into 128K mode (the menu)?"
 .resetlost: DZ "The running game is lost."
 .resetask: DZ "Y-Yes, reset it   N-No"
-.helpmsg: DZ "Help"
 .infomsg: DZ "Game Instructions"
 .recentmsg: DZ "Recently played"
 .updatemsg: DZ "Update PicoMenu"
 .sdsetupmsg: DZ "Set up SD card"
 .updatingmsg: DZ "Updating - do not switch off"
-.updatestep1: DZ "1 of 2  Copying the update  "
+.updatestep1: DZ "1 of 2  Copying the update"
 .updatestep2: DZ "2 of 2  Writing the PicoMenu"
 .updatedonemsg: DZ "Update complete"
 .updatedone2: DZ "Switch the Spectrum off"
@@ -1572,10 +1633,6 @@ startmenu:
 .updatefail3: DZ "copy the .uf2 to RPI-RP2."
 .norecentmsg: DZ "Cannot find that game"
 .grabmsg: DZ "Screen grab"
-.grabnocard: DZ "No SD card (or the PC has it)"
-.graberror: DZ "Could not save the grab"
-.grabtoomany: DZ "Too many grabs"
-.grabnoscreen: DZ "No screen to save"
 .grabanykey: DZ "Press any key"
 .savemsg: DZ "Save snapshot"
 .loadmsg: DZ "Browse Games"
@@ -1625,7 +1682,7 @@ showmenu:
     inc hl
     ld e, (hl)
     inc hl
-    cp 0
+    or a
     jr z, .dont_show_char
 
     
@@ -1759,7 +1816,7 @@ menuhandler_with_idle:
 // waitforkeypress, calling the idle routine while no key is down
 .waitforkey
     call getkeypress
-    cp 0
+    or a
     jr z, 1F
     cp 255
     ret nz
@@ -1789,7 +1846,7 @@ updatemenulist:
     add hl, bc
     inc de
     ld a, (de)
-    cp 0
+    or a
     jr z, .nomore
     res 7, (hl)
     jr 1F
@@ -1843,10 +1900,7 @@ changeromscreen:
     ld (.startpos), de
     ld hl, spare_space
     ld (ix + 4), hl
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B    
+    call waitpico
 
 
 .updatefromdata
@@ -1857,7 +1911,7 @@ changeromscreen:
     call showmenu
 .redisplay
     ld a, (.writable)
-    cp 0
+    or a
     jr z, 1F
     ld a, 'x'-' '
 1:  add ' '
@@ -1877,14 +1931,14 @@ changeromscreen:
     ld de, 10
     add hl, de
     ex hl, de
-    jp .fetchlist
+    jr .fetchlist
 
 .prevkeyhandler:
     ld hl, (.startpos)
     ld de, 10
     sub hl, de
     ex hl, de
-    jp .fetchlist
+    jr .fetchlist
 
 
 .romhandlerzero
@@ -1905,7 +1959,8 @@ changeromscreen:
     ex hl, de
     ld a, (.writable)
     call changerom
-    jr .redisplay
+    ld de, 0                // it came back (the other place's list asked for, or no such file):
+    jr .fetchlist           // the list again, from its start
 
 .writehandler:
     ld a, (.writable)
@@ -1917,7 +1972,7 @@ changeromscreen:
 .startpos WORD 0
 .titlemsg DZ "Change Rom"
 .snap0 BYTE 0
-.exit DZ "Exit"
+.exit equ startmenu.exitmsg         // the same text
 .next DZ "Next"
 .prev DZ "Previous"
 .writablemsg DZ "Writable [ ]"
@@ -1948,12 +2003,9 @@ changerom:
     ld (ix + 4), a
     ld (ix + 2), hl
     ld (ix + 1), ACTION_ROM_CHANGE
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
 
-    cp 0
+    or a
     ret nz
 
     // Use some self modifying code to jump to address zero
@@ -1992,7 +2044,7 @@ loadscreen:
     ld ix, 0
     ld (ix + 5), ACTION_SNA_SAVE_DIR_OP_BROWSE
     ld (ix + 1), ACTION_SNA_SAVE_DIR
-    call .waitpico
+    call waitpico
     ld (.drive), a
     ld hl, .choosetitle
 1:  ld (.menu + 3), hl
@@ -2029,11 +2081,38 @@ loadscreen:
 1:  ld (.menufind + 3), hl
     ld (.menufind + 5), de
 
-    // H (save here) when choosing where to save
+    // B: empty the Waste Bin, when the folder listed is in it
+    ld a, (spare_space + SNAPLIST_HASPARENT)
+    and 2
+    ld a, 'b'
+    jr nz, 1F
+    or 0x80
+1:  ld (.menubin), a
+    // H: save here when choosing where to save, else hide or show a file or folder (on the Find row)
+    ld a, (.choosing)
+    or a
+    ld hl, .saveheremsg
+    ld de, .herehandler
+    ld bc, KEY_ROW * 256 + 6
+    jr nz, 1F
+    ld hl, .hidemsg
+    ld de, .hidehandler
+    ld bc, (KEY_ROW + 3) * 256 + 14
+1:  ld (.menuhere + 3), hl
+    ld (.menuhere + 5), de
+    ld a, b
+    ld (.menuhere + 1), a
+    ld a, c
+    ld (.menuhere + 2), a
+    // in the Waste Bin (not choosing), B-Empty takes Hide's place
     ld a, (.choosing)
     or a
     ld a, 'h'
     jr nz, 1F
+    ld a, (spare_space + SNAPLIST_HASPARENT)
+    and 2
+    ld a, 'h'
+    jr z, 1F
     or 0x80
 1:  ld (.menuhere), a
     // V (view) except when choosing
@@ -2064,6 +2143,8 @@ loadscreen:
     ld (.menucancelmove), a
     ld a, 'a' | 0x80
     ld (.menufavourite), a
+    ld a, 't' | 0x80
+    ld (.menutapein), a
     ld hl, .movemsg
     ld (.menumove + 3), hl
     ld hl, .copymsg
@@ -2098,6 +2179,8 @@ loadscreen:
     ld (.menucopy), a
     ld a, 'a'
     ld (.menufavourite), a
+    ld a, 't'
+    ld (.menutapein), a
     jr .filekeysdone
 .movingkeys
     ld a, 'm'
@@ -2190,10 +2273,29 @@ loadscreen:
     ld b, a
     ld c, 0
 1:  push bc
+    call .entryattr
     call .drawname
+    xor a
+    ld (text_attr), a
     pop bc
     inc c
     djnz 1B
+    ret
+
+// c = the entry: text_attr dimmed if it is hidden (bit c of SNAPLIST_HIDDEN), else the usual
+.entryattr
+    ld hl, (spare_space + SNAPLIST_HIDDEN)
+    ld b, c
+    inc b
+    jr 2F
+1:  srl h
+    rr l
+2:  djnz 1B
+    bit 0, l
+    ld a, LIST_ATTR
+    jr z, 3F
+    ld a, DIM_ATTR
+3:  ld (text_attr), a
     ret
 
 // c = the entry to draw
@@ -2426,11 +2528,7 @@ loadscreen:
     ld (ix + 7), a
     xor a
     ld (.stopflag), a
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ret
+    jp waitpico
 
 .snaphandlerzero
     ld a, 9
@@ -2481,12 +2579,41 @@ loadscreen:
     inc hl
     ex de, hl               // hl the name again, de the next one (the flags are kept)
     jr nz, 3B
+    ld a, b
+    or c
+    jr z, .textfile         // a .txt: the pico shows it
     ld h, b
     ld l, c
     call .message
     jp .refresh
-4:  ld a, (.drive)
+4:  ld ix, 0                // a game with save slots asks which (the pico says)
+    ld (ix + 3), hl
+    ld a, (.drive)
+    ld (ix + 5), a
+    push hl
+    ld c, ACTION_SLOT_ASK
+    xor a
+    call picoscreen
+    pop hl
+    cp 2
+    jr c, 5F                // 1: load it as chosen
+    jp nz, .refresh         // 3: back to the list
+    ld hl, 0                // 2: what to load is ready in the pico
+5:  ld a, (.drive)
     jp loadsnapshot
+
+// hl = the .txt's name in the list. The pico draws its pages, every key goes to it until it
+// says the screen is closed; then the list again
+.textfile:
+    ld ix, 0
+    ld (ix + 3), hl         // the name and drive: the pico takes them with key 0 (opening it)
+    ld a, (.drive)
+    ld (ix + 5), a
+    ld c, ACTION_TEXT_FILE
+    xor a
+    call picoscreen
+    call screenbelowmenu    // the game's screen again below the menu
+    jp .refresh
 
 .uphandler:
     ld hl, .dotdot
@@ -2500,10 +2627,7 @@ loadscreen:
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 1), ACTION_SNAP_CHDIR
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     ld de, 0
     jp .fetchlist
 
@@ -2613,7 +2737,7 @@ loadscreen:
     call putattributes
     pop hl
     ld de, KEY_ROW * 256 + 1
-    jp putstring
+    jp putline
 
 // The names of the groups of keys, in yellow at the left of the key rows
 .grouplabels
@@ -2686,12 +2810,6 @@ loadscreen:
     jp waitforkeyrelease
 
 // Sends the request set up at ix and waits. Returns with the status in a.
-.waitpico
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
-    ret
 
 // Lists the same page again, after something has changed
 .refresh
@@ -2709,7 +2827,7 @@ loadscreen:
     ldir
     ld de, 0x0901
     ld hl, .findbusy
-    call putstring
+    call putline
     jp .sendfind
 
 // Makes a new folder in this one
@@ -2726,7 +2844,7 @@ loadscreen:
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 1), ACTION_SNAP_MKDIR
-    call .waitpico
+    call waitpico
     or a
     jr z, .refresh
     ld hl, .nameinuse
@@ -2809,7 +2927,7 @@ loadscreen:
 .movehandler:
     ld a, (.moving)
     cp 1
-    jp z, .movehere
+    jr z, .movehere
     ld a, 1
     ld hl, .movewhich
     jr 1F
@@ -2818,7 +2936,7 @@ loadscreen:
 .copyhandler:
     ld a, (.moving)
     cp 2
-    jp z, .movehere
+    jr z, .movehere
     ld a, 2
     ld hl, .copywhich
 1:  ld (.pickmode), a
@@ -2829,14 +2947,14 @@ loadscreen:
     xor a
     ld (.pickdirs), a
     pop af
-    jp c, .pickfailed
+    jr c, .pickfailed
     ld ix, 0
     ld (ix + 2), hl
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 5), ACTION_SNAP_MOVE_OP_PICK
     ld (ix + 1), ACTION_SNAP_MOVE
-    call .waitpico
+    call waitpico
     or a
     jp nz, .refresh
     ld a, (.pickmode)       // 1 moving, 2 copying
@@ -2853,7 +2971,7 @@ loadscreen:
     ld a, (.moving)
     ld (ix + 6), a          // 1 moving, 2 copying (for a folder)
     ld (ix + 1), ACTION_SNAP_MOVE
-    call .waitpico
+    call waitpico
     or a
     jr z, 1F
     cp FILEOP_IS_DIRECTORY  // a folder: type ok (as for erasing one)
@@ -2921,7 +3039,7 @@ loadscreen:
     ld (.movebar), a
     call .copybar           // a folder copy: the bar fills, BREAK stops it
     jr 4F
-3:  call .waitpico
+3:  call waitpico
 4:  or a
     jr nz, 1F
     ld (.moving), a         // done
@@ -2992,7 +3110,7 @@ loadscreen:
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_RENAME_OP_DESCRIBE
     ld (ix + 1), ACTION_SNAP_RENAME
-    call .waitpico
+    call waitpico
     or a
     jr z, 1F
     cp FILEOP_CANT_MOVE_FOLDER  // a folder of the Picoface's own: the pico wrote why
@@ -3022,7 +3140,7 @@ loadscreen:
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_RENAME_OP_DO
     ld (ix + 1), ACTION_SNAP_RENAME
-    call .waitpico
+    call waitpico
     or a
     jp z, .refresh
     ld hl, .nameinuse
@@ -3043,15 +3161,42 @@ loadscreen:
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 1), ACTION_SNAP_PREVIEW
-    call .waitpico          // whatever it found, the information is shown
-    xor a                   // the file just previewed
+    call waitpico          // whatever it found, the information is shown
+    cp 3                    // ... but V is only for games
+    jr nz, 2F
+    ld hl, .viewnotgame
+    call .message
+    jp .refresh
+2:  xor a                   // the file just previewed
     call showgameinfo
     cp 0x13                 // ENTER
     jr z, 1F
-    call screenfrompico     // the game's screen again under the menu
+    call screenbelowmenu    // the game's screen again below the menu
     jp .refresh             // the folder read again: C may have saved a .z80 in it
 1:  ld hl, (.picked)
     jp .loadfile            // (not a .rom, .pok or .scr)
+
+// T: put a tape in for the Spectrum's own ROMs (tape in) and go back to the program, where
+// LOAD "" or the 128's Tape Loader loads from it
+.tapeinhandler:
+    ld hl, .tapeinwhich
+    call .pickfile
+    jp c, .pickfailed
+    ld ix, 0
+    ld (ix + 2), hl
+    ld a, (.drive)
+    ld (ix + 4), a
+    ld hl, spare_space + MOVE_INFO
+    ld (ix + 5), hl
+    ld (ix + 1), ACTION_TAPE_INSERT
+    call waitpico
+    or a
+    jr z, 1F
+    ld hl, spare_space + MOVE_INFO      // why not
+    call .message
+    jp .refresh
+1:  ld sp, (menusp)                     // out of all the menus, as X from the top one
+    jp nmientry.exittopscreen
 
 // A: copy a file to the Favourites folder at the root of the card
 .favouritehandler:
@@ -3064,7 +3209,7 @@ loadscreen:
     ld (ix + 4), a
     ld (ix + 5), ACTION_SNAP_MOVE_OP_FAVOURITE
     ld (ix + 1), ACTION_SNAP_MOVE
-    call .waitpico
+    call waitpico
     ld hl, .favouritedone
     or a
     jr z, 1F
@@ -3097,7 +3242,7 @@ loadscreen:
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DESCRIBE
     ld (ix + 1), ACTION_SNAP_ERASE
-    call .waitpico
+    call waitpico
     cp FILEOP_IS_DIRECTORY
     jp z, .eraseprotected
     cp FILEOP_IS_ROM        // 6 to 10 are a ROM file or a protected folder
@@ -3142,7 +3287,7 @@ loadscreen:
     ld (ix + 4), a
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DO
     ld (ix + 1), ACTION_SNAP_ERASE
-    call .waitpico
+    call waitpico
     or a
     jp z, .refresh
     ld hl, .eraseerror
@@ -3164,7 +3309,6 @@ loadscreen:
     add hl, de
     ld (.textextra2), hl
     pop hl
-    jp .eraseconfirm
 .eraseconfirm:
     push hl
     ld hl, spare_space + MOVE_INFO      // the file's or folder's name, for the label
@@ -3207,7 +3351,7 @@ loadscreen:
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DO
     ld (ix + 1), ACTION_SNAP_ERASE
-    call .waitpico
+    call waitpico
     or a
     jp z, .refresh
     ld hl, .eraseerror
@@ -3227,7 +3371,7 @@ loadscreen:
     ld ix, 0
     ld (ix + 5), ACTION_SNAP_MOVE_OP_CANCEL
     ld (ix + 1), ACTION_SNAP_MOVE
-    call .waitpico
+    call waitpico
     xor a
     ld (.moving), a
     jp .updatefromdata
@@ -3244,10 +3388,7 @@ loadscreen:
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 1), ACTION_SNAP_FIND
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     ld de, 0
     jp .fetchlist
 
@@ -3267,13 +3408,12 @@ loadscreen:
 
 .sdcardhandler:
     ld a, 1
-    ld (.drive), a
-    ld de, 0
-    jp .fetchlist
+    jr 1F
 
 .intflashhandler:
     xor a
-    ld (.drive), a
+1:  ld (.drive), a
+.fetchfirst:
     ld de, 0
     jp .fetchlist
 
@@ -3282,6 +3422,39 @@ loadscreen:
     ld c, ACTION_SNA_SAVE_DIR_OP_CANCEL
     jr 1F
 // H: save snapshots in the folder being shown
+// B (in the Waste Bin): the pico asks whether to empty it, and does
+.emptyhandler:
+    ld c, ACTION_BIN_EMPTY
+    xor a
+    call picoscreen
+    call screenbelowmenu    // the game's screen again below the menu ("Press any key" went)
+    jr .fetchfirst
+
+// H (not choosing where to save): hide the file or folder picked, or show it again
+.hidehandler:
+    ld a, 1
+    ld (.pickdirs), a
+    ld hl, .hidewhich
+    call .pickfile
+    push af
+    xor a
+    ld (.pickdirs), a
+    pop af
+    jp c, .pickfailed
+    ld ix, 0
+    ld (ix + 2), hl
+    ld a, (.drive)
+    ld (ix + 4), a
+    ld hl, spare_space + MOVE_INFO
+    ld (ix + 5), hl
+    ld (ix + 1), ACTION_SNAP_HIDE
+    call waitpico
+    or a
+    jp z, .refresh
+    ld hl, spare_space + MOVE_INFO
+    call .message           // why not
+    jp .refresh
+
 .herehandler:
     ld c, ACTION_SNA_SAVE_DIR_OP_SET
 1:  ld a, (.choosing)
@@ -3294,7 +3467,7 @@ loadscreen:
     ld a, (.drive)
     ld (ix + 4), a
     ld (ix + 1), ACTION_SNA_SAVE_DIR
-    jp .waitpico
+    jp waitpico
 
 .drive BYTE 1                       // the SD card, unless there is none
 .startpos WORD 0
@@ -3304,7 +3477,7 @@ loadscreen:
 .scrolltimer WORD 0
 .namerow BYTE 0
 .nameext WORD 0
-.titlemsg DZ "Browse Games"
+.titlemsg equ startmenu.loadmsg         // the same text
 .info1 DZ "Number: open folder/load game"
 .labelfile DZ "File"
 .labelhere DZ "Here"
@@ -3316,22 +3489,25 @@ loadscreen:
 .info2 DZ "Letter: command"
 .choosetitle DZ "Save snapshots in..."
 .saveheremsg DZ "Save here"
+.hidemsg DZ "Hide/Unhide"
+.emptymsg DZ "Empty"
+.hidewhich DZ "Hide or show which? 1-0"
 .snap0 BYTE 0
-.exit DZ "Exit"
-.next DZ "Next"
+.exit equ startmenu.exitmsg         // the same text
+.next equ changeromscreen.next         // the same text
 .prev DZ "Prev"
 .sdcard DZ "SD Card"
 .intflash DZ "Internal Flash"
 .up DZ "Up"
 .dotdot DZ ".."
-.find DZ "Find"
+.find equ .labelfind         // the same text
 .clear DZ "Clear"
 .findtitle DZ "Find a game"
 .findlabel DZ "Name contains:"
 .findhelp1 DZ "ENTER to search, BREAK to exit"
 .findhelp2 DZ "Looks in this folder and below"
-.findbusy DZ "Searching...                  "
-.findstop DZ "Searching... BREAK to stop    "
+.findbusy DZ "Searching..."
+.findstop DZ "Searching... BREAK to stop"
 .stopflag BYTE 0
 .showinfo BYTE 0            // 2 while the file details are shown, else 0
 .showall BYTE 0             // 4 while L-All lists everything, else 0
@@ -3346,12 +3522,12 @@ loadscreen:
 .renametitle DZ "Rename"
 .renamelabel DZ "New name:"
 .renamehelp1 DZ "ENTER to rename, BREAK to exit"
-.renamewhich DZ "Rename which file/folder? 1-0 "
+.renamewhich DZ "Rename which file/folder? 1-0"
 .renameerror DZ "Could not rename it"
-.rename DZ "Rename"
+.rename equ .renametitle         // the same text
 .erase DZ "Erase"
-.erasewhich DZ "Erase which file/folder? 1-0   "
-.viewwhich DZ "View which game? 1-0          "
+.erasewhich DZ "Erase which file/folder? 1-0"
+.viewwhich DZ "View which game? 1-0"
 .viewmsg DZ "View"
 .infomsg DZ "Info"
 .allmsg DZ "All"
@@ -3371,6 +3547,7 @@ loadscreen:
 .textextra2 WORD 0
 .pickdirs BYTE 0
 .romnotice DZ "A ROM: use C-Change ROM"
+.viewnotgame DZ "Only .tap .tzx .sna .z80 .szx"
 .poknotice DZ "A poke list: use Poke, then L"
 .scrnotice DZ "A screen picture"
 .notgames BYTE "rom"
@@ -3379,6 +3556,10 @@ loadscreen:
     WORD .poknotice
     BYTE "scr"
     WORD .scrnotice
+    BYTE "txt"
+    WORD 0                  // a text file: shown (.textfile)
+    BYTE "ini"
+    WORD 0                  // Picomenu.ini: shown as text too
     BYTE 0
 
 // hl = a name (then its extension after the 0), de = three lower case letters: Z if the
@@ -3411,20 +3592,22 @@ loadscreen:
 .folderhelp2 DZ "It goes in this folder"
 .nameinuse DZ "That name is already in use"
 .foldererror DZ "Could not make that folder"
-.newfolder DZ "New folder"
+.newfolder equ .foldertitle         // the same text
 .movemsg DZ "Move"
 .moveheremsg DZ "Move here"
 .cancelmove DZ "Cancel"
-.movewhich DZ "Move which file/folder? 1-0   "
+.movewhich DZ "Move which file/folder? 1-0"
 .movetitle DZ "Move file"
 .copytitle DZ "Copy file"
 .copyask DZ "Y-Yes, copy it   N-No"
 .copyerror DZ "Could not copy the file"
-.favouritewhich DZ "Favourite which file? 1-0     "
-.favouritemsg DZ "Add fav"
+.favouritewhich DZ "Favourite which file? 1-0"
+.favouritemsg DZ "Fav"
+.tapeinmsg DZ "Tape"
+.tapeinwhich DZ "Put in which tape? 1-0"
 .favouritedone DZ "Copied to Favourites"
 .favouritethere DZ "It is in Favourites already"
-.copywhich DZ "Copy which file? 1-0          "
+.copywhich DZ "Copy which file? 1-0"
 .copymsg DZ "Copy"
 .copyheremsg DZ "Copy here"
 .pickmode BYTE 0
@@ -3433,7 +3616,7 @@ loadscreen:
 .moveask DZ "Y-Yes, move it   N-No"
 .movesame DZ "It is already in this folder"
 .moveerror DZ "Could not move the file"
-.anykey DZ "Press any key"
+.anykey equ startmenu.grabanykey         // the same text
 .moving BYTE 0                      // non-zero once a file to move is picked
 .inputmax BYTE 0
 .editbuf BLOCK FOLDER_MAXLEN + 1
@@ -3445,7 +3628,7 @@ loadscreen:
     // The key rows, in groups with a yellow name at the left (.grouplabels), keys from column 6:
     //   File   M-Move R-Rename E-Erase          (Here: M-Move here, Q-Cancel / H-Save here)
     //          C-Copy D-New folder
-    //   Game   O-Info V-View A-Add fav
+    //   Game   O-Info V-View A-Fav T-Tape
     //   Find   F-Find, or F-Clear and what is searched for
     //   Disk   S-SD Card I-Internal Flash   (the drive being browsed in white on blue)
     //   Go     U-Up P-Prev N-Next X-Exit
@@ -3478,8 +3661,12 @@ loadscreen:
     MENU_ITEM 'v', KEY_ROW + 2, 13, .viewmsg, .viewhandler
 .menufavourite
     MENU_ITEM 'a', KEY_ROW + 2, 20, .favouritemsg, .favouritehandler
+.menutapein
+    MENU_ITEM 't', KEY_ROW + 2, 26, .tapeinmsg, .tapeinhandler
 .menuhere
     MENU_ITEM 'h', KEY_ROW + 0, 6, .saveheremsg, .herehandler
+.menubin
+    MENU_ITEM 'b' | 0x80, KEY_ROW + 3, 14, .emptymsg, .emptyhandler
 .menuprev
     MENU_ITEM 'p', KEY_ROW + 5, 11, .prev, .prevkeyhandler
     MENU_ITEM 'n', KEY_ROW + 5, 18, .next, .nextkeyhandler
@@ -3504,8 +3691,8 @@ savesnapshotscreen:
 
     ld a, (sna_on_entry + SNAHEADER.BORD)
     ld (.bordercolour), a
-    xor a
-    ld (.savetype), a       // the type of file the machine would make
+    ld a, (.savedefault)    // save_type in Picomenu.ini (0, auto, without one)
+    ld (.savetype), a
 
     // start with the name of the game last loaded or saved, to save over it
     ld ix, 0
@@ -3513,7 +3700,7 @@ savesnapshotscreen:
     ld (ix + 2), hl
     ld (ix + 5), ACTION_SNA_SAVE_DIR_OP_LAST
     ld (ix + 1), ACTION_SNA_SAVE_DIR
-    call loadscreen.waitpico
+    call waitpico
     ld (.namelen), a
     ld (.overlast), a       // non-zero: it goes in that game's folder
 
@@ -3527,7 +3714,7 @@ savesnapshotscreen:
     ld (ix + 2), hl
     ld (ix + 5), ACTION_SNA_SAVE_DIR_OP_QUICK
     ld (ix + 1), ACTION_SNA_SAVE_DIR
-    call loadscreen.waitpico
+    call waitpico
     cp 254                  // (255 means the request is still being worked on)
     jr z, .nogame
     or a
@@ -3580,7 +3767,7 @@ savesnapshotscreen:
     ld (ix + 4), a
     ld (ix + 5), ACTION_SNA_SAVE_DIR_OP_DESCRIBE
     ld (ix + 1), ACTION_SNA_SAVE_DIR
-    call loadscreen.waitpico
+    call waitpico
     ld de, 0x0901
     ld hl, spare_space + MOVE_INFO
     call putstring
@@ -3603,7 +3790,7 @@ savesnapshotscreen:
     ld b, a
     ld de, 0x0401
     ld hl, .nametext
-    cp 0
+    or a
     jr z, 2F
 1:  
     ld a, (hl)
@@ -3635,7 +3822,7 @@ savesnapshotscreen:
     jp z, .backspace
 
     cp 31
-    jp nc, .handlecharkey
+    jr nc, .handlecharkey
 
     cp 0x9
     jp z, .choosefolder
@@ -3735,7 +3922,7 @@ savesnapshotscreen:
 
 .backspace
     ld a, (.namelen)
-    cp 0
+    or a
     jr z, .waitforkeyrelease
     call .newname
     dec a
@@ -3790,13 +3977,10 @@ savesnapshotscreen:
     ld (ix + 2), hl
     add hl, de
     ld (hl), 0
-    ld (ix), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     pop ix    
 
-    cp 0
+    or a
     ret z ; save was a success
     cp 1
     jr z, .prompttooverwrite
@@ -3824,9 +4008,9 @@ savesnapshotscreen:
     ld hl, overwritescreen.quickmenu_def
     call menukeyhandler
     ld a, 1
-    jp c, .saveit
+    jr c, .saveit
     inc a                   // 2: the next number
-    jp .saveit
+    jr .saveit
 
 .showbordername:
     ld a, (.bordercolour)
@@ -3860,6 +4044,7 @@ savesnapshotscreen:
 .namelen DB 1
 .overlast DB 0          // non-zero while the name is the last game's, unchanged
 .savetype DB 0          // ACTION_SNA_SAVE_TYPE_*
+.savedefault DB 0       // the type the screen starts on: the pico sets it as the menu opens
 .quick DB 0             // non-zero for a quick-save, set by the menu
 .saveto DB 0            // non-zero to redraw the Save to: line
     ASSERT ACTION_SNA_SAVE_NAME_MAX < 32 && ACTION_SNA_SAVE_NAME_MAX <= 30
@@ -3878,7 +4063,7 @@ savesnapshotscreen:
 .typesame DZ "Type: same"
 .savetolabel DZ "Save to:"
 .saveerror DZ "Could not save the snapshot"
-.namelabel DZ "Name:"
+.namelabel equ loadscreen.folderlabel         // the same text
 .borderlabel DZ "Border: "
 .border0 DZ "Black  "
 .border1 DZ "Blue   "
@@ -3932,7 +4117,7 @@ overwritescreen:
 
 show_char_at_end_of_string:
     ld a, (hl)
-    cp 0
+    or a
     jp z, putchar
 1:  inc hl
     inc e
@@ -3941,11 +4126,11 @@ show_char_at_end_of_string:
 
 show_caret:
     ld c, '_'
-    jp show_char_at_end_of_string
+    jr show_char_at_end_of_string
 
 hide_caret:
     ld c, ' '
-    jp show_char_at_end_of_string
+    jr show_char_at_end_of_string
 
 ; de screen position
 ; hl string pointer
@@ -3955,7 +4140,7 @@ append_edit_char:
     push bc
     ld c, 0
 1:  ld a, (hl)
-    cp 0
+    or a
     jr z, .foundend
     inc hl
     inc e
@@ -3978,12 +4163,12 @@ append_edit_char:
 ; hl string pointer
 delete_edit_char:
     ld a, (hl)
-    cp 0
+    or a
     ret z
 1:
     inc hl
     ld a, (hl)
-    cp 0
+    or a
     jr nz, 2F
     dec hl
     ld (hl), a
@@ -4002,7 +4187,7 @@ delete_edit_char:
 
 atoi:
     ld a, (hl)
-    cp 0
+    or a
     jr nz, 1F
     scf
     ret
@@ -4012,7 +4197,7 @@ atoi:
 
 1:
     ld a, (de)
-    cp 0
+    or a
     ret z   ; carry flag also is clear at this point
     sub '0'
 
@@ -4189,7 +4374,7 @@ pokescreen:
     jr c, .skippoke
     xor a
     or h
-    jp nz,.skippoke
+    jr nz,.skippoke
     ld c, l
     ld hl, .address_input
     call atoi
@@ -4216,7 +4401,7 @@ pokescreen:
     ld hl, spare_space
     ld (ix + 4), hl
     ld (ix + 1), ACTION_POKE_LIST
-    call loadscreen.waitpico
+    call waitpico
     or a
     jr z, .listgot
     ld hl, .nopoklist
@@ -4328,7 +4513,7 @@ pokescreen:
     ld hl, spare_space + MOVE_INFO
     ld (ix + 4), hl
     ld (ix + 1), ACTION_POKE_GET
-    call loadscreen.waitpico
+    call waitpico
     or a
     jp nz, .listshow
     ld a, (spare_space + MOVE_INFO + 1)
@@ -4611,8 +4796,8 @@ pokescreen:
 .title DZ "Apply Poke"
 .addressmsg: DZ "Address: "
 .valuemsg: DZ "Value: "
-.pokemsg: DZ "Poke"
-.exitmsg: DZ "Exit"
+.pokemsg equ startmenu.pokemsg         // the same text
+.exitmsg equ startmenu.exitmsg         // the same text
 
 
 
@@ -4743,11 +4928,11 @@ savesnapshot:
     ld hl, sna_on_entry
     ld (ix + 2), hl
     ld (ix + 1), ACTION_SNA_BEGIN_WRITE128
-    call save128_wait
+    call waitpico
 
     // bank 5 is the screen (the pico's copy) and the memory after it, bank 2 is next
     ld (ix + 1), ACTION_SNA_WRITE_SCREEN
-    call save128_wait
+    call waitpico
     ld hl, 0x4000 + 6912
     ld de, 0x4000 - 6912
     call save128_send
@@ -4773,15 +4958,16 @@ savesnapshot:
     djnz .banks
 
     ld (ix + 1), ACTION_SNA_END_WRITE128
-    call save128_wait
+    call waitpico
     ld a, (ix + 2)
     ld bc, 0x7ffd
     out (c), a
     pop ix
     ret
 
-// tell the Pico there is a request and wait for it to be dealt with
-save128_wait:
+// Asks the pico to do what (ix + 1) and the parameters say (ix is 0) and waits until it has:
+// byte 0 is 255 until then, and is the status after (in a, with nz as cp 255 leaves it).
+waitpico:
     ld (ix + 0), 255
 1:  ld a, (ix)
     cp 255
@@ -4809,7 +4995,7 @@ save128_send:
     ld (ix + 4), bc
     ld (ix + 1), ACTION_SNA_NEXT_WRITE
     ldir
-    call save128_wait
+    call waitpico
     pop de
     jr save128_send
 
@@ -4880,10 +5066,7 @@ showgameinfo:
     ld a, (.infokeyval)
     ld (ix + 6), a
     ld (ix + 1), ACTION_GAME_INFO
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     ld b, a
     and 15
     ld (.infopages), a      // the low four bits
@@ -5051,6 +5234,63 @@ screenfrompico:
     ld c, ACTION_SCREEN_RESTORE
     jr 1F
 // shows the screen that ACTION_SNAP_PREVIEW read
+// A screen the pico draws and works (tape position, a text file, emptying the Waste Bin):
+// c = the action, a = 0. Each key goes to it as param1 until it says the screen is closed
+// (status not 0). The params after param1 are left as the caller set them for the first call.
+picoscreen:
+    ld ix, 0
+    ld (ix + 2), a
+    ld (ix + 1), c
+    push bc
+    call waitpico
+    pop bc
+    or a
+    ret nz
+    push bc
+    call previewfrompico
+    call waitforkeypress
+    push af
+    call waitforkeyrelease
+    pop af
+    pop bc
+    jr picoscreen
+
+// Brings back only the game's screen below the menu (rows MENU_ROWS to 23), for going back
+// from a full screen (a preview, the game information, Help) to a menu: the menu is drawn over
+// the rest, and the whole screen brought back first showed the game for as long as the menu
+// took to come (a folder read again)
+BELOW_LEN equ (24 - MENU_ROWS) * 32
+screenbelowmenu:
+    push ix
+    ld ix, 0
+    ld de, spare_space + MOVE_INFO
+    ld (ix + 2), de
+    ld de, BELOW_LEN
+    ld (ix + 6), de
+    ld hl, SCREEN + 0x1000 + (MENU_ROWS - 16) * 32
+    ld b, 9                 // 8 lines of pixels, then the attributes
+.belowpiece
+    ld (ix + 1), ACTION_SCREEN_RESTORE
+    ld (ix + 4), hl
+    call waitpico
+    push bc
+    push hl
+    ex de, hl
+    ld hl, spare_space + MOVE_INFO
+    ld bc, BELOW_LEN
+    ldir
+    pop hl
+    pop bc
+    inc h                   // the next line of pixels
+    ld a, b
+    cp 2
+    jr nz, .belownext
+    ld hl, SCREEN_ATTRIB + MENU_ROWS * 32
+.belownext
+    djnz .belowpiece
+    pop ix
+    ret
+
 previewfrompico:
     ld c, ACTION_PREVIEW_READ
 1:  push ix
@@ -5071,10 +5311,10 @@ previewfrompico:
     cp ACTION_SCREEN_STASH
     jr nz, .fetch
     ldir                    // hl moves on to the next piece
-    call save128_wait
+    call waitpico
     jr .next
 .fetch
-    call save128_wait
+    call waitpico
     ex de, hl
     ldir
     ex de, hl               // hl is the next piece
@@ -5092,15 +5332,12 @@ sendsnapshottopico:
     ld hl, sna_on_entry
     ld (ix + 2), hl
     ld (ix + 1), ACTION_SNA_BEGIN_WRITE
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
 
 
     // the screen comes from the pico's copy
     ld (ix + 1), ACTION_SNA_WRITE_SCREEN
-    call save128_wait
+    call waitpico
 
     // the 42240 bytes after the screen go through spare_space, a piece at a time
     ld b, SNAP_SEND_BLOCKS
@@ -5114,10 +5351,7 @@ sendsnapshottopico:
     ld (ix + 4), bc
     ld (ix + 1), ACTION_SNA_NEXT_WRITE
     ldir
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     pop bc
     djnz .transfer
     pop ix
@@ -5134,10 +5368,7 @@ loadsnapshot:
     ld (ix + 4), a
     ld (ix + 5), hl
     ld (ix + 1), ACTION_BEGIN_SNAP_READ
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
 
     ld a, (ix + 2)
     cp 2
@@ -5170,10 +5401,7 @@ loadsnapshot:
     ld (ix + 2), hl
     ld (ix + 4), bc
     ld (ix + 1), ACTION_SNAP_READ_NEXT
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
 
     ldir
 
@@ -5243,10 +5471,7 @@ load_z80_snapshot:
     ld (ix + 2), hl
     ld (ix + 4), bc
     ld (ix + 1), ACTION_SNAP_READ_NEXT
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
 
     ldir
 
@@ -5264,7 +5489,7 @@ z80_registers:
     ld (exitnmi - 1), hl
 
     ld a, (sna_header + Z80HEADER.EI)
-    cp 0
+    or a
     jr z, .di
     ld a, 0xFB // opcode EI
     jr 1F
@@ -5341,10 +5566,7 @@ load_paged_snapshot:
     ld (ix + 2), hl
     ld (ix + 4), bc
     ld (ix + 1), ACTION_SNAP_READ_NEXT
-    ld (ix + 0), 255
-1:  ld a, (ix)
-    cp 255
-    jr z, 1B
+    call waitpico
     ldir
     pop bc
     djnz .chunk
@@ -5449,6 +5671,15 @@ putstring:
     jr 1B
 
 
+// putstring, then spaces to the end of the row (to blank what was there before)
+putline:
+    call putstring
+1:  bit 5, e                // e is the column: 32 is past the end
+    ret nz
+    ld c, ' '
+    call putchar
+    jr 1B
+
 putchar:
     push af, de, bc, hl
 
@@ -5497,6 +5728,7 @@ putchar:
     or 0x58
     ld d, a
     ld a, c
+    call themeattr
     ld (de), a
 
 2:  pop hl, bc, de, af
@@ -5506,12 +5738,47 @@ putchar:
 // the attribute putchar gives each character, 0 to leave the colour alone
 text_attr BYTE 0
 
+// a = a colour (attribute) as the theme shows it: with theme = light in Picomenu.ini a cell on
+// black paper gets white paper and an ink that shows on it; coloured paper stays (as the pico's
+// settings::theme_attr). Other registers are kept.
+themeattr:
+    push hl
+    push bc
+    ld c, a
+    ld a, (theme_light)
+    or a
+    jr z, 1F
+    ld a, c
+    and 0b00111000
+    jr nz, 1F               // coloured paper: as it is
+    ld a, c
+    and 7
+    ld hl, .inks
+    add a, l
+    ld l, a
+    jr nc, 2F
+    inc h
+2:  ld a, c
+    and 0b10000000          // flash stays; not bright, so all the paper is one white
+    or 0b00111000           // white paper
+    or (hl)
+    ld c, a
+1:  ld a, c
+    pop bc
+    pop hl
+    ret
+.inks BYTE 7, 1, 2, 3, 0, 1, 2, 0
+// 1 for the light theme: the pico sets it as the menu opens (and when Picomenu.ini is saved)
+theme_light BYTE 0
+menu_shot: BYTE 0          // set by the pico: send it the screen (getkeypress)
+
 
 // de holds the y, x position to reverse
 // b holds the count
 // a the value to set
 
 putattributes:
+    call themeattr
     ld hl, SCREEN_ATTRIB
     ld l, e
     ld e, 0
@@ -5568,7 +5835,8 @@ reverseattr:
 clearscreen:
     // Clear MENU_ROWS lines of attributes
     ld hl, SCREEN_ATTRIB
-    ld a, 0b000111  // black paper, white ink
+    ld a, 0b000111  // black paper, white ink (or as the theme shows it)
+    call themeattr
     ld (hl), a
     ld de, SCREEN_ATTRIB + 1
     ld bc, 32 * MENU_ROWS - 1
@@ -5755,17 +6023,24 @@ bigtitle:
 
 waitforkeypress:
     call getkeypress
-    cp 0
+    or a
     jr z, waitforkeypress
     cp 255
     jr z, waitforkeypress
+    // a second scan must agree: one that read the rows as a key went down could see SPACE
+    // without its CAPS SHIFT (BREAK) or a letter without SYMBOL SHIFT
+    push af
+    call getkeypress
+    pop bc
+    cp b
+    jr nz, waitforkeypress
     ret
 
 waitforkeyrelease:
     ld de, 1000
     call pause
     call getkeypress
-    cp 0
+    or a
     jr nz, waitforkeyrelease
     ld de, 100
     call pause
@@ -5782,7 +6057,16 @@ waitforkeyrelease:
 // 7FFF spc ss M N B
 
 getkeypress:
-    ld h, 0 // shift code
+    // a double press of the button while a menu is up: the pico sets menu_shot, the screen as
+    // it is goes to it (screentopico, which it then keeps apart from the game's), it saves it as
+    // a .png and answers with a border colour: green saved, red not
+    ld a, (menu_shot)
+    or a
+    jr z, 1F
+    call screentopico
+    ld a, (0)
+    call grabborder
+1:  ld h, 0 // shift code
     ld l, 0 // key index press
     ld e, 0 // current key index
 
@@ -6020,12 +6304,11 @@ stack_top:
 // more fields
 sna_header: BLOCK Z80X_SIZE
 
-spare_size: equ 0x4000 - $
+// What is left of the 16K before spare_space (see SPARE_SPACE at the top)
+ROM_FREE equ SPARE_SPACE - $
+    DISPLAY "NMI ROM: ", /D, ROM_FREE, " bytes free"
+    ASSERT $ <= SPARE_SPACE
 
-// The screen goes to and from the pico in pieces of SCREEN_PIECE bytes, and
-// snapshots are loaded LOAD_BLOCK bytes at a time, through spare_space.
-SCREEN_PIECE equ 1152          // 6 pieces (4 of 1728 needed 2752 bytes of spare_space with MOVE_INFO)
-LOAD_BLOCK equ 2048
     ASSERT spare_size >= MOVE_INFO + SCREEN_PIECE
     ASSERT SCREEN_PIECE * (6912 / SCREEN_PIECE) == 6912
     ASSERT spare_size >= SCREEN_PIECE
@@ -6035,11 +6318,8 @@ LOAD_BLOCK equ 2048
     ASSERT spare_space <= 0x3D00
     ASSERT INFO_HOUSE >= spare_space + 880
     ASSERT INFO_HOUSE + INFO_HOUSE_SIZE <= spare_space + MOVE_INFO
-
-// sendsnapshottopico sends the memory after the screen in SNAP_SEND_BLOCKS
-// pieces of SNAP_SEND_BLOCK bytes, each copied through spare_space.
-SNAP_SEND_BLOCK equ 2112
-SNAP_SEND_BLOCKS equ (49152 - 6912) / SNAP_SEND_BLOCK
+    ASSERT SCROLL_WINDOW >= spare_space + RECENT_SLOT * 10
+    ASSERT SCROLL_WINDOW + SCROLL_WIDTH + 1 <= INFO_HOUSE
     ASSERT SNAP_SEND_BLOCK * SNAP_SEND_BLOCKS == 49152 - 6912
     ASSERT spare_size >= SNAP_SEND_BLOCK
     // save128_send copies up to 1024 bytes at a time through spare_space
@@ -6049,7 +6329,3 @@ SNAP_SEND_BLOCKS equ (49152 - 6912) / SNAP_SEND_BLOCK
     // the move, rename and erase descriptions, after the longest list
     ASSERT spare_size >= MOVE_INFO + 3 * SNAPLIST_PATH_SIZE
     ASSERT MOVE_INFO >= SNAPLIST_STRINGS + 10 * (SNAPLIST_NAME_MAX + 1 + 4 + 1 + 9)
-
-spare_space: BLOCK spare_space
-   
-

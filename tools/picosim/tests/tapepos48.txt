@@ -1,0 +1,98 @@
+# L on the menu: the tape position screen. With no tape it says so; with Gauntlet loaded
+# through the tape trap it lists the blocks (a header and its data on one line), marks the
+# next load, moves the tape with 1-0 and rewinds it with R.
+flash /48.rom {ROM48}
+sd /Games/Gauntlet.tap {TAPES}/Gauntlet_1986U.S._Gold48K-128K.tap
+boot
+nmi
+wait 30
+expect V-Virtual Tape Player
+key v
+wait 40
+expect No tape is being played.
+key x
+wait 30
+expect V-Virtual Tape Player
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 3000
+expecttape 8
+nmi
+wait 30
+key v
+wait 40
+expect Virtual Tape Player
+expect Gauntlet.tap
+expect 1  Program: GAUNTLET
+expect 5> Bytes: gauc1
+key n
+wait 30
+expect Bytes: gaun05
+key p
+wait 30
+key 7
+wait 40
+expect 7> Bytes: gaun01
+expect The next load starts at 7
+key r
+wait 40
+expect 1> Program: GAUNTLET
+expect Rewound to the start
+key 5
+wait 40
+key x
+wait 30
+key x
+wait 30
+# back in the game, which goes on to load gauc1 and gauc2 by name from where the tape is
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 1500
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 2000
+expecttape 12
+# E ejects the tape: the screen says so, and the file can now be erased (a tape being played
+# can't be: the file is open)
+nmi
+wait 30
+key v
+wait 40
+expect E-Eject
+key e
+wait 40
+expect The tape is out (ejected).
+key x
+wait 30
+expect V-Virtual Tape Player
+key v
+wait 40
+expect The tape is out (ejected).
+key x
+wait 30
+key b
+wait 50
+expect Gauntlet
+key e
+wait 20
+key 1
+wait 40
+expect Erase file
+key y
+wait 60
+expectnot Could not erase it
+expectnot Gauntlet
+ls sd /Games

@@ -1,0 +1,139 @@
+# Picomenu.ini (tests/settings-b.ini): Browse Games starts on the flash; L-All and O-Info are
+# as they were left ("last"); sorted by type; its [Screen grab order] (Game Screen only) is used,
+# not order.txt; edited on the Spectrum it is used at once (a bad line made good: Diagnostics);
+# Q over a save overwrites it with no question; with loading_grab = off C saves no screen.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/settings-b.ini
+sd /Games/a.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/b.sna {OUT}/dummy.scr
+sd /Games/c.tap {OUT}/dummy.scr
+sd /Games/g.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Scraper/Screen Grabs/order.txt {HERE}/grab-order.txt
+sd /Scraper/Screen Grabs/a Game Screen.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/a Game Screen1.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/a Ending Screen.scr {OUT}/dummy.scr
+flash /f1.sna {OUT}/dummy.scr
+flash /readme.txt {HERE}/short.txt
+slice 2
+boot
+nmi
+wait 30
+key b
+wait 50
+expect Flash:/
+expect 1-f1
+expectnot readme
+expectnot Type Size Mode
+key l
+wait 50
+key o
+wait 50
+expect 2-readme          txt
+key x
+wait 30
+key x
+wait 50
+# opened again: L-All and O-Info as they were left
+nmi
+wait 30
+key b
+wait 50
+expect Flash:/
+expect 2-readme          txt
+expect Type Size Mode
+# Picomenu.ini in the root of the card (listed with L-All): view and edit it
+key s
+wait 50
+expect 3-Picomenu        ini
+key 3
+wait 50
+expect folders = firs
+key e
+wait 30
+key t
+wait 30
+key BREAK
+wait 40
+key y
+wait 30
+expect Saved
+expect folders = first
+key x
+wait 50
+key x
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect SD card: 8 settings read
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+key s
+wait 50
+key 1
+wait 50
+expect 1-b               sna
+expect 2-c               tap
+expect 3-g               tzx
+expect 4-a               z80
+# a's pictures: the two Game Screens only (order.txt would show the Ending Screen)
+key v
+wait 10
+key 4
+wait 50
+expect Pic 1/2
+key x
+wait 50
+# convert g.tzx: no loading screen is saved
+key v
+wait 10
+key 3
+wait 50
+key c
+wait 10
+key a
+wait 10
+expect S-Screen BREAK-Stop
+slice 0
+wait 1500
+expect Saved g.z80
+nofile sd /Scraper/Screen Grabs/g Loading Screen.scr
+nofile sd /Scraper/Screen Grabs/g.scr
+key x
+wait 50
+key x
+wait 50
+key x
+wait 50
+# load a and quick save twice: the second overwrites
+nmi
+wait 30
+key b
+wait 50
+key s
+wait 50
+expect SD:/Games
+expect 4-a               z80
+expect 5-g               z80
+key 4
+wait 100
+nmi
+wait 30
+key q
+wait 100
+key SPACE
+wait 50
+nmi
+wait 30
+key q
+wait 100
+expectnot Overwrite
+key SPACE
+wait 50
+get sd /Save Games/a Save Game.z80 {OUT}/q1.z80
+nofile sd /Save Games/a Save Game 2.z80

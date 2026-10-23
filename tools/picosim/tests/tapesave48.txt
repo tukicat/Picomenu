@@ -1,0 +1,120 @@
+# Recording (W on the tape position screen): the tape is named, then SAVE "c" CODE 30000,4 in
+# 48 BASIC goes into /Recordings/mytape.tap at once (header and data, as a .tap). E stops it; the
+# name is then refused as in use. The recording is put in with T and LOAD ""CODE gets the bytes
+# back.
+flash /48.rom {ROM48}
+boot
+nmi
+wait 30
+key v
+wait 40
+expect W-Record
+key w
+wait 30
+expect Record a new tape
+key m
+key y
+key t
+key a
+key p
+key e
+wait 20
+expect mytape_.tap
+key ENTER
+wait 40
+expect Recording
+expect Nothing saved on it yet
+key x
+wait 30
+key x
+wait 30
+# POKE 30000,85: SAVE "c" CODE 30000,4 (CODE: extended mode, then I)
+key o
+key 3
+key 0
+key 0
+key 0
+key 0
+key SYM+n
+key 8
+key 5
+key ENTER
+wait 30
+key s
+key SYM+p
+key c
+key SYM+p
+hold ^,$ 3
+wait 3
+key i
+key 3
+key 0
+key 0
+key 0
+key 0
+key SYM+n
+key 4
+key ENTER
+wait 50
+key a
+wait 200
+get sd /Recordings/mytape.tap {OUT}/mytape.tap
+nmi
+wait 30
+key v
+wait 40
+expect Recording
+expect Bytes: c
+key e
+wait 30
+expect Saved mytape.tap
+# the name is in use now
+key w
+wait 30
+key m
+key y
+key t
+key a
+key p
+key e
+key ENTER
+wait 30
+expect That name is already in use
+key BREAK
+wait 30
+key x
+wait 30
+key x
+wait 30
+# POKE 30000,0, put the recording in with T, LOAD ""CODE
+key o
+key 3
+key 0
+key 0
+key 0
+key 0
+key SYM+n
+key 0
+key ENTER
+wait 30
+expectmem 30000 0
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 50
+key j
+key SYM+p
+key SYM+p
+hold ^,$ 3
+wait 3
+key i
+key ENTER
+wait 200
+expectmem 30000 0x55
+expecttape 2

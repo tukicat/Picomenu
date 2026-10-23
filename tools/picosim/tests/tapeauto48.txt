@@ -1,0 +1,107 @@
+# Erasing, renaming or moving the tape being played (or a folder it is in) ejects it first,
+# instead of failing because its file is open
+flash /48.rom {ROM48}
+sd /Games/Gauntlet.tap {TAPES}/Gauntlet_1986U.S._Gold48K-128K.tap
+sd /Games/OutRun.tap {TAPES}/Out_Run_1987U.S._Gold48K-128K.tap
+sd /More/OutRun.tap {TAPES}/Out_Run_1987U.S._Gold48K-128K.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 3000
+expecttape 8
+# rename the tape, Gauntlet.tap, to Gauntletx.tap
+nmi
+wait 30
+key b
+wait 50
+key r
+wait 20
+key 1
+wait 40
+key x
+wait 6
+key ENTER
+wait 60
+expectnot Could not
+expect Gauntletx
+key x
+wait 30
+key v
+wait 40
+expect The tape is out (ejected).
+key x
+wait 30
+# play OutRun.tap, then erase it
+key b
+wait 50
+key 2
+wait 2600
+expecttape 14
+nmi
+wait 30
+key b
+wait 50
+key e
+wait 20
+key 2
+wait 40
+expect Erase file
+key y
+wait 60
+expectnot Could not erase it
+expectnot OutRun
+# play /More/OutRun.tap, then erase the folder /More (typing ok)
+key u
+wait 50
+key 2
+wait 50
+key 1
+wait 2600
+expecttape 20
+nmi
+wait 30
+key b
+wait 50
+key u
+wait 50
+expect More
+key e
+wait 20
+key 2
+wait 40
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 100
+expectnot Could not erase it
+expectnot More
+# play Gauntletx.tap, then move it from /Games to the root
+key 1
+wait 50
+key 1
+wait 3000
+expecttape 28
+nmi
+wait 30
+key b
+wait 50
+key m
+wait 20
+key 1
+wait 30
+key u
+wait 40
+key m
+wait 60
+key y
+wait 60
+expectnot Could not
+ls sd /
+ls sd /Games

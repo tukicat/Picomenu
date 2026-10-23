@@ -1,0 +1,70 @@
+# Picomenu.ini (tests/settings-a.ini): Browse Games starts in /Games with L-All and O-Info on,
+# Z to A with the folders last; a line it does not understand is shown on Diagnostics; Save
+# snapshot starts on .z80; Q over a save already there makes the next number with no question;
+# with waste_bin = off E erases for good (no Waste Bin is made).
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/settings-a.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/beta.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/Zed.sna {OUT}/dummy.scr
+sd /Games/Mid/a.sna {OUT}/dummy.scr
+sd /Games/note.txt {HERE}/short.txt
+boot
+nmi
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Picomenu.ini
+expect SD card: 1 not understood
+expect Line 8: sort2 = x
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+expect SD:/Games
+expect Type Size Mode
+expect 1-Zed             sna
+expect 2-note            txt
+expect 3-beta            z80
+expect 4-Alpha           z80
+expect 5-Mid/
+# erasing: for good
+key e
+wait 20
+key 3
+wait 40
+expect Y-Yes, erase it
+key y
+wait 60
+nofile sd /Games/beta.z80
+nofile sd /Waste Bin
+expect 3-Alpha
+# load Alpha, then the save screen starts on .z80
+key 3
+wait 100
+nmi
+wait 30
+key s
+wait 30
+expect Save slots: Alpha
+key s
+wait 30
+expect Type: .z80
+key BREAK
+wait 30
+key q
+wait 100
+key SPACE
+wait 50
+nmi
+wait 30
+key q
+wait 100
+key SPACE
+wait 50
+get sd /Save Games/Alpha Save Game.z80 {OUT}/s1.z80
+get sd /Save Games/Alpha Save Game 2.z80 {OUT}/s2.z80

@@ -1,4 +1,5 @@
-# 48K: S saves a screen, the loading screen is saved by itself, then BREAK: only the S one is kept
+# 48K: S saves a screen (Green Loading Screen), the loading screen is saved by itself (Green
+# Loading Screen1), then BREAK: only the S one is kept
 slice 2
 sd /48.rom {ROM48}
 sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
@@ -19,12 +20,14 @@ key a
 wait 10
 key s
 wait 2
-expect Screen saved: Green
+expect Saved: Green Loading Screen
 slice 50
 wait 150
-expect Loading screen saved: Green1
+expect Saved: Green Loading Screen1
 key x
 wait 20
 expect Stopped: only S screens kept
 ls sd /Scraper/Screen Grabs
+nofile sd /Scraper/Screen Grabs/Green Loading Screen1.scr
+get sd /Scraper/Screen Grabs/Green Loading Screen.scr {OUT}/greens.scr
 ls sd /Games

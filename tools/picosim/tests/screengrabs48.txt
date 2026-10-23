@@ -1,0 +1,137 @@
+# Screen grab categories. V shows a game's pictures category by category, in the order of
+# /Scraper/Screen Grabs/order (tests/grab-order.txt: Ending Screen, Standard Screen Number,
+# Loading Screen, From File; Menu Screen is a comment and Game Screen left out, so neither is
+# shown), and by number in each; one left in the old /Screen Grabs comes after the Standard ones.
+# From File is the snapshot's own screen. D deletes the one shown, the first, so they go in that
+# order (D does nothing on the file's own picture). Then G asks the category and saves in
+# /Scraper/Screen Grabs, the lowest number free; a double press saves as Standard Screen Number.
+sd /48.rom {ROM48}
+sd /Games/Green.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Scraper/Screen Grabs/order {HERE}/grab-order.txt
+sd /Scraper/Screen Grabs/Green Loading Screen1.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green1.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green Menu Screen.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green Ending Screen.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green Loading Screen.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green Game Screen.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Green Game Screen01.scr {OUT}/dummy.scr
+sd /Scraper/Screen Grabs/Greenish.scr {OUT}/dummy.scr
+sd /Screen Grabs/Green2.scr {OUT}/dummy.scr
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+expect Pic 1/7
+key d
+wait 10
+key y
+wait 30
+nofile sd /Scraper/Screen Grabs/Green Ending Screen.scr
+get sd /Scraper/Screen Grabs/Green.scr {OUT}/g.scr
+expect Pic 1/6
+key d
+wait 10
+key y
+wait 30
+nofile sd /Scraper/Screen Grabs/Green.scr
+get sd /Scraper/Screen Grabs/Green1.scr {OUT}/g.scr
+key d
+wait 10
+key y
+wait 30
+nofile sd /Scraper/Screen Grabs/Green1.scr
+get sd /Screen Grabs/Green2.scr {OUT}/g.scr
+key d
+wait 10
+key y
+wait 30
+nofile sd /Screen Grabs/Green2.scr
+get sd /Scraper/Screen Grabs/Green Loading Screen.scr {OUT}/g.scr
+key d
+wait 10
+key y
+wait 30
+nofile sd /Scraper/Screen Grabs/Green Loading Screen.scr
+get sd /Scraper/Screen Grabs/Green Loading Screen1.scr {OUT}/g.scr
+expect Pic 1/2
+key d
+wait 10
+key y
+wait 30
+nofile sd /Scraper/Screen Grabs/Green Loading Screen1.scr
+# only the snapshot's own screen is left: D does nothing to it, and nothing hidden is deleted
+expectnot Pic 1/
+expectnot No Picture
+key d
+wait 10
+key y
+wait 30
+expectnot No Picture
+get sd /Scraper/Screen Grabs/Green Menu Screen.scr {OUT}/g.scr
+get sd /Scraper/Screen Grabs/Green Game Screen.scr {OUT}/g.scr
+# not grabs of Green: a number with a 0 in front, and another name
+get sd /Scraper/Screen Grabs/Green Game Screen01.scr {OUT}/g.scr
+get sd /Scraper/Screen Grabs/Greenish.scr {OUT}/g.scr
+key x
+wait 30
+key x
+wait 30
+expect Browse Games
+# G: no game loaded, so the name is Screen
+key g
+wait 20
+expect Save it as:
+expect 3  Game Screen
+expect 5  Standard Screen Number
+key 3
+wait 30
+expect Saved as Screen Game Screen
+key a
+wait 30
+key g
+wait 20
+key 3
+wait 30
+expect Saved as Screen Game Screen1
+key a
+wait 30
+key g
+wait 20
+key 5
+wait 30
+expect Saved as Screen
+key a
+wait 30
+key g
+wait 20
+key 1
+wait 30
+expect Saved as Screen Loading Screen
+key a
+wait 30
+key g
+wait 20
+key BREAK
+wait 30
+expect Browse Games
+get sd /Scraper/Screen Grabs/Screen Game Screen.scr {OUT}/g.scr
+get sd /Scraper/Screen Grabs/Screen Game Screen1.scr {OUT}/g.scr
+get sd /Scraper/Screen Grabs/Screen.scr {OUT}/g.scr
+get sd /Scraper/Screen Grabs/Screen Loading Screen.scr {OUT}/g.scr
+nofile sd /Scraper/Screen Grabs/Screen Menu Screen.scr
+nofile sd /Screen Grabs/Screen.scr
+# a double press: Standard Screen Number, the lowest free (Screen.scr is taken)
+key x
+wait 30
+nmi2
+wait 100
+get sd /Scraper/Screen Grabs/Screen1.scr {OUT}/g.scr
+nofile sd /Screen Grabs/Screen1.scr

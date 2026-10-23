@@ -1,0 +1,75 @@
+# Recording on a 128K. The tape position screen of a tape put in with T (playing) offers W:
+# recording stops the playing (one at a time). Then a BASIC program saved from 128 BASIC
+# (10 PRINT 1: SAVE "b") is recorded as its header and data blocks.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 50
+nmi
+wait 30
+key v
+wait 40
+expect In with T
+expect W   record a new tape instead
+key w
+wait 30
+expect Record a new tape
+key p
+key r
+key o
+key g
+key ENTER
+wait 40
+expect Recording
+expectnot In with T
+key x
+wait 30
+key x
+wait 30
+# 128 BASIC
+key DOWN
+wait 10
+key ENTER
+wait 100
+key 1
+key 0
+key p
+key r
+key i
+key n
+key t
+key SPACE
+key 1
+key ENTER
+wait 30
+key s
+key a
+key v
+key e
+key SYM+p
+key b
+key SYM+p
+key ENTER
+wait 60
+key a
+wait 300
+get sd /Recordings/prog.tap {OUT}/prog.tap
+nmi
+wait 30
+key v
+wait 40
+expect Program: b
+key e
+wait 30
+expect Saved prog.tap
+key x
+wait 30

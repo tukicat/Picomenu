@@ -34,6 +34,16 @@ bool FileHandle::open(Drive drive, const char* filename, bool readOnly) {
     }
 }
 
+bool FileHandle::openAppend(Drive drive, const char* filename) {
+    this->drive = drive;
+    if (drive == Drive::EXTERNAL_SD_CARD) {
+        memset(&sdFile, 0, sizeof(sdFile));
+        return f_open(&sdFile, filename, FA_WRITE | FA_OPEN_APPEND) == FR_OK;
+    }
+    intFile = pico_open(filename, LFS_O_CREAT | LFS_O_APPEND | LFS_O_WRONLY);
+    return intFile >= 0;
+}
+
 bool FileHandle::open(const char* filename, bool readOnly) {
     if (strStartsWith(filename, "/sd")) {
         return open(Drive::EXTERNAL_SD_CARD, filename + 3, readOnly);
@@ -49,7 +59,14 @@ bool DirHandle::open(const char* path) {
         drive = Drive::EXTERNAL_SD_CARD;
         memset(&sdDir, 0, sizeof(sdDir));
         memset(&sdFileInfo, 0, sizeof(sdFileInfo));
-        return f_findfirst(&sdDir, &sdFileInfo, path + 3, "*") == FR_OK;
+        if (f_findfirst(&sdDir, &sdFileInfo, path + 3, "*") == FR_OK) {
+            return true;
+        }
+        // f_findfirst opens the folder, then reads its first entry: a read that fails (a card
+        // error) leaves it open, taking one of FatFs's 16 places for open files and folders, so
+        // it is closed here (a folder that never opened is not: f_closedir refuses it)
+        f_closedir(&sdDir);
+        return false;
     }
     else {
         drive = Drive::INTERNAL_FLASH;
@@ -69,7 +86,11 @@ bool DirHandle::open(const char* path) {
         if (ret == 0) {
             intInfo.name[0] = '\0';
         }
-        return ret >= 0;
+        if (ret < 0) {
+            pico_dir_close(intDir);     // (as above)
+            return false;
+        }
+        return true;
     }
 }
 
@@ -82,7 +103,11 @@ bool DirHandle::openSubdir(DirHandle& parent) {
         return false;
     }
     sdDir.pat = "*";
-    return f_findnext(&sdDir, &sdFileInfo) == FR_OK;
+    if (f_findnext(&sdDir, &sdFileInfo) != FR_OK) {
+        f_closedir(&sdDir);             // (as in open)
+        return false;
+    }
+    return true;
 }
 
 

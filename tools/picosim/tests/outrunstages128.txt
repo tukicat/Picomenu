@@ -1,0 +1,39 @@
+# Out Run (U.S. Gold, Speedlock 3, the a2 tape: 48K stages only) on a 128K Spectrum: C with
+# 4 - 48K makes a 48K .z80 that carries on with the tape. lock_48k = tapes (the default) locks
+# the 128 in 48K mode as it loads, as a 48K Spectrum: unlocked, the game found the 128's memory,
+# took the 48K stage for a 128K one, and crashed back to BASIC (the tape then read to its end
+# and round again). Pressing 1 loads stage 1 (two blocks) and the race starts. Needs the tape
+# in TAPEDIR.
+sd /48.rom {ROM48}
+sd /Games/OutRun.tzx {TAPES}/Out_Run_1987U.S._Gold48K-128Ka2SpeedLock_3.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key n
+wait 20
+key c
+wait 20
+expect Convert: A-Auto 4-48K 1-128K
+key 4
+wait 3000
+expect Saved OutRun.z80
+key x
+wait 30
+key x
+wait 30
+key b
+wait 50
+key 2
+wait 300
+key 1
+wait 1500
+expecttape 2
+expecttapemax 2

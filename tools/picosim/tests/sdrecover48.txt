@@ -1,0 +1,42 @@
+# (needs a folder: the root takes no place) The SD card going wrong, and put right when the menu opens (no power cycle): first 16
+# folders left open (FatFs has 16 places, so nothing more opens and folders look empty), then
+# the card no longer answering. Each time the card is mounted again; Diagnostics counts it.
+sd /48.rom {ROM48}
+sd /Games/Alpha.sna {OUT}/dummy.scr
+boot
+leak 16
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect 1-Alpha
+key x
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Mounts 1
+expect SD card: files left open
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+cardstuck
+nmi
+wait 30
+key b
+wait 50
+expect 1-Alpha
+key x
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Mounts 2
+expect SD card stopped answering

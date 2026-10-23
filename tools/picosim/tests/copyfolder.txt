@@ -1,0 +1,32 @@
+# C on a folder: Games (two files and a folder with a file in it) is copied into Other after
+# "ok" is typed. Making a folder on the card clears its first cluster; on a card with big
+# clusters (SIM_CARD=exfat32k) FatFs used to ask the small heap for 32 KB for that, which stops
+# a Pico (the simulator stops too: "PANIC: out of memory")
+flash /48.rom {ROM48}
+sd /Games/Green.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+sd /Games/Sub/Rasputin.z80 {TAPES}/Rasputin_1986FirebirdSoftLock-48.z80
+sd /Other/x.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key c
+wait 20
+key 1
+wait 30
+key 2
+wait 50
+key c
+wait 60
+key o
+wait 6
+key k
+wait 6
+key ENTER
+wait 300
+ls sd /Other
+ls sd /Other/Games
+ls sd /Other/Games/Sub
+expect Games/

@@ -1,0 +1,40 @@
+# A multi-load tape through the tape trap: Gauntlet's levels all load to 49152, so it is
+# not converted at once (a block loads over another) but loaded with the ROM trap. Its
+# loader jumps into LD-BYTES at 0x0562 (after the border and the return address), which
+# the hook handles. Then level 1 is loaded by name when a game starts.
+flash /48.rom {ROM48}
+sd /Games/Gauntlet.tap {TAPES}/Gauntlet_1986U.S._Gold48K-128K.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 3000
+# the BASIC, the main code and two more parts
+expecttape 8
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 1500
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 300
+hold SPACE 30
+wait 2000
+# gauc1 and gauc2, found by name through 0x0562
+expecttape 12
+hold 0 30
+wait 1500
+# level 1 (gaun01)
+expecttape 14
+shot {OUT}/gauntlet-level1.scr

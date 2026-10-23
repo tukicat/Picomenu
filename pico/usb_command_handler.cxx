@@ -576,7 +576,7 @@ void handleListFiles(const char* name, bool json=false) {
         }
     }
     else {
-       writer.printf("Failed to open directory %d\n", dir);
+       writer.printf("Failed to open directory %s\n", name);
     }
 
     if (json) {

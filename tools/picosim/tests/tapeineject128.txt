@@ -1,0 +1,52 @@
+# Tape in, then E (eject) on the tape position screen: the Pico stops watching, so the 128's
+# Tape Loader waits for a real tape (no takeover, nothing loaded). Reset into 128K keeps a tape
+# put in with T: put in again, 1 (reset) and the Tape Loader loads it.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 50
+nmi
+wait 30
+key v
+wait 40
+key e
+wait 30
+expect The tape is out
+key x
+wait 30
+key x
+wait 30
+key ENTER
+wait 300
+expectmem 30000 0
+expecttape 0
+# put it in again (Browse Games opens in /Tapes now) and reset into 128K from the menu: the
+# tape stays in
+nmi
+wait 30
+key b
+wait 50
+key t
+wait 20
+key 1
+wait 50
+nmi
+wait 30
+key 1
+wait 30
+expect The running game is lost
+key y
+wait 200
+key ENTER
+wait 300
+expectmem 30000 0x55
+expecttape 4

@@ -55,6 +55,12 @@ void no_screen_watch(void* state);         // stop looking for it
 uint8_t port_7ffd(void* state);
 const uint8_t* ay_registers(void* state);
 uint8_t ay_selected(void* state);
+// Where the tape has got to for a later load: the data blocks up to the last one loaded (so
+// the next load takes the one after), as the tape trap counts them (tape_done in picoface.cxx)
+uint32_t tape_position(void* state);
+// True if the conversion stopped with the tape still playing to no one (the rest of it is for
+// later: a multi-load game's next levels)
+bool stopped_early(void* state);
 
 }
 

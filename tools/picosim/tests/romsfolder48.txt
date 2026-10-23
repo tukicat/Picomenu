@@ -1,0 +1,83 @@
+# ROM files in the SD card's ROMS folder: C - Change ROM lists the flash's .rom files or (2-Show
+# SD card /ROMS) the folder's, T - Test ROM and the tape converter find testrom.rom and 48.rom
+# there, and Set up SD card makes the folder, hidden (L-All shows it)
+sd /ROMS/48.rom {ROM48}
+sd /ROMS/testrom.rom {ROM48}
+sd /ROMS/Other.rom {ROM48}
+sd /Mikie.tzx {TAPES}/Mikie_1985ImagineSpeedLock_1.tzx
+flash /Flashrom.rom {ROM48}
+hide /ROMS
+boot
+nmi
+wait 30
+key c
+wait 40
+expect 1-Internal Rom
+expect 2-Show SD card /ROMS
+expect 3-Flashrom
+expectnot Other
+key 2
+wait 40
+expect 2-Show internal flash
+expect 3-48
+expect 4-Other
+expect 5-testrom
+# (in order, not the card's)
+expectnot Flashrom
+key 2
+wait 40
+expect 3-Flashrom
+key 2
+wait 40
+expect 4-Other
+key x
+wait 30
+# the tape converter: 48.rom is only in /ROMS
+key b
+wait 50
+# hidden: L-All shows it
+expectnot ROMS/
+key l
+wait 50
+expect ROMS/
+key l
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key c
+wait 20
+expect Convert: A-Auto 4-48K 1-128K
+key 4
+wait 400
+expect Saved Mikie.z80
+key x
+wait 30
+key x
+wait 30
+# Set up SD card: ROMS/ (it is there already)
+key t
+wait 30
+key d
+wait 40
+expect ROMS/
+expect ROM images
+key x
+wait 30
+# T - Test ROM: testrom.rom from /ROMS (the question, not "testrom.rom: flash or SD /ROMS")
+key t
+wait 30
+key 1
+wait 30
+expect into the zx-diagnostics ROM?
+key n
+wait 30
+# 2: no DiagROM anywhere
+key t
+wait 30
+key 2
+wait 30
+key y
+wait 30
+expect DiagROM.rom: flash or SD /ROMS

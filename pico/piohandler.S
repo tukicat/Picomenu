@@ -40,6 +40,28 @@ r_nmi_rom_exit .req r9
 r_writable_from .req r10
 r_rom_data .req r11
 r_nmi_data .req r12
+// lr holds the shifted address of the tape-in fetch (TAPE_IN_ENTRY as an M1 read, as
+// r_nmi_rom_entry is), or 1 (never matches) when no tape is in. It is loaded from
+// rom_state.tape_entry at the start and each time the NMI ROM exits. piohandler never
+// returns and calls nothing, so lr is free.
+
+// Tape in (the Spectrum's own ROM loads, the Pico gives it the blocks): while the internal ROM
+// is serving and a tape is in, an M1 fetch at 0x0562 (in LD-BYTES, after its first 12 bytes)
+// makes the Pico serve rom_data, which holds the hook there (it starts with a NOP, served
+// as the NMI's first byte is, from a constant). It hands back to the internal ROM when the
+// hook's RET at TAPE_IN_EXIT is read. In the 128K editor ROM 0x0556-0x05A0 is text, so it is
+// never fetched as an instruction there. pico/picoface.cxx has the hook (TAPE_IN_HOOK).
+#define TAPE_IN_ENTRY 0x0562
+#define TAPE_IN_EXIT 0x0596
+#define TAPE_MBOX 0x3FF8
+
+// rom_state: +0 flags, +4 nmi_active, +8 writableStartAddress, +12 flags_on_nmi_exit,
+// +16 exit_after_nmi (r_nmi_exit after the NMI ROM exits: the hook's exit while it runs,
+// else 1), +20 tape_entry (lr), +24 tape_exit (the watched hook's last byte, shifted)
+// Two hooks can be watched, one at a time: loading (playing a tape put in with T: LD-BYTES at
+// 0x0562, which RETs at 0x0596) or saving (recording, W on the tape position screen: SA-BYTES
+// at 0x04C2, whose last byte 0x04E2 ends its JP to SA/LD-RET at 0x053F in the Spectrum's ROM).
+// In the 128K editor ROM 0x04B0-0x05A0 is all text, never fetched as an instruction.
 
 
 piohandler:
@@ -60,6 +82,8 @@ piohandler:
                             // something outside the address range we handle.
     ldr r_rom_addr, =rom_data
     mov r_rom_data, r_rom_addr
+    ldr r0, [r_rom_state, #20]
+    mov lr, r0                      // the tape-in fetch, or 1
 
     ldr r0, =(rom_data + 16384)
     mov r_nmi_data, r0
@@ -120,6 +144,8 @@ send_data:
     b main_loop
 
 exit_nmi:
+    cmp r_nmi_exit, r_nmi_rom_exit // the hook's RET (tape in), not the NMI ROM's exit?
+    bne exit_tape
     // leaving nmi rom now
     
     ldr r0, [r_rom_state, #12]     // read rom_state.flags_on_nmi_exit
@@ -130,9 +156,11 @@ exit_nmi:
     str r0, [r_rom_state, #0]      // restore the rom_state flags
     ldr r0, [r_rom_state, #8]      // read writableStartAddress in case we are now going to serve up a writable rom
     mov r_writable_from, r0        // and put into r_writable_from for later checks 
-    mov r0, #1                     // set r_nmi_exit to an invalid shifted address, because (addr << 18) is never going to
-                                   // equal 1. Therefore we have effectively disabled the nmi exit check from now on
-    mov r_nmi_exit, r1                       
+    ldr r0, [r_rom_state, #16]     // r_nmi_exit: the tape-in hook's exit if the NMI came while it ran (to load
+                                   // a block), else 1, an invalid shifted address: (addr << 18) never equals 1
+    mov r_nmi_exit, r0
+    ldr r0, [r_rom_state, #20]     // a tape may have been put in or taken out
+    mov lr, r0
     mov r_rom_addr, r_rom_data     // Restore the rom address to the normal rom, regardless of whether the rom is enabled or not
                                    
     mov r0, #0                     // And set a variable to say we aren't serving the nmi rom anymore
@@ -140,10 +168,48 @@ exit_nmi:
     b main_loop
 
 read_rom_disabled:
-    beq main_loop          // zero flag is set if nmi check is not required
+    beq tape_check         // zero flag is set if nmi check is not required
     cmp r2, r_nmi_rom_entry
-    bne main_loop          // If we aren't accessing the nmi_entry address then loop back 
-                           // otherwise activate the nmi rom
+    beq activate_nmi
+tape_check:
+    cmp r2, lr             // the tape-in fetch at 0x0562? (lr is 1 when no tape is in)
+    bne main_loop
+    // 14 cycles from point A to the NOP sent (activate_nmi: 14, one more than before)
+
+activate_tape:
+    mov r0, #0                                  // the hook starts with a NOP, served from a constant
+    str r0, [r_pio_base, #(PIO_TXF1_OFFSET) ]   // as the NMI's first byte is
+    mov r0, #1
+    str r0, [r_pio_base, #(PIO_TXF1_OFFSET) ]   // hold /CSROM: the Pico serves rom_data from now
+    ldr r3, [r_rom_state, #0]
+    orr r3, r0
+    str r3, [r_rom_state, #0]            // rom enabled (an NMI asked for meanwhile stays asked for)
+    str r0, [r_rom_state, #12]           // an NMI that loads a block comes back to the hook
+    ldr r0, =TAPE_MBOX
+    mov r_writable_from, r0              // the hook writes its mailbox
+    str r0, [r_rom_state, #8]
+    ldr r0, [r_rom_state, #24]           // the hook's last byte (shifted): its RET, or its JP to the ROM
+    mov r_nmi_exit, r0                   // hand back when it is read
+    str r0, [r_rom_state, #16]
+    mov r_rom_addr, r_rom_data
+    b main_loop
+
+exit_tape:
+    mov r0, #0
+    str r0, [r_pio_base, #(PIO_TXF1_OFFSET) ]   // release /CSROM: the internal ROM again
+    ldr r3, [r_rom_state, #0]
+    mov r0, #1
+    bic r3, r0
+    str r3, [r_rom_state, #0]            // rom disabled
+    mov r_nmi_exit, r0                   // no exit to look for
+    str r0, [r_rom_state, #16]
+    mov r0, #0
+    str r0, [r_rom_state, #12]           // an NMI from now returns to the internal ROM
+    mov r0, #1
+    lsl r0, r0, #15
+    mov r_writable_from, r0              // nothing writable
+    str r0, [r_rom_state, #8]
+    b main_loop
 
 activate_nmi:
     mov r0, #0                                  // always serve a NOP as first NMI instruction, this saves a read instruction
