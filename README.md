@@ -8,7 +8,7 @@ A big thanks to Brian Apps for creating the Picoface proof Of concept, without t
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
-![The NMI menu](images/1-nmi-menu.png =250x250)
+![The NMI menu](images/1-nmi-menu.png)
 
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
