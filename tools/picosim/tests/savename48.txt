@@ -1,0 +1,51 @@
+# Save snapshot with a name already used by a snapshot of another type: commando.z80 is there,
+# and commando saved as a .sna (auto, 48K) asks "Overwrite this file?" (it used to make a
+# commando.sna beside it). N keeps the .z80 and saves nothing; Y saves commando.sna and the
+# .z80 goes. A new name saves at once.
+flash /48.rom {ROM48}
+flash /commando.z80 {OUT}/dummy.scr
+boot
+nmi
+wait 30
+key s
+wait 30
+expect Save Snapshot
+key c
+key o
+key m
+key m
+key a
+key n
+key d
+key o
+key ENTER
+wait 100
+expect A file with this name exists
+expect Overwrite this file?
+key n
+wait 60
+nofile flash /commando.sna
+get flash /commando.z80 {OUT}/sn-kept.z80
+# back on the Save snapshot screen with the name: ENTER again, then Y
+expect commando_
+key ENTER
+wait 100
+expect Overwrite this file?
+key y
+wait 200
+get flash /commando.sna {OUT}/sn-new.sna
+nofile flash /commando.z80
+# a name not in use: no question
+nmi
+wait 30
+key s
+wait 30
+key f
+key r
+key e
+key s
+key h
+key ENTER
+wait 200
+expectnot Overwrite this file?
+get flash /fresh.sna {OUT}/sn-fresh.sna

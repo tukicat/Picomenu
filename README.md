@@ -2,9 +2,7 @@
 
 PicoMenu is a fork of [picoFace](https://github.com/) by Brian Apps: the hardware and the original firmware are his, and the menu and file features here are added on top. It keeps the GPL v3 licence (see `LICENSE` and `THIRD-PARTY-NOTICES.txt`). The picoFace is an inexpensive device for the ZX Spectrum that uses a Raspberry Pi Pico to provide Multiface style functionality.
 
-Picomenu has been built using Brian Apps original code, an AI (Claude) has then developed on this with my input. My main input to this project was to decide on functionality, layout, feature set and testing. 
-
-A big thanks to Brian Apps for creating the Picoface proof Of concept, without this Picomenu would not have been possible.
+Picomenu has been built using Brian Apps original code, an AI (Claude) has then developed on this with my input. My main input to this project was to decide on functionality, layout, feature set and testing.
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
@@ -34,10 +32,10 @@ Picomenu can be used to:
 | Key | Does |
 |---|---|
 | B | Browse Games (T puts a tape in for the Spectrum's own LOAD; O for info: Type, Size and Mode columns; H-Hide/Unhide hides a file or folder or shows it again (the SD card's hidden attribute, as Windows sets it; a littlefs attribute on the flash); L-All also lists the hidden ones, dimmed, and those always hidden because they can't be loaded: `Poke List`, `Tape Files`, `.scr` files and `.txt` files: a `.txt`'s number shows it a page at a time, and E edits it on the SD card, up to 3 KB with lines of 30 letters) |
-| S | Save slots: nine saves of the game being played in `/Save Games/<game>` on the SD card (1-9 save, L label, V view, E erase); S there is the Save snapshot screen (type auto, .sna, .z80, .szx, same) |
+| S | Save slots: nine saves of the game being played in `/Save Games/<game>` on the SD card (1-9 save, L label, V view, E erase); S there is the Save snapshot screen (type auto, .sna, .z80, .szx, same). On the Save snapshot screen a name already used by a snapshot of any type (`.sna`, `.z80`, `.szx`) asks to overwrite it first |
 | Q | Quick save: over the save slot used last, or (no slot used yet) as `<game> Save Game` in the `Save Games` folder of the SD card |
 | R | Reload last game (shows its name, scrolling a long one; remembered after power off) |
-| V | Virtual Tape Player: the blocks of the tape being played; 1-0 move to one, R rewind, E eject (or stop recording), W record a new tape into `/Recordings` |
+| V | Virtual Tape Player: the blocks of the tape being played; 1-0 move to one, R rewind, **L label a line** (up to 16 letters, shown in yellow in place of the block's kind, kept in `/Tape Files/<tape>.labels` and following the tape when it is renamed or moved), E eject (or stop recording), W record a new tape into `/Recordings` |
 | C | Change ROM: the `.rom` files in the root of the internal flash, or (2 - Show SD card /ROMS) those in the SD card's `ROMS` folder; 1 - Internal Rom goes back to the Spectrum's own ROM |
 | P | Poke (L for the game's `.pok` list) |
 | 4 / 1 | Reset into 48K / 128K |

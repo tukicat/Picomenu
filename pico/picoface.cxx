@@ -785,7 +785,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 2.0 (tapeloader v200)";
+static const char FIRMWARE_ID[] = "Rev 2.1.0 (tapeloader v210)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -968,6 +968,7 @@ static void tape_note_after_save(uint8_t drive, const char* snap);
 static void tape_note_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool keep);
 static void tape_notes_follow_folder(uint8_t drive, const char* from, const char* to, bool keep);
 static void tape_notes_retarget(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir);
+static void tape_labels_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir);
 
 void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt) {
     game_running = true;
@@ -2716,7 +2717,10 @@ void nmi_action_snap_erase() {
             } else {
                 status = fsops::remove_path(fsops::drive_of(drive), path) ? FILEOP_OK : FILEOP_FAILED;
                 LOG("Erase %s: %d\n", path, status);
-                if (status == FILEOP_OK) tape_note_follow(drive, path, drive, nullptr, false);
+                if (status == FILEOP_OK) {
+                    tape_note_follow(drive, path, drive, nullptr, false);
+                    tape_labels_follow(drive, path, drive, nullptr, false);     // a tape's labels (if it had any)
+                }
                 if (status != FILEOP_OK) {
                     set_last_error("Cannot erase", list_entry_name[i]);
                 }
@@ -2748,6 +2752,7 @@ void nmi_action_snap_erase() {
                     LOG("Erase directory %s: %d\n", path, ok);
                     if (ok) {
                         tape_notes_follow_folder(drive, path, nullptr, false);
+                        tape_labels_follow(drive, path, drive, nullptr, true);
                     } else {
                         set_last_error("Cannot erase", list_entry_name[i]);
                     }
@@ -3190,6 +3195,37 @@ static void slots_after_save(const char* game, int n, const char* name, const ch
     slots_write_last(game, n, slots_scan(game, e));
 }
 
+// A snapshot named name (tidied, no extension) in dir is there already as a .sna, .z80 or .szx:
+// a save of that name asks "Overwrite?" whatever the type it is saved as (Commando.z80 there,
+// saving Commando as a .sna). except: the extension not to count (nullptr: count them all).
+static const char* const SNAP_SAVE_EXTS[] = { "sna", "z80", "szx" };
+static bool snap_name_taken(uint8_t drive, const char* dir, const char* name, const char* except) {
+    for (const char* ext : SNAP_SAVE_EXTS) {
+        if (except != nullptr && strcasecmp(ext, except) == 0) continue;
+        int n = snprintf(grab_path, sizeof(grab_path), "%s/%s.%s", dir, name, ext);
+        if (n > 0 && n < (int) sizeof(grab_path) && fsops::kind(fsops::drive_of(drive), grab_path) == fsops::KIND_FILE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Overwriting (the user said yes): the snapshots of that name with the other extensions go,
+// with their tape notes, so the new one takes their place
+static void snap_name_clear_others(uint8_t drive, const char* dir, const char* name, const char* keep) {
+    walk_stop();
+    for (const char* ext : SNAP_SAVE_EXTS) {
+        if (strcasecmp(ext, keep) == 0) continue;
+        int n = snprintf(grab_path, sizeof(grab_path), "%s/%s.%s", dir, name, ext);
+        if (n <= 0 || n >= (int) sizeof(grab_path)) continue;
+        const Drive d = fsops::drive_of(drive);
+        if (fsops::kind(d, grab_path) == fsops::KIND_FILE && fsops::remove_path(d, grab_path)) {
+            LOG("Save: %s replaced\n", grab_path);
+            tape_note_follow(drive, grab_path, drive, nullptr, false);
+        }
+    }
+}
+
 // Saves the snapshot sent by the NMI rom (in snap_load_buffer) in the place
 
 // chosen with ACTION_SNA_SAVE_DIR, as a .sna file or a .z80 file.  Left to
@@ -3301,11 +3337,8 @@ void nmi_action_sna_save() {
     if (quick && overwrite == 0 && cfg.quick_save != settings::QUICK_ASK) {
         char probe[sizeof(name)];
         snprintf(probe, sizeof(probe), "%s", name);
-        if (tidy_new_name(probe)) {
-            snprintf(grab_path, sizeof(grab_path), "%s/%s.%s", dir, probe, extension);
-            if (fsops::kind(fsops::drive_of(drive), grab_path) != fsops::KIND_NONE) {
-                overwrite = cfg.quick_save == settings::QUICK_OVERWRITE ? 1 : 2;
-            }
+        if (tidy_new_name(probe) && snap_name_taken(drive, dir, probe, nullptr)) {
+            overwrite = cfg.quick_save == settings::QUICK_OVERWRITE ? 1 : 2;
         }
     }
     if (overwrite == 2) {
@@ -3322,8 +3355,7 @@ void nmi_action_sna_save() {
             if (!tidy_new_name(probe)) {
                 break;
             }
-            snprintf(grab_path, sizeof(grab_path), "%s/%s.%s", dir, probe, extension);
-            if (fsops::kind(fsops::drive_of(drive), grab_path) == fsops::KIND_NONE) {
+            if (!snap_name_taken(drive, dir, probe, nullptr)) {
                 snprintf(name, sizeof(name), "%s", numbered);
                 found = true;
             }
@@ -3332,6 +3364,21 @@ void nmi_action_sna_save() {
             set_last_error("Too many saves", name);
             nmi_rom_data[0] = FILEOP_FAILED;
             return;
+        }
+    }
+
+    // a snapshot of this name with another extension counts as the name being in use: asked
+    // first ("Overwrite?"), and replaced when the answer is yes (not for a slot: its own files)
+    if (!slot_save) {
+        char probe[sizeof(name)];
+        snprintf(probe, sizeof(probe), "%s", name);
+        if (tidy_new_name(probe)) {
+            if (overwrite == 0 && snap_name_taken(drive, dir, probe, extension)) {
+                LOG("Save: %s is there with another extension\n", probe);
+                nmi_rom_data[0] = FILEOP_NAME_IN_USE;
+                return;
+            }
+            if (overwrite != 0) snap_name_clear_others(drive, dir, probe, extension);
         }
     }
 
@@ -7448,6 +7495,7 @@ static const char* waste_bin_empty() {
     const char* why = nullptr;
     snprintf(path, sizeof(erase_path), "%s", WASTE_BIN);
     tape_notes_follow_folder(1, WASTE_BIN, nullptr, false);     // the tape notes of what is in it
+    tape_labels_follow(1, WASTE_BIN, 1, nullptr, true);         // and the labels of its tapes
     bool ok = fsops::kind(Drive::EXTERNAL_SD_CARD, WASTE_BIN) != fsops::KIND_DIR ||
         fsops::remove_tree(Drive::EXTERNAL_SD_CARD, path, sizeof(erase_path), find_dirs, 0, ERASE_MAX_DEPTH, scratch, sizeof(erase_scratch));
     LOG("Empty the Waste Bin: %d\n", ok);
@@ -8105,10 +8153,8 @@ static bool tape_note_old_path(const char* snap, char* out, size_t size) {
     return n > 0 && n < (int) size;
 }
 
-static void tape_note_write(uint8_t drive, const char* snap, uint8_t tdrive, const char* tpath, uint32_t block) {
-    char* path = tape_note_mem.path;
-    walk_stop();                                    // the list's memory is used
-    char* text = tape_note_text();
+// /Tape Files on the drive, made if it is not there. walk_stop() has been called.
+static void tape_files_dir(uint8_t drive) {
     const Drive d = fsops::drive_of(drive);
     if (fsops::kind(d, TAPE_NOTE_DIR) != fsops::KIND_DIR) {
         // FatFs clears the new folder's cluster: it is lent a part of the list's memory that
@@ -8122,6 +8168,14 @@ static void tape_note_write(uint8_t drive, const char* snap, uint8_t tdrive, con
         ff_pool_size = 0;
         LOG("Tape note: made %s on drive %d: %d\n", TAPE_NOTE_DIR, drive, made);
     }
+}
+
+static void tape_note_write(uint8_t drive, const char* snap, uint8_t tdrive, const char* tpath, uint32_t block) {
+    char* path = tape_note_mem.path;
+    walk_stop();                                    // the list's memory is used
+    char* text = tape_note_text();
+    const Drive d = fsops::drive_of(drive);
+    tape_files_dir(drive);
     if (!tape_note_path(snap, path, sizeof(tape_note_mem.path))) return;
     int n = snprintf(text, TAPE_NOTE_TEXT_MAX, "%s\r\ndrive %u\r\nblock %u\r\ntape %s\r\nsnap %s\r\n",
         TAPE_NOTE_TITLE, (unsigned) (tdrive == 1 ? 1 : 0), (unsigned) block, tpath, snap);
@@ -8298,10 +8352,197 @@ static void tape_notes_follow_folder(uint8_t drive, const char* from, const char
 // say a snapshot was taken on it (on either drive) now say where it is, so the snapshot still
 // goes on with the tape. For a file only a .tap or .tzx is looked for. The list's memory is free
 // (walk_stop has been called), and so is find_dirs[0].
+
+// ---- Tape labels: a short label for a line of the Virtual Tape Player (L there) ----
+// Kept in /Tape Files on the tape's own drive, as "<the tape's path, / as ~>.labels":
+//     PicoMenu tape labels
+//     tape /Games/OutRun.tzx
+//     <the line's first data block> <its label>
+// one line per label. They follow the tape (and its folder) when it is renamed, moved or put in
+// the Waste Bin (tape_notes_retarget), and go when it is erased for good. The file is read
+// and made in a part of snap_load_buffer nothing else uses while the tape player is up (past
+// the menu grab's screen).
+static const char TAPE_LABELS_EXT[] = ".labels";
+static const char TAPE_LABELS_TITLE[] = "PicoMenu tape labels";
+static const uint32_t TAPE_LABELS_OFFSET = 90112, TAPE_LABELS_MAX = 2048;
+static_assert(TAPE_LABELS_OFFSET >= 82944 + 6912 && TAPE_LABELS_OFFSET + 2 * TAPE_LABELS_MAX <= 98304,
+    "the labels between the menu grab and the Help text");
+static char* tape_labels_text() { return snap_load_buffer + TAPE_LABELS_OFFSET; }
+
+// The labels file of the tape tpath (a path on its drive), in tape_note_mem.path
+static bool tape_labels_path(const char* tpath) {
+    char* out = tape_note_mem.path;
+    const char* s = tpath[0] == '/' ? tpath + 1 : tpath;
+    int n = snprintf(out, sizeof(tape_note_mem.path), "%s/%s%s", TAPE_NOTE_DIR, s, TAPE_LABELS_EXT);
+    if (n <= 0 || n >= (int) sizeof(tape_note_mem.path)) return false;
+    char* name = out + sizeof(TAPE_NOTE_DIR);
+    for (char* c = name; *c != '\0'; c++) if (*c == '/') *c = '~';
+    return strlen(name) <= TAPE_NOTE_NAME_MAX;
+}
+
+// Reads the tape's labels file into tape_labels_text(): its length, 0 if it has none
+static uint32_t tape_labels_read(uint8_t drive, const char* tpath) {
+    char* text = tape_labels_text();
+    text[0] = '\0';
+    if (!tape_labels_path(tpath)) return 0;
+    FileHandle f;
+    if (!f.open(fsops::drive_of(drive), tape_note_mem.path, true)) return 0;
+    int n = f.read(text, TAPE_LABELS_MAX - 1);
+    f.close();
+    if (n <= 0 || strncmp(text, TAPE_LABELS_TITLE, sizeof(TAPE_LABELS_TITLE) - 1) != 0) {
+        text[0] = '\0';
+        return 0;
+    }
+    text[n] = '\0';
+    return (uint32_t) n;
+}
+
+// The label of the line whose first data block is 'block', from what tape_labels_read read
+static bool tape_label_of(uint32_t block, char* out, size_t size) {
+    for (const char* line = tape_labels_text(); *line != '\0'; ) {
+        size_t len = strcspn(line, "\r\n");
+        if (line[0] >= '0' && line[0] <= '9') {
+            char* after = nullptr;
+            unsigned long b = strtoul(line, &after, 10);
+            if (b == block && after != nullptr && *after == ' ' && after < line + len) {
+                size_t l = (size_t) (line + len - after - 1);
+                if (l >= size) l = size - 1;
+                memcpy(out, after + 1, l);
+                out[l] = '\0';
+                return l > 0;
+            }
+        }
+        line += len;
+        line += strspn(line, "\r\n");
+    }
+    return false;
+}
+
+// Writes the labels in text (lines "<block> <label>", nothing else) for the tape; none: the file goes
+static bool tape_labels_write(uint8_t drive, const char* tpath, const char* lines) {
+    walk_stop();
+    const Drive d = fsops::drive_of(drive);
+    if (lines[0] == '\0') {
+        if (tape_labels_path(tpath) && fsops::kind(d, tape_note_mem.path) == fsops::KIND_FILE) {
+            fsops::remove_path(d, tape_note_mem.path);
+        }
+        return true;
+    }
+    tape_files_dir(drive);
+    if (!tape_labels_path(tpath)) return false;
+    if (fsops::kind(d, tape_note_mem.path) == fsops::KIND_FILE) fsops::remove_path(d, tape_note_mem.path);
+    FileHandle f;
+    if (!f.open(d, tape_note_mem.path, false)) return false;
+    char head[BROWSE_PATH_MAX + 32];
+    int hn = snprintf(head, sizeof(head), "%s\r\ntape %s\r\n", TAPE_LABELS_TITLE, tpath);
+    bool ok = hn > 0 && hn < (int) sizeof(head) && f.write(head, (size_t) hn) == hn;
+    size_t ln = strlen(lines);
+    ok = ok && f.write(lines, ln) == (int) ln;
+    f.close();
+    return ok;
+}
+
+// The label lines of what tape_labels_read read (without the title and tape lines), with the
+// line for 'block' changed to label (removed if label is ""), into the second half of the space
+static const char* tape_labels_with(uint32_t block, const char* label) {
+    char* out = tape_labels_text() + TAPE_LABELS_MAX;
+    size_t used = 0;
+    bool done = false;
+    for (const char* line = tape_labels_text(); *line != '\0'; ) {
+        size_t len = strcspn(line, "\r\n");
+        if (line[0] >= '0' && line[0] <= '9') {
+            char* after = nullptr;
+            unsigned long b = strtoul(line, &after, 10);
+            if (b == block) {
+                if (label[0] != '\0' && !done) {
+                    int n = snprintf(out + used, TAPE_LABELS_MAX - used, "%lu %s\r\n", b, label);
+                    if (n > 0 && used + n < TAPE_LABELS_MAX) used += n;
+                }
+                done = true;
+            } else if (used + len + 3 < TAPE_LABELS_MAX) {
+                memcpy(out + used, line, len);
+                used += len;
+                out[used++] = '\r';
+                out[used++] = '\n';
+            }
+        }
+        line += len;
+        line += strspn(line, "\r\n");
+    }
+    if (!done && label[0] != '\0') {
+        int n = snprintf(out + used, TAPE_LABELS_MAX - used, "%lu %s\r\n", (unsigned long) block, label);
+        if (n > 0 && used + n < TAPE_LABELS_MAX) used += n;
+    }
+    out[used] = '\0';
+    return out;
+}
+
+// After a tape (or a folder of them, is_dir) was renamed, moved or put in the Waste Bin, or
+// erased (to == nullptr): its labels go the same way. The list's memory is free.
+static void tape_labels_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir) {
+    if (sna_in_buffer) return;          // a snapshot waiting to be saved fills the space the file is read in
+    walk_stop();
+    if (!is_dir) {
+        if (tape_labels_read(from_drive, from) == 0) return;
+        // the label lines start after the title and tape lines
+        const char* lines = tape_labels_text();
+        for (int skip = 0; skip < 2 && *lines != '\0'; skip++) {
+            lines += strcspn(lines, "\r\n");
+            lines += strspn(lines, "\r\n");
+        }
+        char* keep = tape_labels_text() + TAPE_LABELS_MAX;
+        snprintf(keep, TAPE_LABELS_MAX, "%s", lines);
+        tape_labels_write(from_drive, from, "");
+        if (to != nullptr) tape_labels_write(to_drive, to, keep);
+        LOG("Tape labels follow %s -> %s\n", from, to != nullptr ? to : "(erased)");
+        return;
+    }
+    // a folder: the labels files named after tapes in it, renamed (or removed) on that drive
+    const Drive d = fsops::drive_of(from_drive);
+    if (fsops::kind(d, TAPE_NOTE_DIR) != fsops::KIND_DIR) return;
+    char* prefix = tape_labels_text();
+    const char* f0 = from[0] == '/' ? from + 1 : from;
+    int pn = snprintf(prefix, 256, "%s/", f0);
+    if (pn <= 1 || pn >= 256) return;
+    for (char* c = prefix; *c != '\0'; c++) if (*c == '/') *c = '~';
+    char* names = list_pool;
+    size_t used = 0;
+    fsops::dir_open_path(d, TAPE_NOTE_DIR, dirpath_tape_notes, sizeof(dirpath_tape_notes));
+    DirHandle& dir = find_dirs[0];
+    if (!dir.open(dirpath_tape_notes)) return;
+    const size_t el = sizeof(TAPE_LABELS_EXT) - 1;
+    while (!dir.atEnd()) {
+        const char* name = dir.fileName();
+        size_t len = strlen(name);
+        if (!dir.isDirectory() && len > (size_t) pn + el && strncasecmp(name, prefix, pn) == 0 &&
+            strcasecmp(name + len - el, TAPE_LABELS_EXT) == 0 && used + len + 1 <= TAPE_NOTE_TEXT_AT) {
+            memcpy(names + used, name, len + 1);
+            used += len + 1;
+        }
+        if (!dir.next()) break;
+    }
+    dir.close();
+    char* tfrom = list_pool + sizeof(list_pool) - 2 * BROWSE_PATH_MAX;
+    char* tto = list_pool + sizeof(list_pool) - BROWSE_PATH_MAX;
+    for (size_t at = 0; at < used; at += strlen(names + at) + 1) {
+        // the tape's own path back from the name: from + the rest, with ~ as / again
+        const char* rest = names + at + pn;
+        int n = snprintf(tfrom, BROWSE_PATH_MAX, "%s/%.*s", from, (int) (strlen(rest) - el), rest);
+        if (n <= 0 || n >= (int) BROWSE_PATH_MAX) continue;
+        for (char* c = tfrom + strlen(from) + 1; *c != '\0'; c++) if (*c == '~') *c = '/';
+        if (to != nullptr) {
+            n = snprintf(tto, BROWSE_PATH_MAX, "%s%s", to, tfrom + strlen(from));
+            if (n <= 0 || n >= (int) BROWSE_PATH_MAX) continue;
+        }
+        tape_labels_follow(from_drive, tfrom, to_drive, to != nullptr ? tto : nullptr, false);
+    }
+}
+
 static void tape_notes_retarget(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir) {
     if (from == nullptr || to == nullptr) return;
     size_t flen = strlen(from);
     if (!is_dir && (flen < 4 || (strcasecmp(from + flen - 4, ".tap") != 0 && !tape_is_tzx(from)))) return;
+    tape_labels_follow(from_drive, from, to_drive, to, is_dir);   // the tape's labels, on its own drive
     walk_stop();
     char* names = list_pool;
     char* tpath = list_pool + sizeof(list_pool) - 3 * BROWSE_PATH_MAX;
@@ -8531,6 +8772,12 @@ static void tape_rec_name_draw(uint8_t* screen) {
     (void) TEXT;
 }
 
+// L: a label for a line. 0 none, 1 "Label which line? 1-0", 2 typing it (in tape_rec_typed)
+static uint8_t tape_label_state = 0;
+static uint32_t tape_label_block = 0;           // the line's first data block
+static uint8_t tape_label_line = 0;             // its number on the page (1-10)
+static const size_t TAPE_LABEL_MAX = 16;
+
 static void nmi_action_tape_position() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t key = nmi_rom_data[2];
@@ -8539,6 +8786,29 @@ static void nmi_action_tape_position() {
     bool keep_msg = false;              // drawn again after recording starts: its message stays
     if (key == 0) {
         tape_rec_naming = false;        // the screen is opened
+        tape_label_state = 0;
+    }
+    if (tape_label_state == 2 && key != 0) {
+        // typing the label: the keys are its letters until ENTER (save) or BREAK (back)
+        size_t len = strlen(tape_rec_typed);
+        if (key == 0x18) {
+            tape_label_state = 0;
+        } else if (key == 0x13) {
+            while (len > 0 && tape_rec_typed[len - 1] == ' ') tape_rec_typed[--len] = '\0';
+            const char* start = tape_rec_typed;
+            while (*start == ' ') start++;
+            bool ok = !sna_in_buffer && (tape_labels_read(tape_drive, tape_name), true) &&
+                tape_labels_write(tape_drive, tape_name, tape_labels_with(tape_label_block, start));
+            snprintf(tape_pos_msg, sizeof(tape_pos_msg), "%s", !ok ? "The label could not be saved" :
+                *start != '\0' ? "Label saved" : "Label removed");
+            tape_label_state = 0;
+        } else if (key == 0x0A) {
+            if (len > 0) tape_rec_typed[len - 1] = '\0';
+        } else if (key >= 32 && key < 127 && len < TAPE_LABEL_MAX) {
+            tape_rec_typed[len] = (char) key;
+            tape_rec_typed[len + 1] = '\0';
+        }
+        key = 0x7F;                     // drawn again, with nothing else done
     }
     if (tape_rec_naming) {
         size_t len = strlen(tape_rec_typed);
@@ -8569,6 +8839,12 @@ static void nmi_action_tape_position() {
             return;
         }
     }
+    if (tape_label_state == 1 && key != 0) {
+        // the line to label: its number on this page, anything else goes back
+        tape_label_state = key >= '0' && key <= '9' ? 3 : 0;      // 3: found below, once the lines are read
+        if (tape_label_state == 3) tape_label_line = (uint8_t) (key == '0' ? 10 : key - '0');
+        key = 0x7F;
+    }
     if (key == 'w' && !tape_rec) {                      // W: record a new tape
         tape_rec_naming = true;
         tape_rec_typed[0] = '\0';
@@ -8579,7 +8855,11 @@ static void nmi_action_tape_position() {
         return;
     }
     bool playing = tape_service_active && !tape_ejected;
-    if (key == 'x' || key == 0x18 || key == 0x13 || (key != 0 && key != 'e' && !playing)) {
+    if (key == 'l' && playing && !tape_rec) {          // L: label a line
+        tape_label_state = 1;
+        key = 0x7F;
+    }
+    if (key == 'x' || key == 0x18 || key == 0x13 || (key != 0 && key != 'e' && key != 0x7F && !playing)) {
         nmi_rom_data[0] = 1;            // closed
         return;
     }
@@ -8640,9 +8920,32 @@ static void nmi_action_tape_position() {
     }
     const uint32_t PER_PAGE = 10;
     uint32_t pages = count == 0 ? 1 : (count + PER_PAGE - 1) / PER_PAGE;
+    if (tape_label_state == 3) {
+        // the line chosen for L: its first data block, and its label now (to change)
+        uint32_t want = tape_pos_page * PER_PAGE + tape_label_line - 1, i = 0;
+        bool found = false;
+        if (want < count && open && f.seek(0)) {
+            tape_entries(f, tzx, [&](const TapeEntry& e) {
+                if (i++ == want) {
+                    tape_label_block = e.first;
+                    found = true;
+                    return false;
+                }
+                return true;
+            });
+        }
+        tape_label_state = 0;
+        if (found && !sna_in_buffer) {
+            tape_labels_read(tape_drive, tape_name);
+            if (!tape_label_of(tape_label_block, tape_rec_typed, TAPE_LABEL_MAX + 1)) tape_rec_typed[0] = '\0';
+            tape_label_state = 2;
+        }
+    }
     if (key == 0) {
         tape_pos_page = tape_rec ? (pages - 1) : at_end ? 0 : now / PER_PAGE;     // recording: the newest blocks
         if (!keep_msg) tape_pos_msg[0] = '\0';
+    } else if (key == 0x7F) {
+        // (a key for L: nothing else to do)
     } else if ((key == 'n' || key == ' ' || key == 8) && tape_pos_page + 1 < pages) {
         tape_pos_page++;
     } else if ((key == 'p' || key == 5) && tape_pos_page > 0) {
@@ -8692,8 +8995,10 @@ static void nmi_action_tape_position() {
     char line[40];
     int n = snprintf(line, sizeof(line), "%u/%u", (unsigned) (tape_pos_page + 1), (unsigned) pages);
     help_put_text(screen, 0, 31 - n, line, n, BANNER);
-    // this page's lines: the ones the tape has gone past are dim, the next load's is marked
+    // this page's lines: the ones the tape has gone past are dim, the next load's is marked; a
+    // line with a label shows it (in yellow) in place of what kind of block it is
     uint32_t first = tape_pos_page * PER_PAGE, i = 0;
+    const bool labels = !tape_rec && !sna_in_buffer && tape_labels_read(tape_drive, tape_name) > 0;
     if (open && f.seek(0)) {
         tape_entries(f, tzx, [&](const TapeEntry& e) {
             if (i >= first + PER_PAGE) return false;
@@ -8702,11 +9007,13 @@ static void nmi_action_tape_position() {
                 bool here = !tape_rec && !at_end && i == now;
                 bool done = !tape_rec && (at_end || i < now);
                 char text[32];
-                tape_entry_text(e, text, sizeof(text));
+                bool labelled = labels && tape_label_of(e.first, text, TAPE_LABEL_MAX + 1);
+                if (!labelled) tape_entry_text(e, text, sizeof(text));
                 line[0] = (char) ('0' + (i - first + 1) % 10);
                 line[1] = here ? '>' : ' ';
                 help_put_text(screen, row, 0, line, 2, here ? NOW : KEYS);
-                help_put_text(screen, row, 3, text, strlen(text) < 22 ? strlen(text) : 22, here ? NOW : done ? DONE : TEXT);
+                help_put_text(screen, row, 3, text, strlen(text) < 22 ? strlen(text) : 22,
+                    here ? NOW : done ? DONE : labelled ? HEADING : TEXT);
                 char len[12];
                 int ln = snprintf(len, sizeof(len), "%u", (unsigned) e.length);
                 help_put_text(screen, row, 32 - ln, len, ln, here ? NOW : done ? DONE : TEXT);
@@ -8745,16 +9052,35 @@ static void nmi_action_tape_position() {
         static const char in[] = "In with T: for the Spectrum ROM";
         help_put_text(screen, 15, 0, in, sizeof(in) - 1, DONE);
     }
+    if (tape_label_state == 1) {
+        static const char q[] = "Label which line? 1-0";
+        help_put_text(screen, 17, 0, q, sizeof(q) - 1, HEADING);
+        static const char kq[] = "1-0 the line  Other keys: back";
+        help_put_text(screen, 23, 1, kq, sizeof(kq) - 1, KEYS);
+        return;
+    }
+    if (tape_label_state == 2) {
+        char q[40];
+        int qn = snprintf(q, sizeof(q), "Label for line %u (16 letters):", (unsigned) tape_label_line);
+        help_put_text(screen, 17, 0, q, qn, HEADING);
+        qn = snprintf(q, sizeof(q), "%s_", tape_rec_typed);
+        help_put_text(screen, 18, 1, q, qn, NOW);
+        static const char e1[] = "Empty: the label goes.";
+        help_put_text(screen, 20, 0, e1, sizeof(e1) - 1, DONE);
+        static const char kt[] = "ENTER-Save DELETE BREAK-Back";
+        help_put_text(screen, 23, 1, kt, sizeof(kt) - 1, KEYS);
+        return;
+    }
     static const char* const help[] = {
         "1-0 the next load starts there", "R   rewind to the start",
-        "E   eject (to erase or move it)", "W   record a new tape instead",
-        "Dim: loaded already.",
+        "L   label a line (yellow)", "E   eject (to erase or move it)",
+        "W   record a new tape instead", "Dim: loaded already.",
     };
     for (int k = 0; k < (int) (sizeof(help) / sizeof(help[0])); k++) {
         help_put_text(screen, 16 + k, 0, help[k], strlen(help[k]), DONE);
     }
     if (tape_pos_msg[0] != '\0') help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
-    static const char k1[] = "1-0 R-Rewind E-Eject N P X-Exit";
+    static const char k1[] = "1-0 L-Label E-Eject N P X-Exit";
     help_put_text(screen, 23, 1, k1, sizeof(k1) - 1, KEYS);
 }
 

@@ -2,6 +2,25 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.1.0 (2026-10-25)
+Changes since Rev 2.0. `FIRMWARE_ID` is `Rev 2.1.0 (tapeloader v210)`: Diagnostics shows "Rev 2.1.0".
+
+### Virtual Tape Player: labels
+- **L labels a line of the tape:** L, the line's number (1-0 on the page shown), then up to 16 letters; ENTER saves, BREAK goes back, and saving an empty label removes it. A labelled line shows its label in yellow in place of the kind of block (Bytes: partA, Data, flag 88 ...), so the blocks of a multi-load game can be marked with their levels.
+- The labels are kept in `/Tape Files/<the tape's path, / as ~>.labels` on the tape's own drive (lines of `<first data block> <label>`), by the block a line starts at, so they stay right whatever the tape's position. They follow the tape, and its folder, when it is renamed, moved or put in the Waste Bin, and go when it is erased for good or the Waste Bin is emptied.
+- The help lines on the screen list L; the key row reads `1-0 L-Label E-Eject N P X-Exit` (R - Rewind is in the help lines).
+
+### Save snapshot: overwriting a name of another type
+- **A name already used by a snapshot of any type asks first.** Saving Commando as a `.sna` while `Commando.z80` is in the folder used to make `Commando.sna` beside it; now it asks "A file with this name exists / Overwrite this file?". N goes back to the Save snapshot screen with the name, Y saves `Commando.sna` and removes `Commando.z80` (and its tape note), so there is one save of that name.
+- The same goes for Q - Quick save: `<game> Save Game` of any type counts as there (the question, `quick_save = overwrite`, or the next number free in all three types). Save slots are as before.
+- On the internal flash names are compared as typed (littlefs tells capitals apart); on the SD card capitals don't matter.
+
+### Licences
+- No new third-party code: the tape labels and the save question are PicoMenu's own code (GPL v3), in files that already carry its header. THIRD-PARTY-NOTICES.txt is retitled for Rev 2.1.0.
+
+### Tests
+- Simulator: `tapelabels48` (label two lines, BREAK while typing, read again when the screen opens, an empty label removes one, the folder renamed: the labels go with it), `savename48` (commando.z80 there: the question, N, then Y; a new name saves at once), and the `DELETE` key. 55 scripts, all passing.
+
 ## Rev 2.0 (2026-10-23)
 Everything since Rev 1.9. `FIRMWARE_ID` is `Rev 2.0 (tapeloader v200)`: Diagnostics shows "Rev 2.0".
 

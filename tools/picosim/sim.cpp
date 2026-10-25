@@ -198,6 +198,7 @@ static bool keypos(const std::string& k, int& row, int& bit, int& shift) {
     if (k == "SPACE") { row = 7; bit = 0; return true; }
     if (k == "BREAK") { row = 7; bit = 0; shift = 1; return true; }
     if (k == "DOWN") { row = 4; bit = 4; shift = 1; return true; }      // CAPS SHIFT 6
+    if (k == "DELETE") { row = 4; bit = 0; shift = 1; return true; }    // CAPS SHIFT 0
     if (k.size() == 5 && k.compare(0, 4, "SYM+") == 0) {
         bool ok = keypos(k.substr(4), row, bit, shift);
         shift = 2;
