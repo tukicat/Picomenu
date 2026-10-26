@@ -21,7 +21,11 @@ not, see <https://www.gnu.org/licenses/>.
 //   flash <path> <file on PC>          ... to the flash
 //   boot                               start the Spectrum (the 48K or 128K ROM) for 2 s
 //   nmi                                press the Picoface button (the NMI menu)
-//   nmi2                               press it twice quickly (a screen grab, no menu)
+//   nmi2                               press it twice quickly (save_press says: the save screen or the grab question)
+//   nmihold                            hold it a second (the other of the two)
+//   button <what> <ms> [<up ms> <ms>]  the button down so long (and again after so long up), read
+//                                      as the Pico does: fail unless it is short, double, hold or
+//                                      long (what), and do what that does
 //   key <c>                            press a key (a letter, digit, ENTER, BREAK, SPACE)
 //   hold <c> <frames>                  hold a key down for so many frames
 //   regs                               print PC, SP and the interrupt state
@@ -44,7 +48,16 @@ not, see <https://www.gnu.org/licenses/>.
 extern "C" int ff_open_objects(void);
 extern "C" int sim_card_stuck;
 extern "C" long sim_read_us;
-bool button_double_press();
+bool button_press_action(bool held);
+#include "extras.h"
+extras::Press button_read(bool (*down)(), void (*wait)(uint32_t));
+bool button_act(extras::Press press);
+// "button": a made-up press, down d1 ms, then up gap ms and down d2 ms (a second press)
+static uint32_t btn_t, btn_d1, btn_gap, btn_d2;
+static bool btn_down() {
+    return btn_t < btn_d1 || (btn_d2 != 0 && btn_t >= btn_d1 + btn_gap && btn_t < btn_d1 + btn_gap + btn_d2);
+}
+static void btn_wait(uint32_t ms) { btn_t += ms; }
 #include <stdio.h>
 extern "C" int host_conv_slice_frames;
 #include <stdlib.h>
@@ -377,10 +390,23 @@ int main(int argc, char** argv) {
             if (sendNmiRequest(0, 0, 0)) z80_nmi(&cpu);
             else printf("NMI not sent\n");
             run_frames(25);
-        } else if (c == "nmi2") {
-            // two quick presses of the button: the screen is grabbed with no menu
-            if (sendNmiRequest(STARTUP_ACTION_GRAB, 0, 0)) z80_nmi(&cpu);
-            else printf("NMI not sent\n");
+        } else if (c == "button") {
+            unsigned a = 0, b = 0, d = 0;
+            sscanf(p2, "%u %u %u", &a, &b, &d);
+            btn_t = 0; btn_d1 = a; btn_gap = b; btn_d2 = d;
+            static const char* const NAME[] = { "short", "double", "hold", "long" };
+            extras::Press pr = button_read(btn_down, btn_wait);
+            const char* got = NAME[(int) pr];
+            if (strcmp(got, p1) == 0) printf("PASS button %s %s\n", p1, p2);
+            else { printf("FAIL button %s %s (it was %s)\n", p1, p2, got); failures++; }
+            if (!button_act(pr)) printf("NMI not sent\n");
+            else if ((rom_state.flags & 2) && !nmi) z80_nmi(&cpu);
+            run_frames(25);
+        } else if (c == "nmi2" || c == "nmihold") {
+            // two quick presses of the button, or held a second: the save screen or the grab
+            // question, with no menu
+            if (!button_press_action(c == "nmihold")) printf("NMI not sent\n");
+            else if (rom_state.flags & 2) z80_nmi(&cpu);
             run_frames(25);
         } else if (c == "expecttape") {     // expecttape <n>: fail unless the tape trap gave n blocks
             if (tape_requests >= atoi(p1)) printf("PASS expecttape %s (%d)\n", p1, tape_requests);
@@ -437,7 +463,7 @@ int main(int argc, char** argv) {
             if (got == want) printf("PASS expectmem %u %u\n", a, want);
             else { printf("FAIL expectmem %u %u (it is %u)\n", a, want, got); failures++; }
         } else if (c == "double") {         // double: two quick presses of the button (a menu up: a menu grab)
-            if (!button_double_press()) printf("double press not taken\n");
+            if (!button_press_action(false)) printf("double press not taken\n");
             run_frames(25);
         } else if (c == "slowcard") {       // slowcard <us>: each sector read takes that long (simulated time)
             sim_read_us = atol(p1);

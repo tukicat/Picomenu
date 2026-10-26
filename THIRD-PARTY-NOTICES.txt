@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.1.0
+THIRD-PARTY NOTICES - PicoMenu Rev 2.2.0
 =================================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
@@ -55,7 +55,7 @@ and unpacker of the NMI ROM and the Help text (pico/lzss_pack.py, asm_to_c_file.
 own CRC-32 and Adler-32), the snapshot-to-tape converter and its loader (pico/z80tap.h,
 tools/z80tap), the settings and Options (pico/settings.h, options.h) and the simulator's test
 files (tools/picosim/tests, including the made-up game of make_levelloader.py). No new
-third-party code was added for Rev 2.0 or Rev 2.1.0.
+third-party code was added for Rev 2.0, Rev 2.1.0 or Rev 2.2.0.
 
 The Spectrum ROM images and any games or snapshots you use with the
 Picoface are not covered by any licence here. None are in this source: the

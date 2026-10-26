@@ -21,7 +21,7 @@ key d
 wait 30
 expect Diagnostics
 expect Firmware
-expect Rev 2.1.0
+expect Rev 2.2.0
 expect Any key: back to Options
 key x
 wait 30

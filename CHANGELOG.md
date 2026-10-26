@@ -2,6 +2,43 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.2.0 (2026-10-26)
+Changes since Rev 2.1.0. `FIRMWARE_ID` is `Rev 2.2.0 (tapeloader v220)`: Diagnostics shows "Rev 2.2.0".
+
+### The NMI button (SW1): save and screen grab without the menu
+- **Held 1 second (let go before 3): the save screen.** It opens the same screen as S on the menu, with no menu: the save slots of the game being played, or the Save snapshot screen (own name) when no game is running or `save_screen = named`. Saving goes straight back to the game, and so does X (slots) or BREAK (Save snapshot).
+- **Double press: the screen grab question.** It is the category question G used to ask, with no menu; the grab is saved as `<game> <category>.scr` (or `.png`, as `grab_format` says), and a key after the message goes back to the game. BREAK goes back with nothing saved. With a menu up a double press still saves the menu's screen as a `.png`, and a hold does nothing.
+- **Held 3 seconds: the reset** into the Spectrum's own ROM, as the 1-second hold did. SW1 + SW2 together was looked at, but SW2 is wired straight to the Spectrum's reset and the Pico can't see it, and SW3 resets the Pico itself.
+- Nothing happens until the button is let go (or 3 seconds pass): only then can the Pico tell a 1-second hold from the reset.
+- **Q - Quick save and G - Screen grab are gone from the NMI menu.** The menu is two lines shorter: B, S, R, E, C, P, 4, 1, O, I, V, T, X. The old double press, which saved a numbered grab with no question, is gone too (Standard Screen Number on the question does the same).
+
+### Save slots: R - Reload and erasing from the question
+- **R - Reload asks about the game's save slots,** as choosing it in Browse Games does: 1-9 carries on from a slot, 0 starts the game, BREAK goes back to the menu. A save reloads as it is, with no question: anything in `/Save Games`, which takes in a slot loaded last and a `<game> Save Game` file.
+- **R - Reload names a slot after its game:** `Reload: Alpha Slot 1 - zone` in place of `Reload: Slot 1 - zone`. The game's name is the slot's folder in `/Save Games`; a long one scrolls as before.
+- **E on the question erases a slot** before you choose: E, the slot's number, then Y (N keeps it). The slot goes to the Waste Bin (or is erased for good with `waste_bin = off`), and its tape note goes with it, as E on the save slots screen does. With every slot erased the question shows "No saved games left", and 0 still starts the game.
+
+### Picomenu.ini and Options: [Buttons]
+- New `save_press = hold | double`: which press opens the save screen; the other opens the screen grab question. The default is `hold`.
+- `long_press` is now the reset only: `3.0` by default, `2` to `5` seconds, or `off`. A value under 2 seconds (the old default `1.0` among them) is read as 3.0, so there is room for the 1-second hold.
+- `double_press` is `on` or `off` (`grab`, from older files, reads as `on`). `off` makes two presses open the menu.
+- `quick_save` is no longer used. A line of it in an older file is read without complaint; Options doesn't show it and Set up SD card doesn't write it.
+- Options lists `save_press` (row 13) in place of `quick_save`, and steps `long_press` through 2.0 ... 5.0 and off.
+
+### Licences
+- No new third-party code. The changes are PicoMenu's own code (GPL v3), in files that already carry its header. THIRD-PARTY-NOTICES.txt is retitled for Rev 2.2.0.
+
+### Tests
+- Simulator:
+  - `button <short|double|hold|long> <ms down> [<ms up> <ms down>]` reads a made-up press through the firmware's own code and does what it says;
+  - `nmihold` (held a second);
+  - `nmi2` is now the double press as the firmware does it.
+- New scripts:
+  - `buttons48`: each press, two presses too far apart, a menu up, the 3-second reset;
+  - `buttons2-48`: `save_press = double`, the old `long_press = 1.0` and `double_press = grab`, Options, `double_press = off`;
+  - `slotask48`: E on the question (an empty slot, N, Y to the Waste Bin, the last one: "No saved games left"), and R - Reload asking, BREAK back to the menu, then a slot reloaded with no question (its R line `Reload: Alpha Slot 5 - zone`); `slots128` expects `Reload: Athena Slot 1`.
+- Scripts that used Q or G on the menu now use the hold or the double press: `aymute128`, `slots48`, `slots2-48`, `screengrabs48`, `grabformat48`, `tapenote48`, `tapein128note`, `settings48`, `settings2-48`.
+- 58 scripts, all passing.
+
 ## Rev 2.1.0 (2026-10-25)
 Changes since Rev 2.0. `FIRMWARE_ID` is `Rev 2.1.0 (tapeloader v210)`: Diagnostics shows "Rev 2.1.0".
 

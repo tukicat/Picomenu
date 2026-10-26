@@ -1,0 +1,82 @@
+# The Picoface button, as the Pico reads it (Picomenu.ini as it comes: save_press = hold,
+# long_press = 3.0): a short press is the NMI menu (no Q-Quick save or G-Screen grab on it now);
+# held a second up to 3 the save screen (the game's slots here) with no menu; a double press the
+# screen grab question with no menu; held 3 seconds a reset. Each goes back to the game when it
+# is closed. With a menu up a double press grabs the menu, and a hold does nothing.
+sd /48.rom {ROM48}
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 100
+button short 100
+wait 30
+expect B-Browse Games
+expect S-Save snapshot
+expectnot Quick
+expectnot G-Screen
+key x
+wait 30
+expectnot B-Browse
+# held 1.5 s: the slots; X goes back to the game
+button hold 1500
+wait 30
+expect Save slots: Alpha
+expectnot B-Browse
+key x
+wait 30
+expectnot Save slots
+expectnot B-Browse
+# held just under 3 s: still the slots; 3 saves to slot 3 and goes back to the game
+button hold 2900
+wait 30
+expect Save slots: Alpha
+key 3
+wait 100
+expectnot Save slots
+expectnot B-Browse
+get sd /Save Games/Alpha/Slot 3.sna {OUT}/btn-slot3.sna
+# a double press: the category question; BREAK goes back to the game
+button double 120 150 120
+wait 30
+expect Save it as:
+expectnot B-Browse
+key BREAK
+wait 30
+expectnot Save it as:
+expectnot B-Browse
+# again, 3 (Game Screen): saved under the game's name, a key and back to the game
+button double 120 150 120
+wait 30
+key 3
+wait 60
+expect Saved as Alpha Game Screen
+key a
+wait 30
+expectnot Saved as
+expectnot B-Browse
+get sd /Scraper/Screen Grabs/Alpha Game Screen.scr {OUT}/btn-grab.scr
+# two presses too far apart: the menu
+button short 120 600 120
+wait 30
+expect B-Browse Games
+# with the menu up: a double press grabs the menu, a hold does nothing
+button double 120 150 120
+wait 60
+get sd /Scraper/Screen Grabs/NMI Menu.png {OUT}/btn-menu.png
+button hold 1500
+wait 30
+expect B-Browse Games
+expectnot Save slots
+key x
+wait 30
+# held 3 seconds: a reset into the Spectrum's own ROM (its copyright line, in the ROM's letters)
+button long 3000
+wait 150
+expectnot Alpha
+expect . .... ........ ........ ...

@@ -1,4 +1,5 @@
-# Save slots on a 128K game: saved as a .z80 (auto), and loaded again from the question
+# Save slots on a 128K game: saved as a .z80 (auto), and loaded again from the question; R then
+# says "Reload: Athena Slot 1" (the game, from the slot's folder, first)
 sd /48.rom {ROM48}
 sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
 boot
@@ -30,7 +31,7 @@ key 1
 wait 200
 nmi
 wait 30
-expect Reload: Slot 1
+expect Reload: Athena Slot 1
 key s
 wait 30
 expect Save slots: Athena

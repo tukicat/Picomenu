@@ -17,18 +17,24 @@ wait 200
 ay 8 13
 ay 9 14
 ay 10 15
-nmi
+# the button held a second: the save slots, quiet too; slot 1 saves and the game carries on with
+# its sound. The .z80's sound chip registers (byte 39 on) have the game's volumes
+nmihold
 wait 30
+expect Save slots: Athena
 expectay 8 0
 expectay 9 0
 expectay 10 0
-# a quick save from the menu: the .z80's sound chip registers (byte 39 on) have the game's volumes
-key q
+key 1
 wait 200
-ls sd /Save Games
-expectbyte sd /Save Games/Athena Save Game.z80|47|13
-expectbyte sd /Save Games/Athena Save Game.z80|48|14
-expectbyte sd /Save Games/Athena Save Game.z80|49|15
+expectnot Save slots
+expectay 8 13
+expectay 9 14
+expectay 10 15
+ls sd /Save Games/Athena
+expectbyte sd /Save Games/Athena/Slot 1.z80|47|13
+expectbyte sd /Save Games/Athena/Slot 1.z80|48|14
+expectbyte sd /Save Games/Athena/Slot 1.z80|49|15
 nmi
 wait 30
 expectay 8 0

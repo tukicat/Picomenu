@@ -1,0 +1,74 @@
+# Picomenu.ini (tests/buttons-b.ini): save_press = double swaps them, so a double press is the
+# save screen (no game: the Save snapshot screen) and a hold the screen grab question. An old
+# long_press = 1.0 is read as 3 seconds (under 2 would leave no time for the hold), and the old
+# double_press = grab as on. Options shows them; double_press = off makes two presses the menu.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/buttons-b.ini
+boot
+button double 120 150 120
+wait 30
+expect Save Snapshot
+expectnot B-Browse
+key BREAK
+wait 30
+expectnot Save Snapshot
+expectnot B-Browse
+button hold 1500
+wait 30
+expect Save it as:
+key BREAK
+wait 30
+expectnot Save it as:
+button hold 2500
+wait 30
+expect Save it as:
+key BREAK
+wait 30
+# Options: long_press 3.0, save_press double, double_press on (the 12th to 14th)
+button short 100
+wait 30
+key o
+wait 40
+expect long_press
+expect 3.0
+expect save_press
+expect double
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+wait 10
+expect [Buttons] a double press
+key c
+wait 20
+key x
+wait 30
+key y
+wait 60
+expectfile sd /Picomenu.ini|double_press = off
+key x
+wait 30
+# no double press now: the first press is the menu at once
+button short 120 150 120
+wait 30
+expect B-Browse Games
+key x
+wait 30
+# 2 s is not long enough to reset now
+button hold 2000
+wait 30
+expect Save it as:
+key BREAK
+wait 30
+button long 3000
+wait 150
+expect . .... ........ ........ ...

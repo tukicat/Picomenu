@@ -785,7 +785,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 2.1.0 (tapeloader v210)";
+static const char FIRMWARE_ID[] = "Rev 2.2.0 (tapeloader v220)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -4411,11 +4411,14 @@ __attribute__((noinline)) static void nmi_action_slots() {
 
 // Where the question's game is, kept from when it was opened (the list may change meanwhile)
 static uint8_t ask_drive = 0;
-// V on the question: 0 the list, 1 "View which slot?", 2 a slot's screen showing (any key goes back)
+// V and E on the question: 0 the list, 1 "View which slot?", 2 a slot's screen showing (any key
+// goes back), 3 "Erase which slot?", 4 "Erase slot n?" (slot_pick)
 static uint8_t ask_view = 0;
 
 // ACTION_SLOT_ASK: a game chosen in Browse Games has save slots. BYTE param1 = the key (0: the
-// game was chosen: WORD param2 = its list entry's name, BYTE param4 = the drive). Status 0 the
+// game was chosen: WORD param2 = its list entry's name, BYTE param4 = the drive; or BYTE param4
+// = 2: R - Reload's game, which asks only when it is not itself a save, in /Save Games). E erases
+// a slot (after Y), as on the save slots screen. Status 0 the
 // question stays; 1 load the game as chosen (there is no question: no slots, slots_on_load =
 // never, the game is itself a slot); 2 the game or a slot is ready in the pico (ACTION_PREPARE_LOAD,
 // load with no name); 3 back to the list.
@@ -4426,10 +4429,25 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
     // erase_path: the game's folder; erase_scratch: its name and extension (two strings)
     char game[screengrab::NAME_MAX + 1];
     if (key == 0) {
-        uint16_t nameoffset = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
-        ask_drive = nmi_rom_data[5] == 1 ? 1 : 0;
-        const char* fileAndExt = list_entry_name_for(nameoffset, reinterpret_cast<const char*>(nmi_rom_data + nameoffset));
-        const char* dir = list_entry_dir_for(nameoffset);
+        const char* fileAndExt;
+        const char* dir;
+        if (nmi_rom_data[5] == 2) {
+            // R - Reload: a save (in /Save Games, a slot or not) loads as it is, with no question
+            const size_t fl = sizeof(slots::FOLDER) - 1;
+            if (!reload_known || (reload_drive == 1 && !sd_card_mounted) ||
+                    (strncasecmp(reload_dir, slots::FOLDER, fl) == 0 && (reload_dir[fl] == '\0' || reload_dir[fl] == '/'))) {
+                nmi_rom_data[0] = 1;
+                return;
+            }
+            ask_drive = reload_drive;
+            fileAndExt = reload_name;
+            dir = reload_dir;
+        } else {
+            uint16_t nameoffset = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
+            ask_drive = nmi_rom_data[5] == 1 ? 1 : 0;
+            fileAndExt = list_entry_name_for(nameoffset, reinterpret_cast<const char*>(nmi_rom_data + nameoffset));
+            dir = list_entry_dir_for(nameoffset);
+        }
         size_t nl = strlen(fileAndExt) + 1;
         size_t el = strlen(fileAndExt + nl) + 1;
         if (!cfg.slots_on_load || !sd_card_mounted || slots::is_slot_folder(dir) || nl + el > sizeof(erase_scratch) ||
@@ -4449,8 +4467,8 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
     int last = slots_scan(game, e);
     bool any = false;
     for (int i = 0; i < slots::COUNT; i++) any = any || e[i].used;
-    if (!any) {
-        nmi_rom_data[0] = key == 0 ? 1 : 3;
+    if (!any && key == 0) {
+        nmi_rom_data[0] = 1;
         return;
     }
     const int n = key >= '1' && key <= '9' ? key - '0' : 0;
@@ -4476,8 +4494,38 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         } else if (n > 0) {
             slot_msg = "That slot is empty";
         }
+    } else if (ask_view == 3) {
+        // E, then a slot: asks first
+        ask_view = 0;
+        if (n > 0 && e[n - 1].used) {
+            slot_pick = (uint8_t) n;
+            ask_view = 4;
+        } else if (n > 0) {
+            slot_msg = "That slot is empty";
+        }
+    } else if (ask_view == 4) {
+        // Y: the slot goes to the Waste Bin (or is erased, waste_bin = off), its tape note with it
+        ask_view = 0;
+        if (key == 'y' || key == 'Y') {
+            char file[80];
+            // where it went in the Waste Bin: the end of snap_load_buffer (the screen is at its start)
+            const size_t tsize = BROWSE_PATH_MAX + 8;
+            char* to = snap_load_buffer + SNAP_LOAD_BUFFER_SIZE - tsize;
+            slots::name(slot_pick, e[slot_pick - 1].label, file, sizeof(file));
+            snprintf(grab_path, sizeof(grab_path), "%s/%s/%s.%s", slots::FOLDER, game, file, e[slot_pick - 1].ext);
+            walk_stop();
+            BinResult bin = to_waste_bin(1, grab_path, false, to, tsize);
+            bool ok = bin == BIN_OK || (bin == BIN_NONE && fsops::remove_path(Drive::EXTERNAL_SD_CARD, grab_path));
+            if (ok) tape_note_follow(1, grab_path, 1, bin == BIN_OK ? to : nullptr, false);
+            slot_msg = !ok ? "Could not erase it" : bin == BIN_OK ? "Moved to the Waste Bin" : "Erased";
+            last = slots_scan(game, e);
+            any = false;
+            for (int i = 0; i < slots::COUNT; i++) any = any || e[i].used;
+        }
     } else if (key == 'v' || key == 'V') {
         ask_view = 1;
+    } else if (key == 'e' || key == 'E') {
+        ask_view = 3;
     } else if (key == '0' || key == notes::KEY_ENTER || key == 13) {
         load_snapshot_file(ask_drive, erase_path, erase_scratch);       // the game as chosen
         snap_prepared = true;
@@ -4501,16 +4549,25 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
     }
     slots_banner(screen, "Saved games: ", game);
     slots_draw_list(screen, e, last, true);
+    if (!any) help_put_text(screen, 2, 1, "No saved games left", 19, gameinfo::ATTR_DIM);
     help_put_text(screen, 13, 1, "1-9", 3, gameinfo::ATTR_KEYS);
     help_put_text(screen, 13, 5, "Carry on from a slot", 20, gameinfo::ATTR_TEXT);
     help_put_text(screen, 14, 1, "0", 1, gameinfo::ATTR_KEYS);
     help_put_text(screen, 14, 5, "Start the game", 14, gameinfo::ATTR_TEXT);
     help_put_text(screen, 15, 1, "V", 1, gameinfo::ATTR_KEYS);
     help_put_text(screen, 15, 5, "View a slot's screen", 20, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 16, 1, "E", 1, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 16, 5, "Erase a slot", 12, gameinfo::ATTR_TEXT);
     help_put_text(screen, 17, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
-    if (ask_view == 1) {
-        help_put_text(screen, 19, 1, "View which slot? 1-9", 20, gameinfo::ATTR_HEADING);
+    if (ask_view == 1 || ask_view == 3) {
+        const char* what = ask_view == 1 ? "View which slot? 1-9" : "Erase which slot? 1-9";
+        help_put_text(screen, 19, 1, what, (int) strlen(what), gameinfo::ATTR_HEADING);
         help_put_text(screen, 20, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    } else if (ask_view == 4) {
+        char t[24];
+        snprintf(t, sizeof(t), "Erase slot %d?", slot_pick);
+        help_put_text(screen, 19, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, "Y-Yes  N-No", 11, gameinfo::ATTR_KEYS);
     }
     if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
     preview_screen = screen;
@@ -9263,9 +9320,9 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
     else {
 
         uint8_t* nmi_rom_data = rom_data + 16384;
-        if (command == 0 || command == STARTUP_ACTION_GRAB) sd_check();     // the menu (or a grab): is the card still well?
+        if (command == 0 || command >= STARTUP_ACTION_GRAB) sd_check();     // the menu (or a grab): is the card still well?
         nmi_rom_unpack(nmi_rom_data);        // (kept packed in the firmware)
-        nmi_menu_open = command == 0;        // the ROM turns the sound down for the menu only
+        nmi_menu_open = command == 0 || command > STARTUP_ACTION_GRAB;    // the ROM turns the sound down for the menu (and S, G alone)
         // the NMI rom starts afresh each time, with no search in force, and
         // the card may have been changed since it was last listed
         snap_filter[0] = '\0';
@@ -9295,9 +9352,19 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         nmi_rom_data[START_SAVETYPE] = cfg.save_type;
         nmi_rom_data[START_THEME] = cfg.light ? 1 : 0;
         bin_leave();        // the menu was left from the Waste Bin (a game loaded from it): B starts where it was
-        // what the R item on the menu says: the last game, or that there is none to reload
-        extras::reload_label(reload_known, reload_drive == 0 || sd_card_mounted, reload_name,
-            reinterpret_cast<char*>(nmi_rom_data + STARTUP_RELOAD_LABEL));
+        // what the R item on the menu says: the last game, or that there is none to reload. A
+        // save slot is named after its game too, from its folder: "Alpha Slot 1 - zone"
+        {
+            char named[extras::LABEL_SIZE];
+            const char* label_name = reload_name;
+            const char* slot_game = slots::folder_game(reload_dir);
+            if (slot_game != nullptr && slots::parse(reload_name, nullptr, 0) != 0) {
+                snprintf(named, sizeof(named), "%s %s", slot_game, reload_name);
+                label_name = named;
+            }
+            extras::reload_label(reload_known, reload_drive == 0 || sd_card_mounted, label_name,
+                reinterpret_cast<char*>(nmi_rom_data + STARTUP_RELOAD_LABEL));
+        }
         rom_state.flags |= 2;
         gpio_put(PIN_NMI, false);
         sleep_ms(3);
@@ -10292,16 +10359,37 @@ static bool menu_shot_piece() {
     return true;
 }
 
-// Two quick presses of the button: with no menu up, the game's screen is saved with no menu
-// (STARTUP_ACTION_GRAB, the border shows how it went); with a menu up, the menu's screen as a
-// .png (menu_shot_piece). False if neither could be done.
-bool button_double_press() {
+// The button held a second (held true) or pressed twice quickly: Picomenu.ini's save_press
+// says which opens the save screen (S: the slots, or the Save snapshot screen) and which the
+// screen grab question (G); either goes back to the game when it is closed. With a menu up a
+// double press saves the menu's screen as a .png (menu_shot_piece), and a hold does nothing.
+// False if it could not be done.
+bool button_press_action(bool held) {
     if (rom_state.nmi_active) {
-        if (conv_phase == CONV_RUN) return false;          // (converting: the buffer is the Spectrum's)
+        if (held || conv_phase == CONV_RUN) return false;  // (converting: the buffer is the Spectrum's)
         rom_data[16384 + START_MENUSHOT] = 1;               // the ROM sends the screen (getkeypress)
         return true;
     }
-    return sendNmiRequest(STARTUP_ACTION_GRAB, 0, 0);
+    bool save = held == cfg.save_on_hold;
+    return sendNmiRequest(save ? STARTUP_ACTION_SAVE_SCREEN : STARTUP_ACTION_GRAB_SCREEN, 0, 0);
+}
+
+// What a press of the button was, with Picomenu.ini's long_press and double_press (down: is it
+// down now, wait: wait so many ms). The simulator's "button" gives it a made-up press.
+extras::Press button_read(bool (*down)(), void (*wait)(uint32_t)) {
+    return extras::classify_press(down, wait, cfg.long_press_ms, cfg.double_press);
+}
+
+// Does what the press says: a short one the NMI menu, held a second or a double press
+// button_press_action, held for long_press (3 seconds) a reset into the Spectrum's own ROM.
+// False if it could not be done (an NMI is already active).
+bool button_act(extras::Press press) {
+    switch (press) {
+    case extras::Press::SHORT: return sendNmiRequest(0, 0, 0);
+    case extras::Press::HOLD: return button_press_action(true);
+    case extras::Press::DOUBLE: return button_press_action(false);
+    default: reset_spectrum_to_internal_rom(); return true;
+    }
 }
 
 
@@ -10450,26 +10538,11 @@ int main() {
         bool isup = gpio_get(PIN_USER_SWITCH);
         if (!isup) {
 
-            extras::Press press = extras::classify_press(
-                [] { return !gpio_get(PIN_USER_SWITCH); }, [](uint32_t ms) { sleep_ms(ms); },
-                cfg.long_press_ms, cfg.double_press);
-
-            if (press == extras::Press::SHORT) {
-                if (!sendNmiRequest(0, 0, 0)) {
-                    LOG("Couldn't send NMI because an NMI is already active.\n");
-                }
-            } else if (press == extras::Press::DOUBLE) {
-                // Two quick presses: save the screen with no menu (the border shows how it went);
-                // with a menu up, the menu's screen as a .png (menu_shot_piece)
-                if (!button_double_press()) {
-                    LOG("Couldn't send the screen grab because an NMI is already active.\n");
-                }
-                while (!gpio_get(PIN_USER_SWITCH)) {
-                    sleep_ms(10);       // until the button is let go
-                }
-            } else {
-                // Held for a second: reset the Spectrum into its own ROM
-                reset_spectrum_to_internal_rom();
+            extras::Press press = button_read([] { return !gpio_get(PIN_USER_SWITCH); }, [](uint32_t ms) { sleep_ms(ms); });
+            if (!button_act(press)) {
+                LOG("Couldn't do the button's press because an NMI is already active.\n");
+            }
+            if (press != extras::Press::SHORT) {
                 while (!gpio_get(PIN_USER_SWITCH)) {
                     sleep_ms(10);       // until the button is let go
                 }

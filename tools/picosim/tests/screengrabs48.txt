@@ -85,10 +85,14 @@ wait 30
 key x
 wait 30
 expect Browse Games
-# G: no game loaded, so the name is Screen
-key g
+# a double press (save_press = hold, so it is the grab): the category question with no menu; no
+# game loaded, so the name is Screen. A key after the message goes back to BASIC
+key x
+wait 30
+nmi2
 wait 20
 expect Save it as:
+expectnot B-Browse
 expect 3  Game Screen
 expect 5  Standard Screen Number
 key 3
@@ -96,42 +100,45 @@ wait 30
 expect Saved as Screen Game Screen
 key a
 wait 30
-key g
+expectnot Saved as
+expectnot B-Browse
+nmi2
 wait 20
 key 3
 wait 30
 expect Saved as Screen Game Screen1
 key a
 wait 30
-key g
+nmi2
 wait 20
 key 5
 wait 30
 expect Saved as Screen
 key a
 wait 30
-key g
+nmi2
 wait 20
 key 1
 wait 30
 expect Saved as Screen Loading Screen
 key a
 wait 30
-key g
+nmi2
 wait 20
 key BREAK
 wait 30
-expect Browse Games
+expectnot Save it as:
+expectnot B-Browse
 get sd /Scraper/Screen Grabs/Screen Game Screen.scr {OUT}/g.scr
 get sd /Scraper/Screen Grabs/Screen Game Screen1.scr {OUT}/g.scr
 get sd /Scraper/Screen Grabs/Screen.scr {OUT}/g.scr
 get sd /Scraper/Screen Grabs/Screen Loading Screen.scr {OUT}/g.scr
 nofile sd /Scraper/Screen Grabs/Screen Menu Screen.scr
 nofile sd /Screen Grabs/Screen.scr
-# a double press: Standard Screen Number, the lowest free (Screen.scr is taken)
-key x
-wait 30
+# Standard Screen Number: the lowest free (Screen.scr is taken)
 nmi2
+wait 20
+key 5
 wait 100
 get sd /Scraper/Screen Grabs/Screen1.scr {OUT}/g.scr
 nofile sd /Screen Grabs/Screen1.scr

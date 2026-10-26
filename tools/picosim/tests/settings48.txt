@@ -1,6 +1,6 @@
 # Picomenu.ini (tests/settings-a.ini): Browse Games starts in /Games with L-All and O-Info on,
 # Z to A with the folders last; a line it does not understand is shown on Diagnostics; Save
-# snapshot starts on .z80; Q over a save already there makes the next number with no question;
+# snapshot starts on .z80 (its quick_save line, from before 2.2, is still read without a fuss);
 # with waste_bin = off E erases for good (no Waste Bin is made).
 sd /48.rom {ROM48}
 sd /Picomenu.ini {HERE}/settings-a.ini
@@ -56,15 +56,5 @@ wait 30
 expect Type: .z80
 key BREAK
 wait 30
-key q
-wait 100
-key SPACE
-wait 50
-nmi
+key x
 wait 30
-key q
-wait 100
-key SPACE
-wait 50
-get sd /Save Games/Alpha Save Game.z80 {OUT}/s1.z80
-get sd /Save Games/Alpha Save Game 2.z80 {OUT}/s2.z80

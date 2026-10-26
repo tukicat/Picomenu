@@ -35,8 +35,8 @@ namespace options {
 
 enum Id : uint8_t {
     THEME, SHOW_ALL, DETAILS, SORT, FOLDERS, START_DRIVE, START_FOLDER,
-    SAVE_TYPE, QUICK_SAVE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT,
-    LONG_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K, COUNT
+    SAVE_TYPE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT,
+    LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K, COUNT
 };
 
 struct Item {
@@ -54,11 +54,11 @@ static const Item ITEMS[COUNT] = {
     { "start_drive", settings::SEC_BROWSE, "[Browse] the drive it opens on" },
     { "start_folder", settings::SEC_BROWSE, "[Browse] / or last folder used" },
     { "save_type", settings::SEC_SAVING, "[Saving] the snapshot type" },
-    { "quick_save", settings::SEC_SAVING, "[Saving] Q with no slot used" },
     { "save_screen", settings::SEC_SAVING, "[Saving] what S opens" },
     { "slots_on_load", settings::SEC_SAVING, "[Saving] ask for a slot" },
     { "grab_format", settings::SEC_SAVING, "[Saving] screen grab files" },
     { "long_press", settings::SEC_BUTTONS, "[Buttons] hold to reset (s)" },
+    { "save_press", settings::SEC_BUTTONS, "[Buttons] save: hold or double" },
     { "double_press", settings::SEC_BUTTONS, "[Buttons] a double press" },
     { "loading_grab", settings::SEC_CONVERTING, "[Converting] grab the screen" },
     { "waste_bin", settings::SEC_BIN, "[Waste Bin] erase to the bin" },
@@ -95,7 +95,6 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
     static const char* const FOLD_W[] = { "first", "last", "mixed" };
     static const char* const DRIVE_W[] = { "flash", "sd", "last" };
     static const char* const TYPE_W[] = { "auto", "sna", "z80", "szx" };
-    static const char* const QUICK_W[] = { "ask", "overwrite", "new" };
     const settings::Settings& s = e.s;
     const char* w = "";
     switch (id) {
@@ -107,7 +106,6 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
     case START_DRIVE: w = DRIVE_W[s.start_drive % 3]; break;
     case START_FOLDER: w = e.start_folder; break;
     case SAVE_TYPE: w = TYPE_W[s.save_type % 4]; break;
-    case QUICK_SAVE: w = QUICK_W[s.quick_save % 3]; break;
     case SAVE_SCREEN: w = s.save_screen_slots ? "slots" : "named"; break;
     case SLOTS_ON_LOAD: w = s.slots_on_load ? "ask" : "never"; break;
     case GRAB_FORMAT: w = s.grab_format == 1 ? "png" : s.grab_format == 2 ? "both" : "scr"; break;
@@ -122,7 +120,8 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
             return;
         }
         break;
-    case DOUBLE_PRESS: w = s.double_press ? "grab" : "off"; break;
+    case SAVE_PRESS: w = s.save_on_hold ? "hold" : "double"; break;
+    case DOUBLE_PRESS: w = s.double_press ? "on" : "off"; break;
     case LOADING_GRAB: w = s.loading_grab ? "on" : "off"; break;
     case WASTE_BIN: w = s.waste_bin ? "on" : "off"; break;
     case LEVEL_LOADERS: w = s.level_loaders ? "patch" : "off"; break;
@@ -150,16 +149,16 @@ inline void cycle(Edit& e, uint8_t id, const char* folder_now) {
         break;
     }
     case SAVE_TYPE: s.save_type = (uint8_t) ((s.save_type + 1) % 4); break;
-    case QUICK_SAVE: s.quick_save = (uint8_t) ((s.quick_save + 1) % 3); break;
     case SAVE_SCREEN: s.save_screen_slots = !s.save_screen_slots; break;
     case SLOTS_ON_LOAD: s.slots_on_load = !s.slots_on_load; break;
     case GRAB_FORMAT: s.grab_format = (uint8_t) ((s.grab_format + 1) % 3); break;
     case LONG_PRESS:
-        // 0.5, 1.0 ... 5.0 seconds, then off; a time between steps goes to the next step
+        // 2.0, 2.5 ... 5.0 seconds, then off; a time between steps goes to the next step
         if (s.long_press_ms == 0) s.long_press_ms = settings::LONG_PRESS_MIN;
         else if (s.long_press_ms >= settings::LONG_PRESS_MAX) s.long_press_ms = 0;
         else s.long_press_ms = (uint16_t) ((s.long_press_ms / 500 + 1) * 500);
         break;
+    case SAVE_PRESS: s.save_on_hold = !s.save_on_hold; break;
     case DOUBLE_PRESS: s.double_press = !s.double_press; break;
     case LOADING_GRAB: s.loading_grab = !s.loading_grab; break;
     case WASTE_BIN: s.waste_bin = !s.waste_bin; break;

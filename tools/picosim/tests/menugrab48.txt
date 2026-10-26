@@ -1,6 +1,6 @@
 # A double press of the button with a menu up saves the menu's screen as a .png in
 # /Scraper/Screen Grabs, named after the menu (read off the screen): NMI Menu, Browse Games,
-# Options (Picomenu.ini), Help - <page>; a second of the same name is "<name> 2.png". The menu
+# Options (Picomenu.ini), Diagnostics; a second of the same name is "<name> 2.png". The menu
 # carries on, and the game's own screen is still there when the menu is left.
 sd /48.rom {ROM48}
 sd /Games/Green.tzx {OUT}/test.pok

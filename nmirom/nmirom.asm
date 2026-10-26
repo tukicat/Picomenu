@@ -365,7 +365,7 @@ ACTION_GRAB_MENU equ 0x29
 ACTION_SLOTS equ 0x2A
 // A game with save slots chosen in Browse Games: "carry on from a slot?" (picoscreen).
 // BYTE param1 = the key (0: chosen; WORD param2 = the name in the list, BYTE param4 = the
-// drive). Status 0 stays, 1 load it as chosen, 2 the game or a slot is ready (load with no
+// drive, or 2 for R - Reload's game). E erases a slot. Status 0 stays, 1 load it as chosen, 2 the game or a slot is ready (load with no
 // name), 3 back to the list
 ACTION_SLOT_ASK equ 0x2B
 // O in Tools: the settings of Picomenu.ini and the screen grab order, drawn by the pico
@@ -426,7 +426,7 @@ spare_space equ SPARE_SPACE
 // the Reload item of the menu scrolls a long name, see startmenu.scrollidle
 // the 28 letters of it shown now: in spare_space, which nothing uses while the top menu waits for a key
 SCROLL_WINDOW equ spare_space + 768
-SCROLL_ROW equ 6
+SCROLL_ROW equ 5                // the R - Reload line of the NMI menu
 SCROLL_COL equ 4
 SCROLL_WIDTH equ 28
 SCROLL_STEP equ 350             // calls of .scrollidle (one pass of the keyboard scan, about 0.7 ms) per letter: 0.25 s
@@ -482,11 +482,16 @@ STARTUP_ACTION_SAVE_MEMORY equ 0x3
 STARTUP_ACTION_LOAD_MEMORY equ 0x4
 // PARAM1 is destination location
 // PARAM2 is total length
+// (5 was STARTUP_ACTION_GRAB, a double press saving the screen with no question: the button's
+// before 2.2. The Pico no longer sends it.)
 STARTUP_ACTION_GRAB equ 0x5
+// the button held a second (or double pressed, as Picomenu.ini's save_press says): the save
+// screen (S) or the screen grab question (G) opens straight away, with no menu, and the game
+// carries on when it is closed. Anything above STARTUP_ACTION_GRAB is one of these.
+STARTUP_ACTION_SAVE_SCREEN equ 0x6
+STARTUP_ACTION_GRAB_SCREEN equ 0x7
 // how long the border stays coloured: that many times 3,300 T-states (about 0.4 s)
 GRAB_FLASH equ 420
-// a double press of the button: saves the screen with no menu; the border is green for
-// saved, red for not, then the game carries on
 
 
 
@@ -610,11 +615,6 @@ nmientry:
     call sendsnapshottopico
     jr .exitnoscreenrestore     // the screen was not touched
 
-1:  cp STARTUP_ACTION_GRAB
-    jr nz, 1F
-    call quickgrab
-    jr .exitnoscreenrestore     // the screen was not touched
-
 1:  call ayswap               // the sound chip quiet while the menu is up
     ld (menusp), sp           // T in Browse Games leaves from deep in the menus to here
     call startmenu
@@ -692,19 +692,7 @@ start_up_reload_label: DZ "No game detected"
 spare_size_hi .equ (spare_size - 255) / 256
 
 
-// Double press: the pico saves the screen it was given; the border says how it went
-quickgrab:
-    ld ix, 0
-    ld hl, spare_space
-    ld (ix + 2), hl         // where the pico writes its message (not shown)
-    ld (ix + 4), 0          // Standard Screen Number: <game>.scr, <game>1.scr ...
-    ld (ix + 1), ACTION_SCREEN_GRAB
-    call waitpico
-    or a
-    ld a, 4                 // green: saved
-    jr z, grabborder
-    ld a, 2                 // red: not saved
-// The border in colour a for a moment, then the game's again (also a menu grab: getkeypress)
+// The border in colour a for a moment, then the game's again (a menu grab: getkeypress)
 grabborder:
     out (0xfe), a
     ld de, GRAB_FLASH
@@ -820,9 +808,19 @@ startupactionsavememory:
 ; Start up menu
 
 startmenu:
+    ld a, (start_up_action)
+    cp STARTUP_ACTION_SAVE_SCREEN
+    jp z, .handle_save
+    cp STARTUP_ACTION_GRAB_SCREEN
+    jp z, .handle_grab
 
 .showtopscreen
-    ld a, (.intools)
+    ld a, (start_up_action)     // opened for S or G alone: closing it goes back to the game
+    cp STARTUP_ACTION_SAVE_SCREEN
+    jr c, 1F
+    ld sp, (menusp)
+    jp nmientry.exittopscreen
+1:  ld a, (.intools)
     or a
     jp nz, .showtools
     call .scrollinit
@@ -977,19 +975,20 @@ startmenu:
 .handle_exit:
     ret
 
-// Q: save to "<game> Save Game" in the game's folder, with no questions apart from
-// overwriting. Without a game to name it after it is the ordinary Save screen.
-.handle_quicksave:
-    ld a, 1
-    ld (savesnapshotscreen.quick), a
-    call savesnapshotscreen
-    or a
-    jp nz, .showtopscreen
-    ret
-
-// L: load the game that was last loaded from Browse Games again
+// R: load the game that was last loaded from Browse Games again. A game with save slots asks
+// first, as in Browse Games (the pico says: a save, in /Save Games, loads as it is)
 .handle_reload:
-    ld a, PREPARE_LOAD_RELOAD
+    ld ix, 0
+    ld (ix + 5), 2          // R - Reload's game, not a list entry
+    ld c, ACTION_SLOT_ASK
+    xor a
+    call picoscreen
+    cp 2
+    jr z, .doload           // 2: the game or a slot is ready in the pico
+    jr c, 1F                // 1: no question: as before
+    call screenbelowmenu    // 3: BREAK, back to the menu
+    jp .showtopscreen
+1:  ld a, PREPARE_LOAD_RELOAD
     call .prepareload
     jr z, .doload
     ld hl, .noreloadmsg
@@ -1563,19 +1562,17 @@ startmenu:
 .startmenu_def:
     MENU_ITEM 'b', 3, 2, .loadmsg, .handle_load
     MENU_ITEM 's', 4, 2, .savemsg, .handle_save
-    MENU_ITEM 'q', 5, 2, .quickmsg, .handle_quicksave
-    MENU_ITEM 'r', 6, 2, SCROLL_WINDOW, .handle_reload
-    MENU_ITEM 'e', 7, 2, .recentmsg, .handle_recent
-    MENU_ITEM 'c', 8, 2, .chamgemsg, .handle_change_rom
-    MENU_ITEM 'p', 9, 2, .pokemsg, .handle_poke
-    MENU_ITEM '4', 10, 2, .reset48menumsg, .handle_reset48
-    MENU_ITEM '1', 11, 2, .reset128menumsg, .handle_reset128
-    MENU_ITEM 'o', 12, 2, .optionsmsg, .handle_options
-    MENU_ITEM 'i', 13, 2, .infomsg, .handle_info
-    MENU_ITEM 'g', 14, 2, .grabmsg, .handle_grab
-    MENU_ITEM 'v', 15, 2, .tapemsg, .handle_tape
-    MENU_ITEM 't', 16, 2, .toolsmsg, .handle_tools
-    MENU_ITEM 'x', 17, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'r', 5, 2, SCROLL_WINDOW, .handle_reload
+    MENU_ITEM 'e', 6, 2, .recentmsg, .handle_recent
+    MENU_ITEM 'c', 7, 2, .chamgemsg, .handle_change_rom
+    MENU_ITEM 'p', 8, 2, .pokemsg, .handle_poke
+    MENU_ITEM '4', 9, 2, .reset48menumsg, .handle_reset48
+    MENU_ITEM '1', 10, 2, .reset128menumsg, .handle_reset128
+    MENU_ITEM 'o', 11, 2, .optionsmsg, .handle_options
+    MENU_ITEM 'i', 12, 2, .infomsg, .handle_info
+    MENU_ITEM 'v', 13, 2, .tapemsg, .handle_tape
+    MENU_ITEM 't', 14, 2, .toolsmsg, .handle_tools
+    MENU_ITEM 'x', 15, 2, .exitmsg,  .handle_exit
     MENU_END
 // T: Tools, the things used now and then. Each goes back to this menu when it is done
 // (.showtopscreen comes here while .intools is set); X goes back to the NMI menu.
@@ -1593,7 +1590,6 @@ startmenu:
 .optionsmsg: DZ "Options"
 .batchmsg: DZ "Batch convert"
 .intools: BYTE 0
-.quickmsg: DZ "Quick save"
 .testromshow: DZ "Test ROM (diagnostics)"
 .tapemsg: DZ "Virtual Tape Player"
 .binmsg: DZ "Waste Bin"
@@ -1632,7 +1628,6 @@ startmenu:
 .updatefail2: DZ "Hold BOOTSEL, plug in USB,"
 .updatefail3: DZ "copy the .uf2 to RPI-RP2."
 .norecentmsg: DZ "Cannot find that game"
-.grabmsg: DZ "Screen grab"
 .grabanykey: DZ "Press any key"
 .savemsg: DZ "Save snapshot"
 .loadmsg: DZ "Browse Games"

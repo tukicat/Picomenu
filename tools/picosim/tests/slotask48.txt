@@ -1,0 +1,105 @@
+# The "carry on from a slot?" question: E erases a slot (asks first; to the Waste Bin), and
+# R - Reload asks it too when the game has slots. A save (in /Save Games) reloads as it is.
+sd /48.rom {ROM48}
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Save Games/Alpha/Slot 3.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Save Games/Alpha/Slot 5 - zone.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Saved games: Alpha
+expect E   Erase a slot
+expect 3 Saved game
+expect 5 zone
+# E, an empty slot
+key e
+wait 20
+expect Erase which slot? 1-9
+key 2
+wait 20
+expect That slot is empty
+# E 3, N: still there
+key e
+wait 20
+key 3
+wait 20
+expect Erase slot 3?
+key n
+wait 20
+expectnot Erase slot 3?
+expect 3 Saved game
+# E 3, Y: to the Waste Bin
+key e
+wait 20
+key 3
+wait 20
+key y
+wait 40
+expect Moved to the Waste Bin
+expectnot 3 Saved game
+expect 5 zone
+nofile sd /Save Games/Alpha/Slot 3.z80
+get sd /Waste Bin/Slot 3.z80 {OUT}/sa-bin.z80
+# 0: the game itself
+key 0
+wait 100
+expectnot Saved games
+# R - Reload: the question again; BREAK goes back to the menu
+nmi
+wait 30
+expect Reload: Alpha
+key r
+wait 50
+expect Saved games: Alpha
+expect 5 zone
+key BREAK
+wait 30
+expect B-Browse Games
+# R, then 5: the slot
+key r
+wait 50
+key 5
+wait 100
+expectnot Saved games
+expectnot B-Browse
+# R now: the slot was loaded last (named after its game), a save, so it loads as it is with no
+# question
+nmi
+wait 30
+expect Reload: Alpha Slot 5 - zone
+key r
+wait 100
+expectnot Saved games
+expectnot B-Browse
+# erasing the last slot: "No saved games left", and 0 still starts the game
+nmi
+wait 30
+key b
+wait 50
+key u
+wait 50
+key u
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Saved games: Alpha
+key e
+wait 20
+key 5
+wait 20
+key y
+wait 40
+expect No saved games left
+nofile sd /Save Games/Alpha/Slot 5 - zone.z80
+key 0
+wait 100
+expectnot Saved games
+expectnot B-Browse

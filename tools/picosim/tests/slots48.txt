@@ -1,6 +1,6 @@
 # Save slots. S on the menu shows the game's nine slots (/Save Games/<game>); a number saves to
 # one (asking before saving over one); L labels a slot (an empty one is saved with the label);
-# Q then saves over the slot used last; V shows a slot's screen; E erases one (to the Waste Bin);
+# the button held a second opens them with no menu; V shows a slot's screen; E erases one (to the Waste Bin);
 # S goes on to the Save snapshot screen. Loading a game with slots asks: a slot, 0 the game
 # itself, or BREAK back to the list. A slot loaded is still the game's (S shows its slots).
 sd /48.rom {ROM48}
@@ -70,11 +70,19 @@ wait 5
 key ENTER
 wait 100
 get sd /Save Games/Alpha/Slot 5 - b.sna {OUT}/slot5.sna
-# Q: over slot 5, the one used last (no Save Game file)
-nmi
+# the button held a second: the slots at once (no menu); slot 5 again asks, and Y saves and goes
+# straight back to the game
+nmihold
 wait 30
-key q
+expect Save slots: Alpha
+expectnot B-Browse
+key 5
+wait 20
+expect Save over slot 5?
+key y
 wait 100
+expectnot Save slots
+expectnot B-Browse
 nofile sd /Save Games/Alpha Save Game.sna
 get sd /Save Games/Alpha/Slot 5 - b.sna {OUT}/slot5.sna
 # V: a slot's screen; E: erase one

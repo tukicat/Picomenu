@@ -1,6 +1,6 @@
 # Picomenu.ini (tests/slots-b.ini): save_screen = named, so S is the Save snapshot screen
-# straight away; slots_on_load = never, so a game with slots loads with no question. Q still
-# saves over the slot used last.
+# straight away (and from the button held a second); slots_on_load = never, so a game with slots
+# loads with no question.
 sd /48.rom {ROM48}
 sd /Picomenu.ini {HERE}/slots-b.ini
 sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
@@ -24,8 +24,15 @@ wait 30
 expect Save Snapshot
 key BREAK
 wait 30
-key q
-wait 100
-nofile sd /Save Games/Alpha Save Game.z80
-get sd /Save Games/Alpha/Slot 3 - old.sna {OUT}/s3.sna
-nofile sd /Save Games/Alpha/Slot 3 - old.z80
+expect B-Browse
+key x
+wait 30
+# the button held a second: the Save snapshot screen too, with no menu; BREAK goes back to the game
+nmihold
+wait 30
+expect Save Snapshot
+expectnot B-Browse
+key BREAK
+wait 30
+expectnot Save Snapshot
+expectnot B-Browse

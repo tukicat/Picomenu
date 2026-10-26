@@ -1,6 +1,7 @@
-# A 128K snapshot saved while a tape put in with T plays notes where the tape was; loading it
-# puts the tape back in (tape in) at that block. Here the save is made in 128 BASIC at the first
-# PAUSE (part A loaded), the tape is ejected, the save loaded, and a key loads part B.
+# A 128K snapshot saved (slot 1, the button held a second) while a tape put in with T plays
+# notes where the tape was; loading it puts the tape back in (tape in) at that block. Here the
+# save is made in 128 BASIC at the first PAUSE (part A loaded), the tape is ejected, the save
+# loaded, and a key loads part B.
 flash /48.rom {ROM48}
 sd /Tapes/tapein.tap {HERE}/tapein.tap
 boot
@@ -17,13 +18,14 @@ wait 50
 key ENTER
 wait 300
 expectmem 30000 0x55
-nmi
+nmihold
 wait 30
-key q
+expect Save slots: tapein
+key 1
 wait 200
-ls sd /Save Games
-get sd /Tape Files/Save Games~tapein Save Game.z80.tape {OUT}/tapein-note.txt
-nofile sd /Save Games/tapein Save Game.z80.tape
+ls sd /Save Games/tapein
+get sd /Tape Files/Save Games~tapein~Slot 1.z80.tape {OUT}/tapein-note.txt
+nofile sd /Save Games/tapein/Slot 1.z80.tape
 # out with the tape: loading the save must put it back in
 nmi
 wait 30
@@ -37,10 +39,10 @@ key b
 wait 50
 key u
 wait 50
-text
 key 1
 wait 50
-text
+key 1
+wait 50
 key 1
 wait 300
 expectmem 30000 0x55

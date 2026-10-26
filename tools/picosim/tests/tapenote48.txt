@@ -1,4 +1,4 @@
-# The tape position kept with a snapshot (in /Tape Files, "<snapshot's path, / as ~>.tape"): a quick save made during Out Run's
+# The tape position kept with a snapshot (in /Tape Files, "<snapshot's path, / as ~>.tape"): a save (the button held: slot 1) made during Out Run's
 # first race notes that its tape had got past stage 1, and loading the save carries on from
 # there. Renaming the save takes the note with it. A .z80 converted from the tape (C) notes
 # where the conversion left the tape, and the stage loads from there when a race starts.
@@ -18,16 +18,16 @@ wait 500
 hold 1 50
 wait 500
 expecttape 8
-nmi
+nmihold
 wait 30
-key q
+expect Save slots: OutRun
+key 1
 wait 100
-key SPACE
-wait 50
-ls sd /Save Games
-get sd /Tape Files/Save Games~OutRun Save Game.sna.tape {OUT}/outrun-note.txt
-nofile sd /Save Games/OutRun Save Game.sna.tape
-# rename the save (in /Save Games): its note goes with it
+expectnot Save slots
+ls sd /Save Games/OutRun
+get sd /Tape Files/Save Games~OutRun~Slot 1.sna.tape {OUT}/outrun-note.txt
+nofile sd /Save Games/OutRun/Slot 1.sna.tape
+# rename the save (in /Save Games/OutRun): its note goes with it
 nmi
 wait 30
 key b
@@ -35,6 +35,8 @@ wait 50
 key u
 wait 50
 key 2
+wait 50
+key 1
 wait 50
 key r
 wait 20
@@ -44,10 +46,10 @@ key 2
 wait 6
 key ENTER
 wait 60
-expect OutRun Save Game2
-ls sd /Save Games
-get sd /Tape Files/Save Games~OutRun Save Game2.sna.tape {OUT}/outrun-note2.txt
-nofile sd /Tape Files/Save Games~OutRun Save Game.sna.tape
+expect Slot 12
+ls sd /Save Games/OutRun
+get sd /Tape Files/Save Games~OutRun~Slot 12.sna.tape {OUT}/outrun-note2.txt
+nofile sd /Tape Files/Save Games~OutRun~Slot 1.sna.tape
 key 1
 wait 300
 nmi
@@ -60,6 +62,8 @@ key x
 wait 30
 # convert the tape (C, Auto: a 48K one here) and load the .z80
 key b
+wait 50
+key u
 wait 50
 key u
 wait 50

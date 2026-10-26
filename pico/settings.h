@@ -43,7 +43,9 @@ enum Quick : uint8_t { QUICK_ASK = 0, QUICK_OVERWRITE = 1, QUICK_NEW = 2 };
 enum GrabFormat : uint8_t { GRAB_SCR = 0, GRAB_PNG = 1, GRAB_BOTH = 2 };
 enum Section : uint8_t { SEC_NONE, SEC_BROWSE, SEC_SAVING, SEC_BUTTONS, SEC_CONVERTING, SEC_BIN, SEC_ORDER, SEC_DISPLAY, SEC_TAPES, SEC_UNKNOWN };
 
-static const uint16_t LONG_PRESS_MIN = 500, LONG_PRESS_MAX = 5000;
+// long_press: holding the button this long resets the Spectrum. Below 2 seconds (1.0 was the
+// old default) reads as 3: a hold of 1 second up to it is the save screen or the screen grab.
+static const uint16_t LONG_PRESS_MIN = 2000, LONG_PRESS_MAX = 5000, LONG_PRESS_DEFAULT = 3000;
 static const size_t BAD_TEXT = 24;      // letters of a line that was not understood kept
 
 struct Settings {
@@ -62,8 +64,9 @@ struct Settings {
     bool save_screen_slots = true;      // S opens the save slots (false: the Save snapshot screen)
     uint8_t grab_format = GRAB_SCR;     // screen grabs saved as .scr, .png or both
     // [Buttons]
-    uint16_t long_press_ms = 1000;      // 0: off
-    bool double_press = true;
+    uint16_t long_press_ms = LONG_PRESS_DEFAULT;    // the reset (0: off)
+    bool double_press = true;           // a double press does something (false: off)
+    bool save_on_hold = true;           // save_press: hold (a 1 s hold saves, a double press grabs) or double
     // [Converting]
     bool loading_grab = true;
     // [Waste Bin]
@@ -140,7 +143,7 @@ struct Parser {
         }
         if (i < n) return -1;
         uint32_t ms = whole * 1000 + frac;
-        if (ms < LONG_PRESS_MIN || ms > LONG_PRESS_MAX) return -1;
+        if (ms > LONG_PRESS_MAX) return -1;
         return (int) ms;
     }
 
@@ -235,13 +238,19 @@ struct Parser {
         case SEC_BUTTONS:
             if (same(k, kn, "long_press")) {
                 if ((i = seconds(v, vn)) < 0) return false;
-                s.long_press_ms = (uint16_t) i;
+                s.long_press_ms = i == 0 ? 0 : i < LONG_PRESS_MIN ? LONG_PRESS_DEFAULT : (uint16_t) i;
                 return true;
             }
             if (same(k, kn, "double_press")) {
-                static const char* const W[] = { "off", "grab", nullptr };
+                static const char* const W[] = { "off", "on", "grab", nullptr };
                 if ((i = pick(v, vn, W)) < 0) return false;
-                s.double_press = i == 1;
+                s.double_press = i != 0;
+                return true;
+            }
+            if (same(k, kn, "save_press")) {
+                static const char* const W[] = { "double", "hold", nullptr };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.save_on_hold = i == 1;
                 return true;
             }
             return false;
@@ -415,8 +424,6 @@ static const char DEFAULT_SETTINGS[] =
     "[Saving]\r\n"
     "# auto, sna, z80 or szx\r\n"
     "save_type = auto\r\n"
-    "# ask, overwrite or new\r\n"
-    "quick_save = ask\r\n"
     "# S opens: slots or named\r\n"
     "save_screen = slots\r\n"
     "# ask or never\r\n"
@@ -425,10 +432,12 @@ static const char DEFAULT_SETTINGS[] =
     "grab_format = scr\r\n"
     "\r\n"
     "[Buttons]\r\n"
-    "# 0.5 to 5 seconds, or off\r\n"
-    "long_press = 1.0\r\n"
-    "# grab or off\r\n"
-    "double_press = grab\r\n"
+    "# hold to reset: 2 to 5 seconds, or off\r\n"
+    "long_press = 3.0\r\n"
+    "# save screen on a 1 second hold or a double press (the other grabs)\r\n"
+    "save_press = hold\r\n"
+    "# on or off\r\n"
+    "double_press = on\r\n"
     "\r\n"
     "[Converting]\r\n"
     "# on or off\r\n"
