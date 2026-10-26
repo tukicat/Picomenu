@@ -6,7 +6,7 @@ Picomenu has been built using Brian Apps original code, an AI (Claude) has then 
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
-[![picomenu Video](https://img.youtube.com/vi/EOnCzTOS64U/maxresdefault.jpg)](https://www.youtube.com/watch?v=EOnCzTOS64U)
+[![picomenu Video](https://img.youtube.com/vi/EOnCzTOS64U/0.jpg)](https://www.youtube.com/watch?v=EOnCzTOS64U)
 
 Picomenu Demonstration Video
 
