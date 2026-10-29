@@ -50,8 +50,10 @@ expect Slot 12
 ls sd /Save Games/OutRun
 get sd /Tape Files/Save Games~OutRun~Slot 12.sna.tape {OUT}/outrun-note2.txt
 nofile sd /Tape Files/Save Games~OutRun~Slot 1.sna.tape
+# loading it carries on with the tape where it was (looked at as soon as the game is going: left
+# longer, the race may get to the next stage, which loads more, or not, as the timing falls)
 key 1
-wait 300
+wait 100
 nmi
 wait 30
 key v

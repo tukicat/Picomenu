@@ -251,6 +251,11 @@ ACTION_SNA_END_WRITE128 equ 0x13
 // ACTION_SNA_SAVE then saves a .z80 file.
 
 SAVE128_INFO_SIZE equ 27 + 23
+// The fast copy of a snapshot to the pico (gencopy): SAVE128_GEN_BLOCK bytes of data at the
+// start of spare_space, then the code the pico writes, 4 bytes for each 2 of data and 5 more
+SAVE128_GEN_BLOCK equ 512
+SAVE128_GEN_DATA equ SPARE_SPACE
+SAVE128_GEN_CODE equ SPARE_SPACE + SAVE128_GEN_BLOCK
 
 // The screen is not kept in the NMI ROM while the menu is open. On entry it is
 // sent to the pico, SCREEN_PIECE bytes at a time through spare_space, and it
@@ -375,6 +380,16 @@ ACTION_OPTIONS equ 0x2C
 // (0 or 1: opened; 1 the Spectrum can page memory, so Auto tries a 128K first). Status 0 stays, 1 closed, 3 convert: the ROM then shows the game information
 // in mode 3 (showgameinfo), where the pico runs the tapes one after another (op 6)
 ACTION_BATCH equ 0x2D
+// A on the menu: the game's autosaves (Picomenu.ini's autosave), drawn by the pico
+// (picoscreen). BYTE param1 = the key (0: opened). Status 0 stays, 1 closed, 2 the checkpoint
+// chosen is ready (load with no name)
+ACTION_CHECKPOINTS equ 0x2E
+// Before a game is loaded from the menu: param1 0 asks whether to ask "Autosave this game?"
+// (status 0: ask, 1: don't); then param1 'y' or 'n' is the answer
+ACTION_CHECKPOINT_ASK equ 0x2F
+// A piece of the end of the 128K bank paged in at 0xC000 (from 0xDB00), sent as it is before the
+// banks: the pico hashes it (s1, s2 of the save header). WORD param1 = where, WORD param2 = how many
+ACTION_SNA_HASH equ 0x30
 // Saves the game's screen (the pico has it from when the menu opened) in the folder
 // Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
@@ -413,12 +428,10 @@ MOVE_INFO equ 1024          // where in spare_space the move description goes (a
 // the free bytes are between the end of the code and it (ROM_FREE, at the end).
 // The screen goes to and from the pico in pieces of SCREEN_PIECE bytes (at
 // spare_space + MOVE_INFO, above a list), snapshots are loaded LOAD_BLOCK bytes at a
-// time, and sendsnapshottopico sends the memory after the screen in SNAP_SEND_BLOCKS
-// pieces of SNAP_SEND_BLOCK bytes, each copied through spare_space.
+// time, and a snapshot is saved through spare_space by the code the pico writes there
+// (gencopy, SAVE128_GEN_BLOCK bytes at a time).
 SCREEN_PIECE equ 768           // 9 pieces (1152 in Rev 1.9 needed 384 bytes more)
 LOAD_BLOCK equ 1024
-SNAP_SEND_BLOCK equ 1760
-SNAP_SEND_BLOCKS equ (49152 - 6912) / SNAP_SEND_BLOCK
 spare_size equ MOVE_INFO + SCREEN_PIECE
 SPARE_SPACE equ 0x4000 - spare_size
 spare_space equ SPARE_SPACE
@@ -490,6 +503,9 @@ STARTUP_ACTION_GRAB equ 0x5
 // carries on when it is closed. Anything above STARTUP_ACTION_GRAB is one of these.
 STARTUP_ACTION_SAVE_SCREEN equ 0x6
 STARTUP_ACTION_GRAB_SCREEN equ 0x7
+// an autosave (a checkpoint): the snapshot goes to the pico (ACTION_SNA_SAVE, param3 = 4), with no
+// menu, and the game carries on
+STARTUP_ACTION_CHECKPOINT equ 0x8
 // how long the border stays coloured: that many times 3,300 T-states (about 0.4 s)
 GRAB_FLASH equ 420
 
@@ -613,6 +629,15 @@ nmientry:
     cp STARTUP_ACTION_TRANSFER_SNAP
     jr nz, 1F
     call sendsnapshottopico
+    jr .exitnoscreenrestore     // the screen was not touched
+
+1:  cp STARTUP_ACTION_CHECKPOINT
+    jr nz, 1F
+    call savesnapshot
+    ld ix, 0
+    ld (ix + 5), 4          // a checkpoint: the pico has the name
+    ld (ix + 1), ACTION_SNA_SAVE
+    call waitpico
     jr .exitnoscreenrestore     // the screen was not touched
 
 1:  call ayswap               // the sound chip quiet while the menu is up
@@ -974,6 +999,16 @@ startmenu:
 
 .handle_exit:
     ret
+
+// A: the autosaves (the pico draws them); a number carries on from one
+.handle_checkpoints:
+    ld c, ACTION_CHECKPOINTS
+    xor a
+    call picoscreen
+    cp 2
+    jr z, .doload
+    call screenbelowmenu
+    jp .showtopscreen
 
 // R: load the game that was last loaded from Browse Games again. A game with save slots asks
 // first, as in Browse Games (the pico says: a save, in /Save Games, loads as it is)
@@ -1571,8 +1606,9 @@ startmenu:
     MENU_ITEM 'o', 11, 2, .optionsmsg, .handle_options
     MENU_ITEM 'i', 12, 2, .infomsg, .handle_info
     MENU_ITEM 'v', 13, 2, .tapemsg, .handle_tape
-    MENU_ITEM 't', 14, 2, .toolsmsg, .handle_tools
-    MENU_ITEM 'x', 15, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'a', 14, 2, .checkpointsmsg, .handle_checkpoints
+    MENU_ITEM 't', 15, 2, .toolsmsg, .handle_tools
+    MENU_ITEM 'x', 16, 2, .exitmsg,  .handle_exit
     MENU_END
 // T: Tools, the things used now and then. Each goes back to this menu when it is done
 // (.showtopscreen comes here while .intools is set); X goes back to the NMI menu.
@@ -1592,6 +1628,7 @@ startmenu:
 .intools: BYTE 0
 .testromshow: DZ "Test ROM (diagnostics)"
 .tapemsg: DZ "Virtual Tape Player"
+.checkpointsmsg: DZ "Autosave"
 .binmsg: DZ "Waste Bin"
 .testmsg: DZ "into the zx-diagnostics ROM?"
 .testmsg2: DZ "into the DiagROM?"
@@ -1650,6 +1687,7 @@ save128_extra:
 BANK_M equ 0x5B5C
 HASH_START equ 0xDB00       // the hash skips the part of bank 5 that the menu draws on
 HASH_LEN equ 0x10000 - HASH_START
+    ASSERT (HASH_LEN & 255) == 0 && HASH_LEN < 0x10000     // whole 256s (the loop's djnz)
 
 
 
@@ -3699,38 +3737,6 @@ savesnapshotscreen:
     ld (.namelen), a
     ld (.overlast), a       // non-zero: it goes in that game's folder
 
-    ld a, (.quick)
-    or a
-    jr z, .redisplay
-    // Quick-save: the name is "<game> Save Game" and the type is the game's. Without
-    // a game to name it after it is the ordinary screen.
-    ld ix, 0
-    ld hl, .nametext
-    ld (ix + 2), hl
-    ld (ix + 5), ACTION_SNA_SAVE_DIR_OP_QUICK
-    ld (ix + 1), ACTION_SNA_SAVE_DIR
-    call waitpico
-    cp 254                  // (255 means the request is still being worked on)
-    jr z, .nogame
-    or a
-    jr nz, 1F
-    ld (.quick), a
-    jr .redisplay
-1:  ld (.namelen), a
-    ld a, 2                 // 2 = a quick-save: the pico puts it in the Save Games folder
-    ld (.overlast), a
-    ld a, ACTION_SNA_SAVE_TYPE_SAME
-    ld (.savetype), a
-    jr .redisplay
-
-.nogame:
-    xor a
-    ld (.quick), a
-    ld hl, startmenu.noreloadmsg
-    call loadscreen.message
-    ld a, 1                 // back to the menu
-    ret
-
 .redisplay:
     xor a
     ld (.saveto), a
@@ -3796,13 +3802,6 @@ savesnapshotscreen:
 2:
     ld c, '_'
     call putchar
-
-    ld a, (.quick)          // a quick-save goes on to save: the screen shows what it saves
-    or a
-    jr z, .waitfornextkey
-    xor a
-    ld (.quick), a
-    jp .dosave
 
 .waitfornextkey
     call waitforkeypress
@@ -3987,25 +3986,10 @@ savesnapshotscreen:
     jp .redisplay
 
 .prompttooverwrite:
-    ld a, (.overlast)
-    cp 2
-    jr z, .promptquick
     call overwritescreen
     jp nc, .redisplay ; don't overwrite, give the user a chance to change the name
     ld a, 1          ; otherwise have another go with a forced overwrite
     jr .saveit    
-
-// A quick save of a game that has been saved: overwrite it (Y), or keep it and save
-// under the next number, "<game> Save Game 2", 3 ... (N)
-.promptquick:
-    ld hl, overwritescreen.quickmenu_def
-    call showmenu
-    ld hl, overwritescreen.quickmenu_def
-    call menukeyhandler
-    ld a, 1
-    jr c, .saveit
-    inc a                   // 2: the next number
-    jr .saveit
 
 .showbordername:
     ld a, (.bordercolour)
@@ -4040,7 +4024,6 @@ savesnapshotscreen:
 .overlast DB 0          // non-zero while the name is the last game's, unchanged
 .savetype DB 0          // ACTION_SNA_SAVE_TYPE_*
 .savedefault DB 0       // the type the screen starts on: the pico sets it as the menu opens
-.quick DB 0             // non-zero for a quick-save, set by the menu
 .saveto DB 0            // non-zero to redraw the Save to: line
     ASSERT ACTION_SNA_SAVE_NAME_MAX < 32 && ACTION_SNA_SAVE_NAME_MAX <= 30
 
@@ -4092,19 +4075,20 @@ overwritescreen:
     MENU_ITEM 'y', 4, 2, .yes, .handle_yes
     MENU_ITEM 'n', 5, 2, .no, .handle_no
     MENU_END
-.quickmenu_def:
-    MENU_ITEM 0, 1, 1, .quicktitle1, 0
-    MENU_ITEM 0, 2, 1, .quicktitle2, 0
-    MENU_ITEM 'y', 4, 2, .yes, .handle_yes
-    MENU_ITEM 'n', 5, 2, .quickno, .handle_no
-    MENU_END
-.quicktitle1 DZ "Do you want to overwrite"
-.quicktitle2 DZ "the existing save? Y or N?"
-.quickno: DZ "No, save as a new number"
 .title1 DZ "A file with this name exists"
 .title2 DZ "Overwrite this file?"
 .yes: DZ "Yes, overwrite this file"
 .no: DZ "No, cancel"
+
+// "Autosave this game?" (loadsnapshot)
+checkpointask_def:
+    MENU_ITEM 0, 1, 1, .rwtitle, 0
+    MENU_ITEM 'y', 3, 2, .rwyes, overwritescreen.handle_yes
+    MENU_ITEM 'n', 4, 2, .rwno, overwritescreen.handle_no
+    MENU_END
+.rwtitle DZ "Autosave this game?"
+.rwyes: DZ "Yes, autosave it"
+.rwno: DZ "No, play without it"
 
 ; -------------------------------------------
 ; poke screen menu
@@ -4892,42 +4876,31 @@ savesnapshot:
     cp 16
     jr nz, 1B
 
-    // s1 = sum of the bytes, s2 = sum of the s1s, in 16 bits
-    ld hl, HASH_START
-    ld bc, HASH_LEN
-    ld de, 0
-    ld ix, 0
-1:  ld a, (hl)
-    add a, e
-    ld e, a
-    adc a, d
-    sub e
-    ld d, a
-    add ix, de
-    inc hl
-    dec bc
-    ld a, b
-    or c
-    jr nz, 1B
-    ld (save128_extra.s1), de
-    ld (save128_extra.s2), ix
-    ld ix, 0
+    ld hl, sna_on_entry
+    ld (ix + 2), hl
+    ld (ix + 1), ACTION_SNA_BEGIN_WRITE128
+    call waitpico
 
-    // can banks 0 and 1 be paged in?  Put back what was there either way
+    // the end of the bank paged in at 0xC000 goes first, as it is (before canpage changes the
+    // paging): the pico hashes it (s1, s2 of the header) to know that bank among the ones it
+    // gets (it was hashed here, slower)
+    ld (ix + 1), ACTION_SNA_HASH
+    ld hl, HASH_START
+    ld de, HASH_LEN
+    call save128_send
+
+    // can banks 0 and 1 be paged in?  Put back what was there either way. If not, it is a 48K
+    // snapshot after all (sendsnapshottopico begins again, as one)
     call canpage
     jr z, .paging
     pop ix
     jp sendsnapshottopico
 
 .paging
-    ld hl, sna_on_entry
-    ld (ix + 2), hl
-    ld (ix + 1), ACTION_SNA_BEGIN_WRITE128
-    call waitpico
-
     // bank 5 is the screen (the pico's copy) and the memory after it, bank 2 is next
     ld (ix + 1), ACTION_SNA_WRITE_SCREEN
     call waitpico
+    ld (ix + 1), ACTION_SNA_NEXT_WRITE
     ld hl, 0x4000 + 6912
     ld de, 0x4000 - 6912
     call save128_send
@@ -4969,30 +4942,77 @@ waitpico:
     jr z, 1B
     ret
 
-// send DE bytes from HL to the Pico, up to 1024 at a time through spare_space
+// Sends DE bytes from HL to the pico, SAVE128_GEN_BLOCK at a time, as the action the caller put
+// in (ix + 1) (it stays there). HL moves on. The copy is gencopy's.
 save128_send:
     ld a, d
     or e
     ret z
-    ld bc, 1024
+    ld bc, SAVE128_GEN_BLOCK
     ld a, d
-    cp 4
+    cp SAVE128_GEN_BLOCK / 256
     jr nc, 1F
     ld b, d
     ld c, e
-1:  push hl
+1:  push de
+    push hl
+    ld hl, SAVE128_GEN_DATA + SAVE128_GEN_BLOCK
+    or a
+    sbc hl, bc
+    ld (ix + 2), hl         // where the piece is: the end of the data area
+    ld (ix + 4), bc
+    pop hl
+    call gencopy
+    call waitpico
+    pop de
     ex de, hl
     or a
     sbc hl, bc
-    ex (sp), hl
-    ld de, spare_space
-    ld (ix + 2), de
-    ld (ix + 4), bc
-    ld (ix + 1), ACTION_SNA_NEXT_WRITE
-    ldir
-    call waitpico
-    pop de
+    ex de, hl
     jr save128_send
+
+// Copies BC bytes (even, at most SAVE128_GEN_BLOCK) from HL to the end of the data area in
+// spare_space, at 13 T-states a byte (LDIR takes 21): the pico wrote SAVE128_GEN_BLOCK / 2 of
+// "POP HL / LD (nn),HL" there when the save began (ACTION_SNA_BEGIN_WRITE, _128), each pair
+// putting the next two bytes in place, and then "LD SP,(gencopy_sp) / POP HL / RET". This jumps
+// to the last BC / 2 of them with SP on the bytes. Interrupts are off (the NMI). HL moves on by
+// BC; BC and IX are kept.
+gencopy:
+    push hl
+    add hl, bc
+    ex (sp), hl             // HL + BC for the end, HL the bytes
+    ld (gencopy_sp), sp
+    push hl
+    ld hl, SAVE128_GEN_CODE + SAVE128_GEN_BLOCK * 2
+    or a
+    sbc hl, bc
+    sbc hl, bc              // 4 bytes of code for each 2 bytes
+    ld (.jump + 1), hl
+    pop hl
+    ld sp, hl
+.jump:
+    jp 0
+gencopy_sp: WORD 0
+SAVE128_GEN_SP equ gencopy_sp
+
+// LDIR, about a fifth quicker (17 T-states a byte, not 21): 32 LDIs a turn, then LDIR for
+// what is left. Saving a snapshot (and a checkpoint, which the game waits for) is
+// mostly this copy.
+fastcopy:
+    ld a, b
+    or a
+    jr nz, 1F
+    ld a, c
+    cp 32
+    jr c, 2F
+1:  DUP 32
+    ldi
+    EDUP
+    jr fastcopy
+2:  or a
+    ret z
+    ldir
+    ret
 
 
 // Can the machine page memory now (a 128K, not locked in 48K mode)?  Z if it can.  Writes
@@ -5305,13 +5325,13 @@ previewfrompico:
     ld bc, SCREEN_PIECE
     cp ACTION_SCREEN_STASH
     jr nz, .fetch
-    ldir                    // hl moves on to the next piece
+    call fastcopy           // hl moves on to the next piece
     call waitpico
     jr .next
 .fetch
     call waitpico
     ex de, hl
-    ldir
+    call fastcopy
     ex de, hl               // hl is the next piece
 .next
     pop bc
@@ -5334,29 +5354,41 @@ sendsnapshottopico:
     ld (ix + 1), ACTION_SNA_WRITE_SCREEN
     call waitpico
 
-    // the 42240 bytes after the screen go through spare_space, a piece at a time
-    ld b, SNAP_SEND_BLOCKS
-    ld hl, 16384 + 6912
-
-.transfer
-    push bc
-    ld de, spare_space
-    ld bc, SNAP_SEND_BLOCK
-    ld (ix + 2), de
-    ld (ix + 4), bc
+    // the 42240 bytes after the screen, a piece at a time
     ld (ix + 1), ACTION_SNA_NEXT_WRITE
-    ldir
-    call waitpico
-    pop bc
-    djnz .transfer
+    ld hl, 16384 + 6912
+    ld de, 49152 - 6912
+    call save128_send
     pop ix
-
     ret
 
 
 // enter with hl pointing to the snapshot name string
 //            a  holding the drive byte
+// With autosave on in Picomenu.ini a game loaded from the menu first asks whether to take
+// checkpoints of it (the pico says when: not for a checkpoint itself)
 loadsnapshot:
+    push hl
+    push af
+    ld ix, 0
+    ld (ix + 2), 0
+    ld (ix + 1), ACTION_CHECKPOINT_ASK
+    call waitpico
+    or a
+    jr nz, 2F
+    ld hl, checkpointask_def
+    call showmenu
+    ld hl, checkpointask_def
+    call menukeyhandler     // carry: yes
+    ld a, 'n'
+    jr nc, 1F
+    ld a, 'y'
+1:  ld ix, 0
+    ld (ix + 2), a
+    ld (ix + 1), ACTION_CHECKPOINT_ASK
+    call waitpico
+2:  pop af
+    pop hl
     ld ix, 0
     ld (ix + 2), hl
     ld hl, sna_header
@@ -6315,10 +6347,10 @@ ROM_FREE equ SPARE_SPACE - $
     ASSERT INFO_HOUSE + INFO_HOUSE_SIZE <= spare_space + MOVE_INFO
     ASSERT SCROLL_WINDOW >= spare_space + RECENT_SLOT * 10
     ASSERT SCROLL_WINDOW + SCROLL_WIDTH + 1 <= INFO_HOUSE
-    ASSERT SNAP_SEND_BLOCK * SNAP_SEND_BLOCKS == 49152 - 6912
-    ASSERT spare_size >= SNAP_SEND_BLOCK
-    // save128_send copies up to 1024 bytes at a time through spare_space
-    ASSERT spare_size >= 1024
+    // gencopy's data and code fit in spare_space (the code goes over the table getimmode
+    // makes at 0x3D00: the pico writes it after getimmode has been, and interrupts are off)
+    ASSERT SAVE128_GEN_CODE + SAVE128_GEN_BLOCK * 2 + 5 <= 0x4000
+    ASSERT (SAVE128_GEN_BLOCK & 255) == 0 && ((49152 - 6912) & 1) == 0
     // the memory load and save start up actions move spare_size_hi * 256 bytes at a time
     ASSERT spare_size_hi >= 1 && spare_size_hi * 256 <= spare_size
     // the move, rename and erase descriptions, after the longest list

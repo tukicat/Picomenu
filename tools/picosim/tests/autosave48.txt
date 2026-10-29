@@ -1,0 +1,209 @@
+# Autosave (autosave = 20 in Picomenu.ini): loading a game from the menu asks "Autosave this
+# game?"; with Y one is saved every 20 seconds (here when the script says), kept in
+# /Autosave/<game>; A on the menu lists them by age, V shows one's screen, a number carries on
+# from it (the newer ones go), M moves one to a save slot, C clears the game's autosaves, O turns
+# autosave on or off for the game. A reset (4, 1) doesn't ask.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+expect A-Autosave
+# Options shows it (the 12th item); X leaves with no changes
+key o
+wait 40
+expect autosave
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+key a
+wait 10
+expect [Saving] autosave every (s)
+key x
+wait 40
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+expectnot Autosave this
+checkpoint
+clock 20000
+checkpoint
+clock 20000
+checkpoint
+get sd /Autosave/Alpha/Autosave 1.sna {OUT}/rw1.sna
+get sd /Autosave/Alpha/Autosave 3.sna {OUT}/rw3.sna
+# A: the three, newest first, by their age in the game
+nmi
+wait 30
+key a
+wait 30
+expect Autosave: Alpha
+expect 1 0 seconds ago
+expect 2 20 seconds ago
+expect 3 40 seconds ago
+# V, 3: its screen; any key back to the list
+key v
+wait 20
+expect View which? 1-3
+key 3
+wait 30
+expectnot Autosave: Alpha
+key SPACE
+wait 30
+expect Autosave: Alpha
+# BREAK: back to the menu
+key BREAK
+wait 30
+expect B-Browse Games
+# 2: carry on from 20 seconds ago, with no question; checkpoint 3 (the newest) goes
+key a
+wait 30
+key 2
+wait 300
+expectnot Autosave:
+expectnot B-Browse
+nmi
+wait 30
+expect Reload: Alpha
+# the game is back where checkpoint 2 was: it is now, and the older one 20 seconds before
+key a
+wait 30
+expect 1 0 seconds ago
+expect 2 20 seconds ago
+expectnot 3 
+key x
+wait 30
+key x
+wait 30
+# the next checkpoint goes after the one carried on from (Checkpoint 3 again)
+clock 20000
+checkpoint
+nmi
+wait 30
+key a
+wait 30
+expect 1 0 seconds ago
+expect 2 20 seconds ago
+expect 3 40 seconds ago
+key x
+wait 30
+key x
+wait 30
+# M: move checkpoint 2 to save slot 3 (empty): it goes from the list, and slot 3 is it
+nmi
+wait 30
+key a
+wait 30
+key m
+wait 20
+expect Move which? 1-3
+key 2
+wait 20
+expect To which save slot? 1-9
+key 3
+wait 40
+expect Moved to slot 3
+expect 2 40 seconds ago
+expectnot 3 40 seconds ago
+get sd /Save Games/Alpha/Slot 3.sna {OUT}/cp-slot3.sna
+nofile sd /Autosave/Alpha/Autosave 2.sna
+# M again, to slot 3 (used now): asks first; Y goes over it
+key m
+wait 20
+key 1
+wait 20
+key 3
+wait 20
+expect Save over slot 3?
+key y
+wait 40
+expect Moved to slot 3
+nofile sd /Autosave/Alpha/Autosave 3.sna
+# C: N keeps them, Y erases the game's autosaves and its folder
+key c
+wait 20
+expect Erase all of its autosaves?
+key n
+wait 20
+get sd /Autosave/Alpha/Autosave 1.sna {OUT}/cp1.sna
+key c
+wait 20
+key y
+wait 40
+expect Autosaves cleared
+expect No autosaves yet.
+nofile sd /Autosave/Alpha/Autosave 1.sna
+nofile sd /Autosave/Alpha
+get sd /Save Games/Alpha/Slot 3.sna {OUT}/cp-slot3.sna
+key x
+wait 30
+key x
+wait 30
+# a game loaded with N: no autosaves, and A says so (Alpha has slot 3 now: that question
+# comes first, then this one)
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect Saved games: Alpha
+key 0
+wait 50
+expect Autosave this game?
+key n
+wait 300
+checkpoint
+nmi
+wait 30
+key a
+wait 30
+expect Autosave is off for this game.
+expect O   Turn autosave on
+# O turns it on for this game after all (every 20 s, as Picomenu.ini says)
+key o
+wait 20
+expect Autosave on for this game
+expect No autosaves yet.
+expect One is saved every 20 seconds.
+expect O   Turn autosave off
+key x
+wait 30
+key x
+wait 30
+checkpoint
+get sd /Autosave/Alpha/Autosave 1.sna {OUT}/cp-on.sna
+# 4 (a reset): no question, and autosave stops
+nmi
+wait 30
+key 4
+wait 20
+expect into 48K mode (48 BASIC)?
+key y
+wait 20
+expectnot Autosave this game?
+wait 100
+checkpoint
+nmi
+wait 30
+key a
+wait 30
+expect Autosave is off for this game.
+key x
+wait 30
+key x
+wait 30

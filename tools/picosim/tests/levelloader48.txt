@@ -52,6 +52,7 @@ key a
 key a
 key a
 key a
+key a
 wait 10
 expect [Tapes] multi-load levels
 expect level_loaders off

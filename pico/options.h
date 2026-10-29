@@ -35,7 +35,7 @@ namespace options {
 
 enum Id : uint8_t {
     THEME, SHOW_ALL, DETAILS, SORT, FOLDERS, START_DRIVE, START_FOLDER,
-    SAVE_TYPE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT,
+    SAVE_TYPE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT, CHECKPOINTS,
     LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K, COUNT
 };
 
@@ -57,6 +57,7 @@ static const Item ITEMS[COUNT] = {
     { "save_screen", settings::SEC_SAVING, "[Saving] what S opens" },
     { "slots_on_load", settings::SEC_SAVING, "[Saving] ask for a slot" },
     { "grab_format", settings::SEC_SAVING, "[Saving] screen grab files" },
+    { "autosave", settings::SEC_SAVING, "[Saving] autosave every (s)" },
     { "long_press", settings::SEC_BUTTONS, "[Buttons] hold to reset (s)" },
     { "save_press", settings::SEC_BUTTONS, "[Buttons] save: hold or double" },
     { "double_press", settings::SEC_BUTTONS, "[Buttons] a double press" },
@@ -109,6 +110,10 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
     case SAVE_SCREEN: w = s.save_screen_slots ? "slots" : "named"; break;
     case SLOTS_ON_LOAD: w = s.slots_on_load ? "ask" : "never"; break;
     case GRAB_FORMAT: w = s.grab_format == 1 ? "png" : s.grab_format == 2 ? "both" : "scr"; break;
+    case CHECKPOINTS:
+        if (s.checkpoint_s == 0) w = "off";
+        else { snprintf(out, size, "%u", (unsigned) s.checkpoint_s); return; }
+        break;
     case LONG_PRESS:
         if (s.long_press_ms == 0) {
             w = "off";
@@ -152,6 +157,7 @@ inline void cycle(Edit& e, uint8_t id, const char* folder_now) {
     case SAVE_SCREEN: s.save_screen_slots = !s.save_screen_slots; break;
     case SLOTS_ON_LOAD: s.slots_on_load = !s.slots_on_load; break;
     case GRAB_FORMAT: s.grab_format = (uint8_t) ((s.grab_format + 1) % 3); break;
+    case CHECKPOINTS: s.checkpoint_s = s.checkpoint_s == 0 ? 20 : s.checkpoint_s == 20 ? 40 : s.checkpoint_s == 40 ? 60 : 0; break;
     case LONG_PRESS:
         // 2.0, 2.5 ... 5.0 seconds, then off; a time between steps goes to the next step
         if (s.long_press_ms == 0) s.long_press_ms = settings::LONG_PRESS_MIN;

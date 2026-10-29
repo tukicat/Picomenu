@@ -2,6 +2,65 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.3.0 (2026-10-27)
+Changes since Rev 2.2.0. `FIRMWARE_ID` is `Rev 2.3.0 (tapeloader v230)`: Diagnostics shows "Rev 2.3.0". Autosave was tried as "Rewind" (test 1) and "Checkpoints" (test 2) before it took this form.
+
+### Autosave
+- **New setting `autosave`** in `[Saving]` of Picomenu.ini and in O - Options (the 12th item): `off` (the default), `20`, `40` or `60` seconds. Set up SD card writes `autosave = off`. The earlier tests' `rewind` and `checkpoints` lines are still read, and their 5 or 10 seconds becomes 20.
+- **"Autosave this game?"** With autosave set, each game loaded from the menu asks first: Browse Games, R - Reload, E - Recently played, a save slot from the question. Y autosaves it, N plays it without. A reset (4 or 1 on the menu) and a test ROM don't ask (earlier tests asked); nor does a game loaded any other way.
+- **The saves.** Every 20, 40 or 60 seconds of play PicoMenu saves a snapshot of the game with no menu.
+  - The time in the menu, or on the S and G screens, is not counted.
+  - The last six are kept on the SD card in a folder for each game, `/Autosave/<game>`, as `Autosave 1.sna` (48K) or `.z80` (128K, with the sound chip as the game had it), the oldest written over. The game is named as its save slots are.
+  - A tape playing through the trap is noted with each, as with any save.
+- **A - Autosave on the NMI menu** lists the game's autosaves newest first by their age in the game (`1 0 seconds ago`, `2 20 seconds ago` ...):
+  - **1-6 Select autosave** carries on from one, with no question. The newer ones are dropped, and autosaving goes on from there.
+  - **V** then a number shows an autosave's screen.
+  - **M**, an autosave, then a slot (1-9) moves it to that save slot of the game (`/Save Games/<game>/Slot 3.sna` ..., as S saves them). It is moved, not copied. A slot in use asks "Save over slot n?" first and keeps its label. The slot becomes the one used last.
+  - **C** (after Y) erases the game's autosaves and their tape notes, and the folder when nothing else is in it. The line reads "Clear the game's autosaves", which fits the screen.
+  - **O** turns autosave on for the game being played, even after N at the question. With `autosave = off` it saves every 20 seconds for this game only. O turns it off again.
+  - **BREAK** goes back to the menu.
+- **What stays the game's.** An autosave loaded from A doesn't change what R reloads, the recently played list or the Save snapshot screen's name. One loaded from Browse Games is still known as its game's: its slots, and R's line, `Reload: Alpha Autosave 3`, which reloads it as it is.
+- **When it stops.** Autosave stops at a reset (the 3-second hold, 4 or 1 on the menu) and when another game is loaded. The files stay.
+
+### Quicker saving (autosaves, save slots, Save snapshot)
+- **The copy is written for the moment by the Pico.** At the start of a save the Pico writes 256 pairs of `POP HL / LD (nn),HL` into the NMI ROM's work area, and the ROM runs the last of them for each piece of up to 512 bytes, with SP on the memory. That is 13 T-states a byte; LDIR takes 21.
+- **The 128K bank check is done on the Pico.** The ROM no longer adds up the end of the 128K bank paged in (9,472 bytes, about 0.17 s). It sends those bytes as they are, before anything is paged, and the Pico adds them up.
+- **The screen copy is faster.** The screen going to and from the Pico as the menu opens and closes uses 32 LDIs a turn (17 T-states a byte).
+- **Measured on the simulator at 3.5 MHz, the game waits:**
+
+  | | First version (test 1) | Rev 2.3.0 |
+  |---|---|---|
+  | 48K | 0.25 s | 0.21 s |
+  | 128K | 0.83 s | 0.58 s |
+
+  The SD card is written after the game carries on. Copying 48K at 13 T-states a byte can't take less than about 0.18 s; the rest is the screen and waiting for one interrupt to find the interrupt mode.
+
+### Removed
+- The quick-save code left in the Save snapshot screen (Q went in 2.2.0) is gone from the NMI ROM, making room for the above.
+
+### Licences
+- No new third-party code. The changes are PicoMenu's own code (GPL v3), in files that already carry its header. THIRD-PARTY-NOTICES.txt is retitled for Rev 2.3.0.
+
+### Tests
+- **Simulator:** `checkpoint` takes an autosave when the script says, and prints how long the game waited. The firmware's own timer isn't used in the simulator, so the scripts don't depend on the PC's speed.
+- **New scripts:**
+  - `autosave48`:
+    - Options;
+    - the question (Y, and N for another game, after its slot question);
+    - three autosaves and their ages; V; BREAK;
+    - selecting the middle one, and the next autosave after it;
+    - M to an empty slot and over a used one (Y);
+    - C (N, then Y: the files and the folder go, the slot stays);
+    - O turning it on after N;
+    - 4 (a reset) with no question, and autosave off after it.
+  - `autosave128`: a 128K autosave as a `.z80` with the game's sound chip volumes; selecting it.
+- **Updated scripts:**
+  - `levelloader48` and `buttons2-48`: one more Options item;
+  - `tapenote48`: looks at the tape as soon as the slot's game is going (left longer, the race may reach the next stage, as the timing falls);
+  - `options48`: Rev 2.3.0.
+- **A bug caught:** `tapein128note` showed that the 128K bank check has to be sent before the ROM tries the paging. Fixed before release.
+- 60 scripts, all passing.
+
 ## Rev 2.2.0 (2026-10-26)
 Changes since Rev 2.1.0. `FIRMWARE_ID` is `Rev 2.2.0 (tapeloader v220)`: Diagnostics shows "Rev 2.2.0".
 

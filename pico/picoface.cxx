@@ -75,6 +75,8 @@ not, see <https://www.gnu.org/licenses/>.
 
 
 bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2);
+static void checkpoint_took();          // the checkpoints: see "---- Checkpoints"
+static void checkpoints_stop();
 static void tape_service_stop();
 static bool tape_in = false;        // the tape being played was put in with T (tape in, see tape_in_start)
 static void tape_in_hook_to_rom();
@@ -785,7 +787,7 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 2.2.0 (tapeloader v220)";
+static const char FIRMWARE_ID[] = "Rev 2.3.0 (tapeloader v230)";
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -965,13 +967,20 @@ static void recent_note(uint8_t drive, const char* dir, const char* name, const 
 // The tape position kept with a snapshot: see tape_note_write
 static void tape_note_resume(uint8_t drive, const char* snap, bool paged, uint8_t port_7ffd);
 static void tape_note_after_save(uint8_t drive, const char* snap);
+static void tape_note_remove(uint8_t drive, const char* snap);
+// The snapshot ACTION_PREPARE_LOAD made ready is a game (a file loaded), not a reset or a test
+// ROM: autosave asks only for a game
+static bool prepared_is_game = false;
 static void tape_note_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool keep);
 static void tape_notes_follow_folder(uint8_t drive, const char* from, const char* to, bool keep);
 static void tape_notes_retarget(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir);
 static void tape_labels_follow(uint8_t from_drive, const char* from, uint8_t to_drive, const char* to, bool is_dir);
 
-void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt) {
+// remember false: a checkpoint, which is still the game that was loaded (R - Reload, the
+// recent list and the save screen's name are left as they are)
+void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt, bool remember = true) {
     game_running = true;
+    prepared_is_game = true;
     // a snapshot expects the internal ROM; stop any earlier tape trap
     tape_service_stop();
     snap_is_paged = false;
@@ -981,22 +990,24 @@ void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt) 
     static char filename[BROWSE_PATH_MAX];
     const char* ext = fileAndExt + strlen(fileAndExt) + 1;
     snprintf(filename, sizeof(filename), "%s/%s.%s", dir, fileAndExt, ext);
-    remember_last_game(drive, dir, fileAndExt);
-    {
-        size_t len = strlen(fileAndExt) + 1;
-        len += strlen(ext) + 1;
-        if (len <= sizeof(reload_name) && strlen(dir) < sizeof(reload_dir)) {
-            memmove(reload_name, fileAndExt, len);
-            memmove(reload_dir, dir, strlen(dir) + 1);
-            reload_drive = drive == 1 ? 1 : 0;
-            reload_known = true;
+    if (remember) {
+        remember_last_game(drive, dir, fileAndExt);
+        {
+            size_t len = strlen(fileAndExt) + 1;
+            len += strlen(ext) + 1;
+            if (len <= sizeof(reload_name) && strlen(dir) < sizeof(reload_dir)) {
+                memmove(reload_name, fileAndExt, len);
+                memmove(reload_dir, dir, strlen(dir) + 1);
+                reload_drive = drive == 1 ? 1 : 0;
+                reload_known = true;
+            }
+            last_format = strcasecmp(ext, "sna") == 0 ? ACTION_SNA_SAVE_TYPE_SNA :
+                strcasecmp(ext, "z80") == 0 ? ACTION_SNA_SAVE_TYPE_Z80 :
+                strcasecmp(ext, "szx") == 0 ? ACTION_SNA_SAVE_TYPE_SZX : ACTION_SNA_SAVE_TYPE_AUTO;
         }
-        last_format = strcasecmp(ext, "sna") == 0 ? ACTION_SNA_SAVE_TYPE_SNA :
-            strcasecmp(ext, "z80") == 0 ? ACTION_SNA_SAVE_TYPE_Z80 :
-            strcasecmp(ext, "szx") == 0 ? ACTION_SNA_SAVE_TYPE_SZX : ACTION_SNA_SAVE_TYPE_AUTO;
+        persist_last_game();
+        recent_note(drive, dir, fileAndExt, ext);
     }
-    persist_last_game();
-    recent_note(drive, dir, fileAndExt, ext);
 
     if (strcasecmp(ext, "tap") == 0 || strcasecmp(ext, "tzx") == 0) {
         // First try to convert the tape into a 48K snapshot in snap_load_buffer;
@@ -3052,11 +3063,32 @@ static bool write_snapshot_file(Sink& sink, uint8_t format) {
 
 // ---- Save slots (slots.h): nine saves of each game in /Save Games/<game> on the SD card ----
 
+// Autosaves (checkpoints, see "---- Checkpoints"): kept in /Autosave/<game> as "Autosave 1" ...
+static const int CP_COUNT = 6;
+static const char CP_FOLDER[] = "/Autosave";
+
+// The game a file in an autosave folder is (the folder's name), or null: "/Autosave/Exolon"
+static const char* cp_folder_game(const char* dir) {
+    const size_t fl = sizeof(CP_FOLDER) - 1;
+    if (strncasecmp(dir, CP_FOLDER, fl) != 0 || dir[fl] != '/' || dir[fl + 1] == '\0') return nullptr;
+    return strchr(dir + fl + 1, '/') == nullptr ? dir + fl + 1 : nullptr;
+}
+
+// Whether a name (without the extension) is an autosave's: "Autosave 3"
+static bool cp_is_name(const char* name) {
+    return strncasecmp(name, "Autosave ", 9) == 0 && name[9] >= '1' && name[9] <= '0' + CP_COUNT && name[10] == '\0';
+}
+
 // The name a game's grabs and slots go by: a file in a slot folder ("/Save Games/Exolon/Slot 2")
-// is the folder's game, anything else its own name without " Save Game" (screengrab::base_name)
+// or a checkpoint folder ("/Checkpoints/Exolon/Checkpoint 3") is the folder's game, anything
+// else its own name without " Save Game" (screengrab::base_name)
 static size_t game_base(const char* dir, const char* name, char* out) {
     const char* folder = slots::folder_game(dir);
     if (folder != nullptr && slots::parse(name, nullptr, 0) != 0) {
+        return screengrab::base_name(folder, out);
+    }
+    folder = cp_folder_game(dir);
+    if (folder != nullptr && cp_is_name(name)) {
         return screengrab::base_name(folder, out);
     }
     return screengrab::base_name(name, out);
@@ -3240,6 +3272,10 @@ static void snap_name_clear_others(uint8_t drive, const char* dir, const char* n
 // BYTE param4 = the file type: ACTION_SNA_SAVE_TYPE_AUTO, _SNA, _Z80 or _SZX
 // status is 0 for success, 1 if the file exists, 2 for any other error
 // A quick save (Q) of a game with a slot used goes in the slot used last, over what is there.
+// The file a snapshot is saved to on the SD card (a save, or a checkpoint: never both at
+// once). Static: it is too big for core 0's stack, and one is enough.
+static FIL save_fil;
+
 void nmi_action_sna_save() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint16_t nameoffset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
@@ -3248,6 +3284,12 @@ void nmi_action_sna_save() {
     bool quick = nmi_rom_data[5] == 2;
     bool slot_save = nmi_rom_data[5] == 3;
     uint8_t type = nmi_rom_data[6];
+    if (nmi_rom_data[5] == 4) {
+        // a checkpoint: written to /Checkpoints/<game> as soon as the game carries on (checkpoint_flush)
+        checkpoint_took();
+        nmi_rom_data[0] = FILEOP_OK;
+        return;
+    }
     const char* dir;
     uint8_t drive;
     char slot_game[screengrab::NAME_MAX + 1] = "";
@@ -3429,7 +3471,7 @@ void nmi_action_sna_save() {
         static char path[BROWSE_PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s.%s", dir, name, extension);
         walk_stop();        // the directory changes, and none may be open
-        static FIL file;
+        FIL& file = save_fil;
         FRESULT fr = f_open(&file, path, FA_WRITE | (overwrite == 0 ? FA_CREATE_NEW : FA_CREATE_ALWAYS));
         if (fr == FR_OK) {
             SdSink sink = { &file };
@@ -3833,6 +3875,7 @@ static uint8_t use_diagnostic_rom(uint8_t which) {
     menu_reset_128k = false;
     reset_to_128k_pending = false;
     snap_prepared = true;
+    prepared_is_game = false;
     return 0;
 }
 
@@ -3888,6 +3931,7 @@ static void nmi_action_prepare_load() {
     }
     else {
         LOG("Reset into %s\n", what == PREPARE_LOAD_RESET_128K ? "128K" : "48K");
+        checkpoints_stop();
         if (!tape_in) {
             tape_service_stop();        // a tape put in with T stays in (the Tape Loader, LOAD "")
         }
@@ -3897,6 +3941,7 @@ static void nmi_action_prepare_load() {
         menu_reset_128k = what == PREPARE_LOAD_RESET_128K;
         reset_to_128k_pending = menu_reset_128k;
         snap_prepared = true;
+        prepared_is_game = false;
     }
     nmi_rom_data[0] = status;
 }
@@ -4432,10 +4477,12 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         const char* fileAndExt;
         const char* dir;
         if (nmi_rom_data[5] == 2) {
-            // R - Reload: a save (in /Save Games, a slot or not) loads as it is, with no question
+            // R - Reload: a save (in /Save Games, a slot or not, or a checkpoint in /Checkpoints)
+            // loads as it is, with no question
             const size_t fl = sizeof(slots::FOLDER) - 1;
             if (!reload_known || (reload_drive == 1 && !sd_card_mounted) ||
-                    (strncasecmp(reload_dir, slots::FOLDER, fl) == 0 && (reload_dir[fl] == '\0' || reload_dir[fl] == '/'))) {
+                    (strncasecmp(reload_dir, slots::FOLDER, fl) == 0 && (reload_dir[fl] == '\0' || reload_dir[fl] == '/')) ||
+                    cp_folder_game(reload_dir) != nullptr) {
                 nmi_rom_data[0] = 1;
                 return;
             }
@@ -4568,6 +4615,418 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         snprintf(t, sizeof(t), "Erase slot %d?", slot_pick);
         help_put_text(screen, 19, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
         help_put_text(screen, 20, 1, "Y-Yes  N-No", 11, gameinfo::ATTR_KEYS);
+    }
+    if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// ---- Checkpoints (Picomenu.ini's checkpoints): a snapshot of the game every 5, 10 or 20 s ----
+// A game loaded from the menu asks first ("Checkpoints for this game?", ACTION_CHECKPOINT_ASK).
+// The checkpoints are snapshots taken with no menu (STARTUP_ACTION_CHECKPOINT): the NMI ROM sends
+// one as for a save, and it is written to /Checkpoints/<game> on the SD card as soon as the game
+// carries on (checkpoint_flush), so the game only waits for the copy. The last CP_COUNT are kept,
+// the oldest written over. K on the menu (ACTION_CHECKPOINTS) lists them by age and loads one,
+// moves one to a save slot, or clears the game's checkpoint files.
+// All of it in a few bytes: the RAM left for the heap is tight
+static struct {
+    uint32_t due_ms;            // when the next checkpoint is due
+    uint32_t menu_ms;           // when the menu opened: the ages are counted to then
+    uint16_t at_t[CP_COUNT];    // when each was taken, in eighths of a second of game time (the
+    uint16_t pending_t;         // menu left out; 16 bits go round in 2 hours, far more than 6 take)
+    uint8_t used;               // a bit for each checkpoint there
+    uint8_t big;                // a bit for each that is a 128K one (.z80; else .sna)
+    uint8_t next : 3;           // the entry the next checkpoint goes in
+    uint8_t pending_at : 3;
+    bool on : 1;                // this game's answer to the question
+    bool pending : 1;           // a checkpoint in snap_load_buffer, still to be written
+    bool loading : 1;           // the load being made is a checkpoint: no question
+    bool paused : 1;            // a menu (or a screen with no menu) is open
+    uint8_t secs;               // seconds between them for this game (Picomenu.ini's, or 20 when
+                                // turned on from the A screen with it off)
+} rw;
+// The K screen: 0 the list, 1 "View which?", 2 a screen showing, 3 "Move which?", 4 "To which
+// slot?", 5 "Save over slot n?", 6 "Clear ...?"; cp_pick the checkpoint picked (its entry)
+static uint8_t cp_state = 0, cp_pick = 0;
+static bool rw_used(int i) { return (rw.used >> i) & 1; }
+static const char* rw_ext(int i) { return (rw.big >> i) & 1 ? "z80" : "sna"; }
+
+static uint32_t rw_now() { return to_ms_since_boot(get_absolute_time()); }
+#ifdef PICOFACE_HOST
+static bool rw_host_take = false;
+#endif
+static bool conv_running();             // (a tape being converted: the Spectrum is the converter's)
+static uint16_t rw_ticks(uint32_t ms) { return (uint16_t) (ms / 125); }
+
+// The game's checkpoint folder, "/Checkpoints/<game>" (the game as its save slots know it), or
+// false if no game is known
+static bool cp_folder(char* out, size_t size) {
+    char game[screengrab::NAME_MAX + 1];
+    if (slot_game_now(game) == 0) return false;
+    return snprintf(out, size, "%s/%s", CP_FOLDER, game) < (int) size;
+}
+
+static void checkpoints_clear() {
+    rw.used = 0;
+    rw.next = 0;
+    rw.pending = false;
+}
+
+// Checkpoints stop (a reset, another game): the ones taken are forgotten (their files stay)
+static void checkpoints_stop() {
+    rw.on = false;
+    checkpoints_clear();
+}
+
+// The checkpoints newest first: order[0] is the newest. Returns how many there are.
+static int rw_order(int* order) {
+    int n = 0;
+    for (int k = 1; k <= CP_COUNT; k++) {
+        int i = (rw.next - k + CP_COUNT) % CP_COUNT;
+        if (rw_used(i)) order[n++] = i;
+    }
+    return n;
+}
+
+// Writes the checkpoint the ROM sent (still in snap_load_buffer) to /Checkpoints/<game>
+static void checkpoint_flush() {
+    if (!rw.pending) return;
+    rw.pending = false;
+    const int at = rw.pending_at;
+    rw.used &= (uint8_t) ~(1 << at);
+    char* path = grab_path;             // (free: no screen grab is being saved)
+    const size_t psize = sizeof(grab_path);
+    if (!sd_card_mounted || !cp_folder(path, psize)) return;
+    walk_stop();
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) != fsops::KIND_DIR) {
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, CP_FOLDER) != fsops::KIND_DIR) make_sd_folder(CP_FOLDER);
+        if (make_sd_folder(path) != fsops::OK) {
+            set_last_error("Cannot make", path);
+            return;
+        }
+    }
+    const size_t dl = strlen(path);
+    const uint8_t format = save_is_128k ? ACTION_SNA_SAVE_TYPE_Z80 : ACTION_SNA_SAVE_TYPE_SNA;
+    const char* ext = save_is_128k ? "z80" : "sna";
+    snprintf(path + dl, psize - dl, "/Autosave %d.%s", at + 1, save_is_128k ? "sna" : "z80");
+    f_unlink(path);                     // one of the other type, from before
+    snprintf(path + dl, psize - dl, "/Autosave %d.%s", at + 1, ext);
+    FIL& file = save_fil;
+    FRESULT fr = f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (fr == FR_OK) {
+        SdSink sink = { &file };
+        fr = write_snapshot_file(sink, format) ? FR_OK : FR_DENIED;
+        FRESULT fc = f_close(&file);
+        if (fr == FR_OK) fr = fc;
+        if (fr != FR_OK) f_unlink(path);
+    }
+    LOG("Autosave %s: %d\n", path, fr);
+    if (fr != FR_OK) return;
+    tape_note_after_save(1, path);
+    rw.used |= (uint8_t) (1 << at);
+    if (save_is_128k) rw.big |= (uint8_t) (1 << at);
+    else rw.big &= (uint8_t) ~(1 << at);
+    rw.at_t[at] = rw.pending_t;
+}
+
+// ACTION_SNA_SAVE with param3 = 4: the checkpoint is kept in snap_load_buffer for now
+static void checkpoint_took() {
+    rw.pending = true;
+    rw.pending_at = rw.next;
+    rw.pending_t = rw_ticks(rw_now());
+    rw.next = (uint8_t) ((rw.next + 1) % CP_COUNT);
+}
+
+// A menu (or the S or G screen on its own) opens: the game's time stops
+static void checkpoint_menu_opens() {
+    checkpoint_flush();
+    if (!rw.paused) {
+        rw.paused = true;
+        rw.menu_ms = rw_now();
+    }
+}
+
+// Called from the main loop: writes a checkpoint the ROM sent, and takes the next when it is due
+static void checkpoint_poll() {
+    checkpoint_flush();
+    uint32_t now = rw_now();
+    if (rw.paused) {
+        if (rom_state.nmi_active) return;
+        // the menu has closed: the game's time carries on where it stopped
+        rw.paused = false;
+        uint16_t away = (uint16_t) (rw_ticks(now) - rw_ticks(rw.menu_ms));
+        for (int i = 0; i < CP_COUNT; i++) rw.at_t[i] = (uint16_t) (rw.at_t[i] + away);
+        rw.due_ms = now + (uint32_t) rw.secs * 1000;
+        return;
+    }
+    if (!rw.on || rw.secs == 0 || !game_running || !sd_card_mounted || rom_state.nmi_active ||
+            conv_running() || (int32_t) (now - rw.due_ms) < 0) {
+        return;
+    }
+#ifdef PICOFACE_HOST
+    if (!rw_host_take) return;          // the simulator takes them when its script says (checkpoint)
+#endif
+    rw.due_ms = now + (uint32_t) rw.secs * 1000;
+    if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) {
+        rw.due_ms = now + 500;          // (an NMI already active: soon again)
+    }
+}
+
+#ifdef PICOFACE_HOST
+// The simulator: the main loop's part; take: a checkpoint now (checkpoints on). True if one was sent.
+bool host_checkpoint_poll(bool take) {
+    checkpoint_poll();
+    if (!take) return false;
+    rw.due_ms = rw_now();
+    rw_host_take = true;
+    bool was = (rom_state.flags & 2) != 0;
+    checkpoint_poll();
+    rw_host_take = false;
+    return !was && (rom_state.flags & 2) != 0;
+}
+#endif
+
+// ACTION_CHECKPOINT_ASK: param1 0, before a load from the menu: status 0 to ask, 1 not
+// (checkpoints off, no SD card, a checkpoint being loaded). Then 'y' or 'n'.
+static void nmi_action_checkpoint_ask() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    if (key == 0) {
+        if (rw.loading) {           // a checkpoint: still the same game, checkpoints stay on
+            rw.loading = false;
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        checkpoints_stop();         // another game: its own checkpoints, if any
+        rw.secs = cfg.checkpoint_s;
+        // only for a game: not a reset (4, 1) or a test ROM, which the pico has ready
+        bool game = !snap_prepared || prepared_is_game;
+        nmi_rom_data[0] = cfg.checkpoint_s != 0 && sd_card_mounted && nmi_menu_open && game ? 0 : 1;
+        return;
+    }
+    rw.on = key == 'y' || key == 'Y';
+    LOG("Autosave %s\n", rw.on ? "on" : "off");
+    nmi_rom_data[0] = 0;
+}
+
+// C on the K screen: the game's checkpoint files go (for good, with their tape notes), and the
+// folder if nothing else is in it. False if one could not be erased.
+static bool checkpoints_erase_files() {
+    char* path = grab_path;
+    if (!cp_folder(path, sizeof(grab_path))) return true;
+    walk_stop();
+    const size_t dl = strlen(path);
+    bool ok = true;
+    for (int i = 1; i <= CP_COUNT; i++) {
+        for (int k = 0; k < 2; k++) {
+            snprintf(path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", i, k == 0 ? "sna" : "z80");
+            if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) != fsops::KIND_FILE) continue;
+            if (fsops::remove_path(Drive::EXTERNAL_SD_CARD, path)) tape_note_remove(1, path);
+            else ok = false;
+        }
+    }
+    path[dl] = '\0';
+    f_unlink(path);                     // the folder, when it is empty
+    checkpoints_clear();
+    return ok;
+}
+
+// M on the K screen: checkpoint entry i becomes save slot n of the game (its label kept if the
+// slot had one), moved, not copied. The message to show.
+static const char* checkpoint_to_slot(int i, int n) {
+    char game[screengrab::NAME_MAX + 1];
+    if (slot_game_now(game) == 0 || !cp_folder(grab_path, sizeof(grab_path))) return "No game to move it for";
+    SlotEntry e[slots::COUNT];
+    slots_scan(game, e);
+    char* to = erase_path;              // (free here: nothing is being loaded or erased)
+    const size_t tsize = sizeof(erase_path);
+    if (!slots_folder_make(game, to, tsize)) return "Could not make the slot folder";
+    const char* ext = rw_ext(i);
+    char name[80];
+    slots::name(n, e[n - 1].used ? e[n - 1].label : "", name, sizeof(name));
+    size_t tl = strlen(to);
+    snprintf(to + tl, tsize - tl, "/%s.%s", name, ext);
+    size_t dl = strlen(grab_path);
+    snprintf(grab_path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", i + 1, ext);
+    walk_stop();
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, to) == fsops::KIND_FILE) {
+        fsops::remove_path(Drive::EXTERNAL_SD_CARD, to);        // the slot it goes over
+        tape_note_remove(1, to);
+    }
+    if (fsops::rename_path(Drive::EXTERNAL_SD_CARD, grab_path, to) != FILEOP_OK) return "Could not move it";
+    tape_note_follow(1, grab_path, 1, to, false);
+    rw.used &= (uint8_t) ~(1 << i);
+    slots_after_save(game, n, name, ext);       // the slot's other files go, and it is the last
+    static const char* const MOVED[] = { "Moved to slot 1", "Moved to slot 2", "Moved to slot 3",
+        "Moved to slot 4", "Moved to slot 5", "Moved to slot 6", "Moved to slot 7", "Moved to slot 8",
+        "Moved to slot 9" };
+    return MOVED[n - 1];
+}
+
+// ACTION_CHECKPOINTS: K on the menu. BYTE param1 = the key (0: opened). Status 0 stays, 1 closed,
+// 2 the checkpoint chosen is ready (loaded into snap_load_buffer)
+__attribute__((noinline)) static void nmi_action_checkpoints() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    int order[CP_COUNT];
+    int count = rw_order(order);
+    const int n = key >= '1' && key <= '9' ? key - '0' : 0;
+    const bool back = is_key_break(key) || key == 'x' || key == 'X';
+    if (key == 0) cp_state = 0;
+    slot_msg = nullptr;
+    switch (key == 0 ? 255 : cp_state) {
+    case 0:
+        if (n > 0 && n <= count) {
+            // carry on from it: the newer ones go, and the game's time goes back to it
+            int i = order[n - 1];
+            uint16_t ago = (uint16_t) (rw_ticks(rw.menu_ms) - rw.at_t[i]);
+            if (!cp_folder(erase_path, sizeof(erase_path))) break;
+            int len = snprintf(erase_scratch, sizeof(erase_scratch), "Autosave %d", i + 1);
+            snprintf(erase_scratch + len + 1, sizeof(erase_scratch) - (size_t) len - 1, "%s", rw_ext(i));
+            load_snapshot_file(1, erase_path, erase_scratch, false);
+            snap_prepared = true;
+            for (int k = 0; k < n - 1; k++) rw.used &= (uint8_t) ~(1 << order[k]);
+            for (int k = 0; k < CP_COUNT; k++) rw.at_t[k] = (uint16_t) (rw.at_t[k] + ago);
+            rw.next = (uint8_t) ((i + 1) % CP_COUNT);
+            rw.loading = true;
+            nmi_rom_data[0] = 2;
+            return;
+        } else if ((key == 'v' || key == 'V') && count > 0) {
+            cp_state = 1;
+        } else if ((key == 'm' || key == 'M') && count > 0) {
+            cp_state = 3;
+        } else if ((key == 'c' || key == 'C') && sd_card_mounted) {
+            cp_state = 6;
+        } else if (key == 'o' || key == 'O') {
+            // O: autosave on (or off) for this game, whatever was answered when it was loaded
+            char g[screengrab::NAME_MAX + 1];
+            if (rw.on) {
+                rw.on = false;
+                slot_msg = "Autosave off for this game";
+            } else if (!sd_card_mounted || slot_game_now(g) == 0) {
+                slot_msg = "No game to autosave";
+            } else {
+                rw.on = true;
+                if (rw.secs == 0) rw.secs = cfg.checkpoint_s != 0 ? cfg.checkpoint_s : 20;
+                slot_msg = "Autosave on for this game";
+            }
+        } else if (back) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+        break;
+    case 1:             // V, then a checkpoint: its screen
+    case 3:             // M, then a checkpoint
+        if (n > 0 && n <= count) {
+            cp_pick = (uint8_t) order[n - 1];
+            if (cp_state == 3) {
+                cp_state = 4;
+                break;
+            }
+            cp_state = 0;
+            if (cp_folder(grab_path, sizeof(grab_path))) {
+                size_t dl = strlen(grab_path);
+                snprintf(grab_path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", cp_pick + 1, rw_ext(cp_pick));
+                preview_screen = nullptr;
+                if (find_preview(1, grab_path, rw_ext(cp_pick)) == 0 && preview_screen != nullptr) {
+                    cp_state = 2;
+                    nmi_rom_data[0] = 0;        // its own screen until a key is pressed
+                    return;
+                }
+            }
+            slot_msg = "No picture in that autosave";
+        } else if (back) {
+            cp_state = 0;
+        }
+        break;
+    case 2:             // its screen: any key goes back to the list
+        cp_state = 0;
+        break;
+    case 4: {           // the slot it goes to
+        if (back) {
+            cp_state = 0;
+        } else if (n > 0) {
+            char game[screengrab::NAME_MAX + 1];
+            SlotEntry e[slots::COUNT];
+            slot_pick = (uint8_t) n;
+            if (slot_game_now(game) > 0) slots_scan(game, e);
+            if (slot_game_now(game) > 0 && e[n - 1].used) {
+                cp_state = 5;
+            } else {
+                cp_state = 0;
+                slot_msg = checkpoint_to_slot(cp_pick, n);
+            }
+        }
+        break;
+    }
+    case 5:             // "Save over slot n?"
+        cp_state = 0;
+        if (key == 'y' || key == 'Y') slot_msg = checkpoint_to_slot(cp_pick, slot_pick);
+        break;
+    case 6:             // "Clear the checkpoints?"
+        cp_state = 0;
+        if (key == 'y' || key == 'Y') slot_msg = checkpoints_erase_files() ? "Autosaves cleared" : "Could not erase them all";
+        break;
+    default:
+        break;
+    }
+    count = rw_order(order);
+    char game[screengrab::NAME_MAX + 1];
+    slot_game_now(game);
+    slots_banner(screen, "Autosave: ", game[0] != '\0' ? game : "no game");
+    char t[40];
+    if (count > 0) {
+        for (int k = 0; k < count; k++) {
+            unsigned age = ((uint16_t) (rw_ticks(rw.menu_ms) - rw.at_t[order[k]]) + 4u) / 8u;
+            snprintf(t, sizeof(t), "%d", k + 1);
+            help_put_text(screen, 2 + k, 1, t, 1, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%u seconds ago", age);
+            help_put_text(screen, 2 + k, 3, t, (int) strlen(t), gameinfo::ATTR_TEXT);
+        }
+        if (!rw.on) help_put_text(screen, 9, 1, "Autosave is off for this game.", 30, gameinfo::ATTR_DIM);
+    } else if (!rw.on) {
+        help_put_text(screen, 2, 1, "Autosave is off for this game.", 30, gameinfo::ATTR_TEXT);
+        if (cfg.checkpoint_s == 0) {
+            help_put_text(screen, 4, 1, "Set it in O - Options (20, 40", 29, gameinfo::ATTR_DIM);
+            help_put_text(screen, 5, 1, "or 60 s): each game loaded", 26, gameinfo::ATTR_DIM);
+            help_put_text(screen, 6, 1, "then asks. O here turns it on", 29, gameinfo::ATTR_DIM);
+            help_put_text(screen, 7, 1, "for this game (every 20 s).", 27, gameinfo::ATTR_DIM);
+        }
+    } else {
+        help_put_text(screen, 2, 1, "No autosaves yet.", 17, gameinfo::ATTR_TEXT);
+        snprintf(t, sizeof(t), "One is saved every %u seconds.", (unsigned) rw.secs);
+        help_put_text(screen, 4, 1, t, (int) strlen(t), gameinfo::ATTR_DIM);
+    }
+    if (count > 0) {
+        snprintf(t, sizeof(t), "1-%d", count);
+        help_put_text(screen, 11, 1, t, (int) strlen(t), gameinfo::ATTR_KEYS);
+        help_put_text(screen, 11, 5, "Select autosave", 15, gameinfo::ATTR_TEXT);
+        help_put_text(screen, 12, 1, "V", 1, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 12, 5, "View an autosave's screen", 25, gameinfo::ATTR_TEXT);
+        help_put_text(screen, 13, 1, "M", 1, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 13, 5, "Move one to a save slot", 23, gameinfo::ATTR_TEXT);
+    }
+    if (sd_card_mounted) {
+        help_put_text(screen, 14, 1, "C", 1, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 14, 5, "Clear the game's autosaves", 26, gameinfo::ATTR_TEXT);
+    }
+    help_put_text(screen, 15, 1, "O", 1, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 15, 5, rw.on ? "Turn autosave off" : "Turn autosave on", rw.on ? 17 : 16, gameinfo::ATTR_TEXT);
+    help_put_text(screen, 17, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    const char* ask = nullptr;
+    const char* keys = "BREAK-Back";
+    switch (cp_state) {
+    case 1: snprintf(t, sizeof(t), "View which? 1-%d", count); ask = t; break;
+    case 3: snprintf(t, sizeof(t), "Move which? 1-%d", count); ask = t; break;
+    case 4: ask = "To which save slot? 1-9"; break;
+    case 5: snprintf(t, sizeof(t), "Save over slot %d?", slot_pick); ask = t; keys = "Y-Yes  N-No"; break;
+    case 6: ask = "Erase all of its autosaves?"; keys = "Y-Yes  N-No"; break;
+    default: break;
+    }
+    if (ask != nullptr) {
+        help_put_text(screen, 19, 1, ask, (int) strlen(ask), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 20, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
     }
     if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
     preview_screen = screen;
@@ -6642,6 +7101,30 @@ static bool sna_in_buffer = false;          // a snapshot sent to be saved is in
 
 static bool list_pool_busy = false;         // a screen (Options, the batch's folders) keeps its state in list_pool
 static bool menu_shot_piece();
+// The NMI ROM's fast copy for saving (gencopy in nmirom.asm): SAVE128_GEN_BLOCK / 2 of "POP HL /
+// LD (nn),HL", each putting two bytes in the data area at the start of spare_space, then
+// "LD SP,(gencopy_sp) / POP HL / RET". Written each time a save begins (the area is shared).
+static void gencopy_write(uint8_t* nmi_rom_data) {
+    uint8_t* c = nmi_rom_data + SAVE128_GEN_CODE;
+    for (uint32_t k = 0; k < SAVE128_GEN_BLOCK / 2; k++) {
+        uint16_t to = (uint16_t) (SAVE128_GEN_DATA + 2 * k);
+        *c++ = 0xE1;                            // POP HL
+        *c++ = 0x22;                            // LD (to),HL
+        *c++ = (uint8_t) (to & 0xFF);
+        *c++ = (uint8_t) (to >> 8);
+    }
+    *c++ = 0xED;                                // LD SP,(gencopy_sp)
+    *c++ = 0x7B;
+    *c++ = (uint8_t) (SAVE128_GEN_SP & 0xFF);
+    *c++ = (uint8_t) (SAVE128_GEN_SP >> 8);
+    *c++ = 0xE1;                                // POP HL (HL moved on)
+    *c = 0xC9;                                  // RET
+}
+static_assert(SAVE128_GEN_CODE + SAVE128_GEN_BLOCK * 2 + 6 <= 16384, "gencopy's code fits");
+
+// The hash of the end of the 128K bank paged in (ACTION_SNA_HASH), as the NMI ROM sends it
+static uint16_t save_hash1 = 0, save_hash2 = 0;
+
 void processNmiRequest() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t action = nmi_rom_data[1];
@@ -6666,6 +7149,18 @@ void processNmiRequest() {
         save_is_128k = false;
         memcpy(snap_load_buffer, nmi_rom_data + headeroffset, SNA_HEADER_SIZE);
         current_sna_write_offset = SNA_HEADER_SIZE;
+        gencopy_write(nmi_rom_data);
+    }  else if (action == ACTION_SNA_HASH) {
+        uint16_t offset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
+        uint16_t count =  (nmi_rom_data[5] << 8) |  nmi_rom_data[4];
+        for (uint32_t i = 0; i < count && offset + i < 16384; i++) {
+            save_hash1 = (uint16_t) (save_hash1 + nmi_rom_data[offset + i]);
+            save_hash2 = (uint16_t) (save_hash2 + save_hash1);
+        }
+        save128_info[snapload::SV_S1] = (uint8_t) (save_hash1 & 0xFF);
+        save128_info[snapload::SV_S1 + 1] = (uint8_t) (save_hash1 >> 8);
+        save128_info[snapload::SV_S2] = (uint8_t) (save_hash2 & 0xFF);
+        save128_info[snapload::SV_S2 + 1] = (uint8_t) (save_hash2 >> 8);
     }  else if (action == ACTION_SNA_BEGIN_WRITE128) {
         sna_in_buffer = true;
         uint16_t headeroffset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
@@ -6678,6 +7173,8 @@ void processNmiRequest() {
             memcpy(save128_info + SAVE128_AY_AT + 8, nmi_rom_data + NMI_AYVOLS, 3);
         }
         current_sna_write_offset = snapload::HEADER_AREA;
+        save_hash1 = save_hash2 = 0;
+        gencopy_write(nmi_rom_data);
     }  else if (action == ACTION_SNA_END_WRITE128) {
         uint8_t port = snapload::finish_save128(reinterpret_cast<uint8_t*>(snap_load_buffer), save128_info, &loaded_paging);
         LOG("End 128K save, paged bank at 0xC000 was %d, port 7FFD = %02X\n", port & 7, port);
@@ -6732,6 +7229,12 @@ void processNmiRequest() {
         return;
     }  else if (action == ACTION_SLOTS) {
         nmi_action_slots();
+        return;
+    }  else if (action == ACTION_CHECKPOINTS) {
+        nmi_action_checkpoints();
+        return;
+    }  else if (action == ACTION_CHECKPOINT_ASK) {
+        nmi_action_checkpoint_ask();
         return;
     }  else if (action == ACTION_SLOT_ASK) {
         nmi_action_slot_ask();
@@ -7971,7 +8474,7 @@ static void opt_draw(uint8_t* screen) {
     char v[40];
     if (opt_page == 0) {
         for (int i = 0; i < options::COUNT; i++) {
-            int row = 2 + i;
+            int row = 1 + i;
             bool here = i == opt_cursor[0];
             uint8_t attr = here ? OPT_ATTR_CURSOR : gameinfo::ATTR_TEXT;
             if (here) memset(screen + 6144 + row * 32, OPT_ATTR_CURSOR, 32);
@@ -7990,7 +8493,7 @@ static void opt_draw(uint8_t* screen) {
             help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
         }
         const char* hint = options::ITEMS[opt_cursor[0]].hint;
-        static_assert(2 + options::COUNT <= 20, "the items above the hint");
+        static_assert(1 + options::COUNT <= 20, "the items above the hint");
         help_put_text(screen, 20, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
         help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Exit", 29, gameinfo::ATTR_KEYS);
         help_put_text(screen, 22, 1, "N-Grab order  D-Diagnostics", 27, gameinfo::ATTR_KEYS);
@@ -9167,6 +9670,7 @@ bool endSendSnapDataToMachine(uint32_t snapshotSize) {
 // It is done with a snapshot that jumps to 0, the same as the tape loader's reset.
 static void reset_spectrum_to_internal_rom() {
     LOG("Long press: resetting into the internal ROM\n");
+    checkpoints_stop();
     if (!tape_in) {
         tape_service_stop();            // a tape put in with T stays in
     }
@@ -9320,9 +9824,14 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
     else {
 
         uint8_t* nmi_rom_data = rom_data + 16384;
-        if (command == 0 || command >= STARTUP_ACTION_GRAB) sd_check();     // the menu (or a grab): is the card still well?
+        checkpoint_flush();                      // (a checkpoint not yet written: snap_load_buffer is needed)
+        // the menu, or the S or G screen on its own (the button): the ROM turns the sound down
+        // for them, the card is checked, and the game's time stops for the checkpoints
+        const bool menuish = command == 0 || command == STARTUP_ACTION_SAVE_SCREEN || command == STARTUP_ACTION_GRAB_SCREEN;
+        if (menuish) sd_check();             // is the card still well?
         nmi_rom_unpack(nmi_rom_data);        // (kept packed in the firmware)
-        nmi_menu_open = command == 0 || command > STARTUP_ACTION_GRAB;    // the ROM turns the sound down for the menu (and S, G alone)
+        nmi_menu_open = menuish;
+        if (menuish) checkpoint_menu_opens();
         // the NMI rom starts afresh each time, with no search in force, and
         // the card may have been changed since it was last listed
         snap_filter[0] = '\0';
@@ -9353,12 +9862,18 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         nmi_rom_data[START_THEME] = cfg.light ? 1 : 0;
         bin_leave();        // the menu was left from the Waste Bin (a game loaded from it): B starts where it was
         // what the R item on the menu says: the last game, or that there is none to reload. A
-        // save slot is named after its game too, from its folder: "Alpha Slot 1 - zone"
+        // save slot is named after its game too, from its folder: "Alpha Slot 1 - zone" (and a
+        // checkpoint loaded from Browse Games: "Alpha Checkpoint 3")
         {
             char named[extras::LABEL_SIZE];
             const char* label_name = reload_name;
             const char* slot_game = slots::folder_game(reload_dir);
-            if (slot_game != nullptr && slots::parse(reload_name, nullptr, 0) != 0) {
+            bool in_folder = slot_game != nullptr && slots::parse(reload_name, nullptr, 0) != 0;
+            if (!in_folder) {
+                slot_game = cp_folder_game(reload_dir);
+                in_folder = slot_game != nullptr && cp_is_name(reload_name);
+            }
+            if (in_folder) {
                 snprintf(named, sizeof(named), "%s %s", slot_game, reload_name);
                 label_name = named;
             }
@@ -9395,6 +9910,7 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
 enum ConvPhase : uint8_t { CONV_IDLE, CONV_CHOOSE, CONV_RUN };
 enum ConvMode : uint8_t { CONV_AUTO, CONV_48, CONV_128 };
 static uint8_t conv_phase = CONV_IDLE;
+static bool conv_running() { return conv_phase == CONV_RUN; }
 static uint8_t conv_mode = CONV_AUTO;
 static bool conv_machine128 = false;        // the ROM found the machine can page memory
 static bool conv_as128 = false;             // the attempt running is a 128K one
@@ -10534,6 +11050,7 @@ int main() {
 
         tape_service_poll();
         level_loaders_poll();
+        checkpoint_poll();
 
         bool isup = gpio_get(PIN_USER_SWITCH);
         if (!isup) {

@@ -6,9 +6,7 @@ Picomenu has been built using Brian Apps original code, an AI (Claude) has then 
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
-[![picomenu Video](https://img.youtube.com/vi/EOnCzTOS64U/0.jpg)](https://www.youtube.com/watch?v=EOnCzTOS64U)
-
-Picomenu Demonstration Video
+![The NMI menu](images/1-nmi-menu.png)
 
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
@@ -23,10 +21,12 @@ Picomenu can be used to:
 * The SD card shows up as a USB drive on a PC when the Pico is plugged in with the Spectrum off (copy files without taking the card out; eject before unplugging).
 * Browse the SD card and the internal flash (both with folders, search, move files and folders, copy files and folders (a folder copy stays on one drive; the SD card and the flash are not mixed), copy files between the drives, rename files and folders, erase files and folders): preview a game's screen, show file sizes and which machine (48 or 128) each snapshot needs.
 * Reload the last game with one key.
+* Autosave: with `autosave` set (20, 40 or 60 seconds), a game loaded from the menu asks "Autosave this game?"; with Y a snapshot is saved every so many seconds into `/Autosave/<game>`, and A on the menu goes back to one of the last six, moves one to a save slot, or clears them.
 * Apply pokes to loaded games, typed in or from a `.pok` file.
 * Reset into 48K or 128K from the menu.
 * Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (T-Tools then U on the menu; if it fails, BOOTSEL still works).
 * on-screen help
+
 
 ### The NMI menu
 
@@ -38,14 +38,13 @@ The NMI button (SW1):
 | Double press | **Screen grab**: takes a screen grab - this can be saved with the categories listed on the screen. Choosing a catagory or pressing BREAK takes you back to the game |
 | Held 3 seconds | Resets into the Spectrum's own ROM (as the 1-second hold did before 2.2) |
 
-![The NMI menu](images/1-nmi-menu.png)
-
 | Key | Does |
 |---|---|
 | B | Browse Games (T puts a tape in for the Spectrum's own LOAD; O for info: Type, Size and Mode columns; H-Hide/Unhide hides a file or folder or shows it again (the SD card's hidden attribute, as Windows sets it; a littlefs attribute on the flash); L-All also lists the hidden ones, dimmed, and those always hidden because they can't be loaded: `Poke List`, `Tape Files`, `.scr` files and `.txt` files: a `.txt`'s number shows it a page at a time, and E edits it on the SD card, up to 3 KB with lines of 30 letters) |
 | S | Save slots: nine saves of the game being played in `/Save Games/<game>` on the SD card (1-9 save, L label, V view, E erase); S there is the Save snapshot screen (type auto, .sna, .z80, .szx, same). On the Save snapshot screen a name already used by a snapshot of any type (`.sna`, `.z80`, `.szx`) asks to overwrite it first |
 | R | Reload last game (shows its name, scrolling a long one; remembered after power off). A game with save slots asks which to carry on from, as in Browse Games; a save (anything in `/Save Games`, a slot among them) reloads as it is. A slot shows its game's name first: `Reload: Alpha Slot 1 - zone` |
 | V | Virtual Tape Player: the blocks of the tape being played; 1-0 move to one, R rewind, **L label a line** (up to 16 letters, shown in yellow in place of the block's kind, kept in `/Tape Files/<tape>.labels` and following the tape when it is renamed or moved), E eject (or stop recording), W record a new tape into `/Recordings` |
+| A | Autosave: the game's last six autosaves, newest first by their age in the game; a number selects one and carries on from it (the newer ones go), V shows one's screen, M moves one to a save slot (asking before going over a used one; the slot keeps its label), C clears the game's autosaves (after Y), O turns autosave on or off for the game being played, BREAK goes back |
 | C | Change ROM: the `.rom` files in the root of the internal flash, or (2 - Show SD card /ROMS) those in the SD card's `ROMS` folder; 1 - Internal Rom goes back to the Spectrum's own ROM |
 | P | Poke (L for the game's `.pok` list) |
 | 4 / 1 | Reset into 48K / 128K |
@@ -60,6 +59,13 @@ The NMI button (SW1):
 
 ## Save slots
 S on the menu shows nine slots for the game being played, kept on the SD card in `/Save Games/<game>` as `Slot 1.z80`, `Slot 2 - Zone 3.sna` and so on (the type follows `save_type`; auto is .sna for 48K and .z80 for 128K). A number saves to a slot (one already used asks first); L labels a slot (an empty one is saved there with the label); V shows a slot's screen; E erases one (to the Waste Bin); S opens the Save snapshot screen as before. The slot used last is marked. Holding the button a second opens the slots straight from the game, and saving one goes straight back to it. Loading a game that has slots (from Browse Games or with R - Reload) asks: 1-9 carries on from a slot, 0 starts the game itself, V shows a slot's screen, E erases a slot (after Y, to the Waste Bin), BREAK goes back to the list (or the menu). A slot keeps a tape position (multi-load games) like any save. The game is known by its name (without ` Save Game`), so a slot loaded is still that game's. Without an SD card S is the Save snapshot screen.
+
+## Autosave
+Set `autosave` in Picomenu.ini or O - Options to 20, 40 or 60 (seconds; `off` is the default). Each game then loaded from the menu (Browse Games, R - Reload, E - Recently played, a save slot) asks **Autosave this game?**: Y autosaves it, N plays it without. Resets (4 and 1 on the menu) and test ROMs don't ask. With it on, PicoMenu saves a snapshot of the game every 20, 40 or 60 seconds of play (time in the menu is not counted) and keeps the last six in `/Autosave/<game>` on the SD card (`Autosave 1.sna` ... `Autosave 6.sna`, or `.z80` for a 128K game; the game is named as its save slots are), the oldest written over.
+
+**A** on the menu lists them, `1 0 seconds ago`, `2 20 seconds ago` ..., and a number selects one and carries on from it, tape position and all; the newer ones are dropped, and autosaving goes on from there. V shows an autosave's screen. **M** moves one to a save slot of the game (`/Save Games/<game>/Slot 3.sna` and so on, as S saves them; a slot in use asks first, and keeps its label). **C** erases the game's autosaves (after Y), and its folder when that is empty. **O** turns autosave on for the game being played even if it was answered N (or `autosave` is off: then every 20 seconds), or off again. An autosave can also be loaded from Browse Games like any snapshot; it is still known as its game's.
+
+Each autosave stops the game while its memory is copied out: about 0.2 seconds for a 48K game and about 0.6 seconds for a 128K one (measured on the simulator at 3.5 MHz; the SD card is written after the game carries on). The game and its sound pause for that moment. Autosave needs the SD card, and stops at a reset, at 4 or 1 on the menu, and when another game is loaded (the files stay until C clears them, or the game's next autosaves go over them).
 
 ## Picomenu.ini: settings
 A text file in the root of the SD card (if there is no card, or none on it, the root of the internal flash) that sets how PicoMenu starts. Set up SD card writes one with every setting at its default. Sections in `[brackets]`, then `key = value`; `#` starts a note; case does not matter. A line PicoMenu does not understand is skipped, that setting keeps its default, and Diagnostics (D on O - Options) shows the first such line. With L-All on it is listed in the root of the card; its number shows it and E edits it on the Spectrum (lines of up to 30 letters), and it is used as soon as it is saved (the theme, the save type and the sort at once; how Browse Games starts, `show_all`, `details`, `start_drive`, `start_folder`, when the menu next opens). A change made through the USB drive is used when the PC gives the card back; after taking the card out to a PC, switch off and on (PicoMenu can't tell the card was changed).
@@ -77,6 +83,7 @@ A text file in the root of the SD card (if there is no card, or none on it, the 
 | | `save_screen` | `slots`, `named` | what S opens: the save slots, or the Save snapshot screen |
 | | `slots_on_load` | `ask`, `never` | when a game with save slots is loaded, ask whether to carry on from one |
 | | `grab_format` | `scr`, `png`, `both` | what a screen grab is saved as (the button's screen grab, the loading screens C saves): a `.scr`, a `.png` (16 colours, any PC shows it), or both with the same name; V shows each grab once and reads the `.png` ones PicoMenu saved |
+| | `autosave` | `off`, `20`, `40`, `60` | an autosave every so many seconds of play; a game loaded from the menu asks whether to autosave it (see Autosave above) |
 | `[Buttons]` | `long_press` | `3.0`, then `2` to `5`, or `off` | seconds the NMI button is held to reset (under 2, such as the old default 1.0, is read as 3.0, leaving room for the 1-second hold) |
 | | `save_press` | `hold`, `double` | which opens the save screen: a 1-second hold (a double press is then the screen grab) or a double press (a hold is then the grab) |
 | | `double_press` | `on`, `off` | `off`: two presses are the menu, and the menu opens a third of a second sooner (`grab`, from before 2.2, reads as `on`) |
@@ -93,6 +100,7 @@ A text file in the root of the SD card (if there is no card, or none on it, the 
 
 ## Related repositories
 
+* The Picoface project is held in https://github.com/brianapps/picoface_poc
 * The KiCad circuit design is held in https://github.com/brianapps/picoface_kicad
 
 

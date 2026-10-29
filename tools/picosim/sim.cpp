@@ -23,6 +23,7 @@ not, see <https://www.gnu.org/licenses/>.
 //   nmi                                press the Picoface button (the NMI menu)
 //   nmi2                               press it twice quickly (save_press says: the save screen or the grab question)
 //   nmihold                            hold it a second (the other of the two)
+//   checkpoint                         a checkpoint is due now (checkpoints on): prints how long the game waited
 //   button <what> <ms> [<up ms> <ms>]  the button down so long (and again after so long up), read
 //                                      as the Pico does: fail unless it is short, double, hold or
 //                                      long (what), and do what that does
@@ -99,6 +100,7 @@ static uint32_t exit_watch = 1;         // its r_nmi_exit outside the NMI ROM (s
 static int tape_in_takeovers = 0;
 void host_tape_poll();
 void host_level_loaders_poll();
+bool host_checkpoint_poll(bool take);
 // The firmware waits for an NMI it asked for (the tape trap's "load memory"): the Spectrum
 // runs on meanwhile, and takes the NMI as the Picoface's button would give it
 extern "C" void host_step(void) {
@@ -197,6 +199,7 @@ static void run_frames(uint32_t n) {
             // the tape trap's mailbox (as the firmware's main loop polls it)
             if (!nmi && (rom_state.flags & 1) && rom_data[TAPE_MBOX] == 1) { tape_requests++; host_tape_poll(); }
             if (!nmi) host_level_loaders_poll();       // as the firmware's main loop
+            if (!nmi) host_checkpoint_poll(false);
         }
         frames++;
     }
@@ -402,6 +405,23 @@ int main(int argc, char** argv) {
             if (!button_act(pr)) printf("NMI not sent\n");
             else if ((rom_state.flags & 2) && !nmi) z80_nmi(&cpu);
             run_frames(25);
+        } else if (c == "checkpoint") {     // checkpoint: a checkpoint is due now
+            if (host_checkpoint_poll(true)) {
+                z80_nmi(&cpu);
+                // the time the game waits: until the NMI ROM has gone back to it
+                // (the frame interrupt as run_frames gives it: the NMI ROM waits for one to
+                // find the interrupt mode)
+                long t = 0, frame = 0;
+                for (long guard = 0; (nmi || (rom_state.flags & 2)) && guard < 2000000; guard++) {
+                    long r = (long) z80_run(&cpu, 100);
+                    t += r;
+                    frame += r;
+                    if (frame >= 69888) { frame -= 69888; z80_int(&cpu, true); z80_run(&cpu, 32); z80_int(&cpu, false); }
+                    if (rom_data[16384] == 255) { requests++; processNmiRequest(); }
+                }
+                printf("checkpoint: the game waited %ld T-states (%.0f ms at 3.5 MHz)\n", t, t / 3500.0);
+            } else printf("checkpoint not taken\n");
+            run_frames(5);
         } else if (c == "nmi2" || c == "nmihold") {
             // two quick presses of the button, or held a second: the save screen or the grab
             // question, with no menu

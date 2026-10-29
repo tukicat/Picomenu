@@ -63,6 +63,7 @@ struct Settings {
     bool slots_on_load = true;          // ask "carry on from a slot?" when a game with slots loads
     bool save_screen_slots = true;      // S opens the save slots (false: the Save snapshot screen)
     uint8_t grab_format = GRAB_SCR;     // screen grabs saved as .scr, .png or both
+    uint8_t checkpoint_s = 0;           // autosave: one every 20, 40 or 60 seconds (0: off)
     // [Buttons]
     uint16_t long_press_ms = LONG_PRESS_DEFAULT;    // the reset (0: off)
     bool double_press = true;           // a double press does something (false: off)
@@ -220,6 +221,14 @@ struct Parser {
                 static const char* const W[] = { "never", "ask", nullptr };
                 if ((i = pick(v, vn, W)) < 0) return false;
                 s.slots_on_load = i == 1;
+                return true;
+            }
+            if (same(k, kn, "autosave") || same(k, kn, "checkpoints") || same(k, kn, "rewind")) {   // (earlier 2.3.0 tests' names)
+                // (5 and 10, from the 2.3.0 tests, are 20 now)
+                static const char* const W[] = { "off", "20", "40", "60", "5", "10", nullptr };
+                static const uint8_t S[] = { 0, 20, 40, 60, 20, 20 };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.checkpoint_s = S[i];
                 return true;
             }
             if (same(k, kn, "grab_format")) {
@@ -430,6 +439,8 @@ static const char DEFAULT_SETTINGS[] =
     "slots_on_load = ask\r\n"
     "# grabs: scr, png or both\r\n"
     "grab_format = scr\r\n"
+    "# autosave: off, 20, 40 or 60 seconds\r\n"
+    "autosave = off\r\n"
     "\r\n"
     "[Buttons]\r\n"
     "# hold to reset: 2 to 5 seconds, or off\r\n"

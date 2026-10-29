@@ -1,0 +1,42 @@
+# Autosave on a 128K game: the autosave is a .z80 with the sound chip as the game had it (not
+# turned down as for the menu); carrying on from it loads it back.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+ay 8 13
+ay 9 14
+ay 10 15
+checkpoint
+get sd /Autosave/Athena/Autosave 1.z80 {OUT}/rw128.z80
+expectbyte sd /Autosave/Athena/Autosave 1.z80|47|13
+expectbyte sd /Autosave/Athena/Autosave 1.z80|48|14
+expectbyte sd /Autosave/Athena/Autosave 1.z80|49|15
+expectay 8 13
+clock 20000
+checkpoint
+nmi
+wait 30
+key a
+wait 30
+expect Autosave: Athena
+expect 2 20 seconds ago
+key 2
+wait 300
+expectnot Autosave:
+nmi
+wait 30
+expect Reload: Athena
+key x
+wait 30
