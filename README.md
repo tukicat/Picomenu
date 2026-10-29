@@ -6,7 +6,9 @@ Picomenu has been built using Brian Apps original code, an AI (Claude) has then 
 
 Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should work fine on a standard 48k or 128k model, although I have not been able to test. It will not work on +2A/+3, +2B, and +3B.
 
-![The NMI menu](images/1-nmi-menu.png)
+[![picomenu Video](https://img.youtube.com/vi/EOnCzTOS64U/0.jpg)](https://www.youtube.com/watch?v=EOnCzTOS64U)
+
+Picomenu feature demonstration
 
 Picomenu can be used to:
 * Replace the internal ROM with another image, optionally making it writable.
@@ -27,6 +29,7 @@ Picomenu can be used to:
 * Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (T-Tools then U on the menu; if it fails, BOOTSEL still works).
 * on-screen help
 
+![The NMI menu](images/1-nmi-menu.png)
 
 ### The NMI menu
 
