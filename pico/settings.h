@@ -41,7 +41,7 @@ enum Folders : uint8_t { FOLDERS_FIRST = 0, FOLDERS_LAST = 1, FOLDERS_MIXED = 2 
 enum Drive : uint8_t { DRIVE_FLASH = 0, DRIVE_SD = 1, DRIVE_LAST = 2 };
 enum Quick : uint8_t { QUICK_ASK = 0, QUICK_OVERWRITE = 1, QUICK_NEW = 2 };
 enum GrabFormat : uint8_t { GRAB_SCR = 0, GRAB_PNG = 1, GRAB_BOTH = 2 };
-enum Section : uint8_t { SEC_NONE, SEC_BROWSE, SEC_SAVING, SEC_BUTTONS, SEC_CONVERTING, SEC_BIN, SEC_ORDER, SEC_DISPLAY, SEC_TAPES, SEC_UNKNOWN };
+enum Section : uint8_t { SEC_NONE, SEC_BROWSE, SEC_SAVING, SEC_BUTTONS, SEC_CONVERTING, SEC_BIN, SEC_ORDER, SEC_DISPLAY, SEC_TAPES, SEC_WIFI, SEC_BLUETOOTH, SEC_UNKNOWN };
 
 // long_press: holding the button this long resets the Spectrum. Below 2 seconds (1.0 was the
 // old default) reads as 3: a hold of 1 second up to it is the save screen or the screen grab.
@@ -75,6 +75,11 @@ struct Settings {
     // [Tapes]
     bool level_loaders = true;          // patch a game's own copy of the ROM loader for the tape trap
     uint8_t lock_48k = 1;               // a 48K program on a 128K locked in 48K mode: 0 off, 1 with a tape, 2 always
+    // [Bluetooth] (a Pico W: B - Bluetooth tape)
+    uint8_t bt_volume = 0;              // 0 1/2 (loads best), 1 3/4, 2 full
+    bool bt_auto_connect = true;        // B connects to the receiver paired last by itself
+    bool bt_auto_play = true;           // LOAD "" (the ROM's loader) starts the tape
+    bool bt_auto_off = true;            // off a few seconds after the tape ends (autosave back)
     // [Screen grab order]
     bool has_order = false;             // the file has the section (then order.txt is not read)
     screengrab::Order order;            // its lines, not yet finish()ed
@@ -90,10 +95,19 @@ struct Settings {
 // Reads the file a line at a time. start_folder (if not null) gets the value of
 // start_folder, in the form sd_cwd is ("" for the root, else "/Games", no / at the end);
 // it is left alone if the file has none.
+// [WiFi] (a Pico W): ssid, password and web_password are not kept in Settings (the RAM is
+// tight); they are read again, into Wifi, when the file transfer starts.
+struct Wifi {
+    char ssid[33];
+    char password[64];
+    char web_password[33];
+};
+
 struct Parser {
     Settings& s;
     char* start_folder;
     size_t folder_size;
+    Wifi* wifi = nullptr;               // set: [WiFi]'s values go here
     Section section = SEC_NONE;
     uint16_t number = 0;
 
@@ -285,6 +299,43 @@ struct Parser {
                 return true;
             }
             return false;
+        case SEC_WIFI: {
+            char* to = nullptr;
+            size_t size = 0;
+            if (same(k, kn, "ssid")) { to = wifi ? wifi->ssid : nullptr; size = sizeof(Wifi::ssid); }
+            else if (same(k, kn, "password")) { to = wifi ? wifi->password : nullptr; size = sizeof(Wifi::password); }
+            else if (same(k, kn, "web_password")) { to = wifi ? wifi->web_password : nullptr; size = sizeof(Wifi::web_password); }
+            else return false;
+            if (vn >= size) return false;
+            if (to != nullptr) {
+                memcpy(to, v, vn);
+                to[vn] = '\0';
+            }
+            return true;
+        }
+        case SEC_BLUETOOTH:
+            if (same(k, kn, "volume")) {
+                static const char* const W[] = { "1/2", "3/4", "full", nullptr };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.bt_volume = (uint8_t) i;
+                return true;
+            }
+            if (same(k, kn, "auto_connect")) {
+                if ((i = pick(v, vn, ONOFF)) < 0) return false;
+                s.bt_auto_connect = i == 1;
+                return true;
+            }
+            if (same(k, kn, "auto_play")) {
+                if ((i = pick(v, vn, ONOFF)) < 0) return false;
+                s.bt_auto_play = i == 1;
+                return true;
+            }
+            if (same(k, kn, "auto_off")) {
+                if ((i = pick(v, vn, ONOFF)) < 0) return false;
+                s.bt_auto_off = i == 1;
+                return true;
+            }
+            return false;
         case SEC_TAPES:
             if (same(k, kn, "level_loaders")) {
                 static const char* const W[] = { "off", "patch", nullptr };
@@ -330,7 +381,8 @@ struct Parser {
             section = same(nm, nn, "browse") ? SEC_BROWSE : same(nm, nn, "saving") ? SEC_SAVING :
                 same(nm, nn, "buttons") ? SEC_BUTTONS : same(nm, nn, "converting") ? SEC_CONVERTING :
                 same(nm, nn, "waste bin") ? SEC_BIN : same(nm, nn, "screen grab order") ? SEC_ORDER :
-                same(nm, nn, "display") ? SEC_DISPLAY : same(nm, nn, "tapes") ? SEC_TAPES : SEC_UNKNOWN;
+                same(nm, nn, "display") ? SEC_DISPLAY : same(nm, nn, "tapes") ? SEC_TAPES :
+                same(nm, nn, "wifi") ? SEC_WIFI : same(nm, nn, "bluetooth") ? SEC_BLUETOOTH : SEC_UNKNOWN;
             if (section == SEC_UNKNOWN) problem(t, len);
             if (section == SEC_ORDER) s.has_order = true;
             return;
@@ -464,6 +516,28 @@ static const char DEFAULT_SETTINGS[] =
     "# 48K mode on a 128: tapes,\r\n"
     "# always or off\r\n"
     "lock_48k = tapes\r\n"
+    "\r\n"
+    "[WiFi]\r\n"
+    "# a Pico W: F - File transfer\r\n"
+    "# in Tools. The network's name\r\n"
+    "# and password; web_password\r\n"
+    "# (if set) for the web page\r\n"
+    "ssid =\r\n"
+    "password =\r\n"
+    "web_password =\r\n"
+    "\r\n"
+    "[Bluetooth]\r\n"
+    "# a Pico W: B - Bluetooth tape\r\n"
+    "# volume: 1/2, 3/4 or full\r\n"
+    "volume = 1/2\r\n"
+    "# on or off. auto_connect: to\r\n"
+    "# the receiver paired last;\r\n"
+    "# auto_play: LOAD \"\" starts\r\n"
+    "# the tape; auto_off: off when\r\n"
+    "# the tape ends\r\n"
+    "auto_connect = on\r\n"
+    "auto_play = on\r\n"
+    "auto_off = on\r\n"
     "\r\n";
 static const char ORDER_HEADING[] =
     "[Screen grab order]\r\n";

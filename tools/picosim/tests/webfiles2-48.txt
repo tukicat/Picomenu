@@ -1,0 +1,33 @@
+# web_password in Picomenu.ini: every request needs it (HTTP Basic, any user name); without it,
+# or with the wrong one, 401 and the browser asks. [WiFi] is read without a problem.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/webfiles-pw.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+http GET /api/list?p=%2F
+expecthttp 401 Unauthorized
+expecthttp WWW-Authenticate: Basic realm="PicoMenu"
+expecthttpnot "items"
+# "user:wrong"
+httpauth dXNlcjp3cm9uZw==
+http GET /api/list?p=%2F
+expecthttp 401 Unauthorized
+# "me:spectrum"
+httpauth bWU6c3BlY3RydW0=
+http GET /api/list?p=%2F
+expecthttp 200 OK
+expecthttp {"n":"Games","d":1
+# Diagnostics: the file was read with nothing not understood
+nmi
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect SD card: 3 settings read
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

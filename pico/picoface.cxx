@@ -24,9 +24,6 @@ not, see <https://www.gnu.org/licenses/>.
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/pio.h"
-#ifdef WIFI_ENABLE
-#include "pico/cyw43_arch.h"
-#endif
 #include "hardware/structs/bus_ctrl.h"
 #include "usb_command_handler.h"
 #include "usb_msc.h"
@@ -43,7 +40,38 @@ not, see <https://www.gnu.org/licenses/>.
 #include "tusb.h"
 
 
-#include "http_server.h"
+#include "webfiles.h"
+#ifdef PICOFACE_HOST
+#include <string>
+#endif
+#ifdef WIFI_ENABLE
+#include "wifi.h"
+#endif
+// B - Bluetooth tape in Tools: in the Pico W build, and in the simulator (with a pretend
+// Bluetooth, tools/picosim/bt_host.cpp, whose sound goes to the emulated Spectrum's EAR)
+#if defined(WIFI_ENABLE) || defined(PICOFACE_HOST)
+#define PICOMENU_BT 1
+#include "bt.h"
+#include "tapeaudio.h"
+#else
+#define PICOMENU_BT 0
+#endif
+#if PICOMENU_BT
+// The Bluetooth (B - Bluetooth tape, further on): on, and its screen open
+static bool bt_on = false;
+static bool bt_screen = false;
+static bool bt_playing = false;             // P: playing (silence while the menu is open)
+static bool bt_tape_ready = false;          // the Bluetooth's player is on tape_file, where it was left
+static bool bt_owns = false;                // the tape is the Bluetooth's: the trap's hook has the ROM load from EAR
+static void bt_off();
+static void nmi_action_bt(uint8_t key);
+static void bt_poll();
+static bool bt_keeps(uint8_t action);
+static uint32_t bt_position();
+static bool bt_takes_load();
+static void bt_browse_takes();
+static bool tape_asking = false;           // T in Browse Games: "Trap or Bluetooth?" asked
+#endif
 #include "littlefs-lib/pico_hal.h"
 
 
@@ -212,7 +240,15 @@ void __time_critical_func(do_my_pio)() {
 // the start of it.
 #define SNAP_LOAD_BUFFER_SIZE (snapload::BUFFER128_SIZE + 1024)
 
-static char snap_load_buffer[SNAP_LOAD_BUFFER_SIZE] __attribute__((aligned(4)));
+#ifdef PICOMENU_SNAP_SIZE
+// The Pico W build: placed by its linker script (memmap_picomenu_w.ld), which puts the
+// Bluetooth's memory in its last 16 KB (see bt_off)
+static_assert(PICOMENU_SNAP_SIZE == SNAP_LOAD_BUFFER_SIZE, "CMakeLists.txt's PICOMENU_SNAP_SIZE is snap_load_buffer's size");
+extern "C" char picomenu_snapbuf[SNAP_LOAD_BUFFER_SIZE];
+static char (&snap_load_buffer)[SNAP_LOAD_BUFFER_SIZE] = picomenu_snapbuf;
+#else
+static char snap_load_buffer[SNAP_LOAD_BUFFER_SIZE] __attribute__((aligned(8)));
+#endif
 static_assert(SNAP_LOAD_BUFFER_SIZE >= SNA_LOAD_SIZE + 1024, "buffer too small for a 48K snapshot");
 
 // Snapshot files are read through this a piece at a time
@@ -305,7 +341,12 @@ static char snap_filter[16] = "";
 // same form as sd_cwd.  A search returns entries from many directories, and
 // this is how we know where to find the one that the user then picks.
 static const int SNAP_LIST_MAX = 10;
+#ifdef WIFI_ENABLE
+// (the Pico W build: in the scratch RAM bank, where core 1's stack is, as the main RAM is all used)
+static char list_entry_dir[SNAP_LIST_MAX][sizeof(sd_cwd)] __attribute__((section(".scratch_x.list_entry_dir")));
+#else
 static char list_entry_dir[SNAP_LIST_MAX][sizeof(sd_cwd)];
+#endif
 static uint16_t list_entry_offset[SNAP_LIST_MAX];
 static int list_entry_count = 0;
 
@@ -787,7 +828,12 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 
 // What a Picoface's own updater looks for in a firmware file: the Rev, then (for firmware up to Rev 1.0, which
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
-static const char FIRMWARE_ID[] = "Rev 2.3.0 (tapeloader v230)";
+// " W" after the number: the Pico W build (Update PicoMenu only takes the same kind: fwupdate.h)
+#ifdef WIFI_ENABLE
+static const char FIRMWARE_ID[] = "Rev 2.4.0 W (tapeloader v240)";
+#else
+static const char FIRMWARE_ID[] = "Rev 2.4.0 (tapeloader v240)";
+#endif
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
 static const char* firmware_version() {
@@ -861,8 +907,10 @@ static bool last_game_usable() {
 // Save screen's name are still there after power off.  It is only written when
 // something changed.
 static const char LASTGAME_FILE[] = "lastgame.cfg";
-static uint8_t lastgame_stored[extras::LG_FILE_MAX];
+// what the file holds, as its length and CRC-32 (not a copy: the RAM is short)
+static uint32_t lastgame_stored_crc = 0;
 static size_t lastgame_stored_len = 0;
+static uint32_t lastgame_crc(const uint8_t* b, size_t n) { return ~fwupdate::crc32_update(0xFFFFFFFFu, b, (uint32_t) n); }
 
 // The last game's record and its file's bytes: one copy, for reading it at start up and writing
 // it after (the RAM is short: what is left of it is the heap, which littlefs needs)
@@ -887,7 +935,7 @@ static void persist_last_game() {
     g.format = last_format;
     uint8_t* buf = lastgame_buf;
     size_t len = extras::lastgame_encode(g, buf);
-    if (len == lastgame_stored_len && memcmp(buf, lastgame_stored, len) == 0) {
+    if (len == lastgame_stored_len && lastgame_crc(buf, len) == lastgame_stored_crc) {
         return;
     }
     int file = pico_open(LASTGAME_FILE, LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
@@ -895,7 +943,7 @@ static void persist_last_game() {
         int written = pico_write(file, buf, len);
         pico_close(file);
         if (written == (int) len) {
-            memcpy(lastgame_stored, buf, len);
+            lastgame_stored_crc = lastgame_crc(buf, len);
             lastgame_stored_len = len;
         }
     }
@@ -920,7 +968,7 @@ static void load_last_game() {
         snprintf(last_game_dir, sizeof(last_game_dir), "%s", g.last_dir);
         snprintf(last_game_name, sizeof(last_game_name), "%s", g.last_name);
         last_format = g.format;
-        memcpy(lastgame_stored, buf, (size_t) n);
+        lastgame_stored_crc = lastgame_crc(buf, (size_t) n);
         lastgame_stored_len = (size_t) n;
         LOG("Last game restored: %s\n", last_game_name);
     }
@@ -4775,6 +4823,7 @@ static void checkpoint_poll() {
 #ifdef PICOFACE_HOST
 // The simulator: the main loop's part; take: a checkpoint now (checkpoints on). True if one was sent.
 bool host_checkpoint_poll(bool take) {
+    if (bt_on) return false;            // as the main loop: not while the Bluetooth is on
     checkpoint_poll();
     if (!take) return false;
     rw.due_ms = rw_now();
@@ -5415,6 +5464,268 @@ __attribute__((noinline)) static void settings_load() {
 static void settings_fresh() {
     if (cfg_stale) settings_load();
 }
+
+// ---- F in Tools: file transfer over WiFi (a Pico W: wifi.cxx, webfiles.h) ----
+// The browser's requests are answered by web::Conn, which reads and writes the SD card with
+// FatFs and erases and renames through these, as Browse Games does (the Waste Bin, tape notes).
+// While the screen is open, snap_load_buffer is lent: the screen at its start, WebState after
+// it, and the rest (from WEB_ARENA_AT) to the WiFi (lwIP and the connections).
+
+static bool web_card_ok() {
+    return sd_card_mounted && !usb_msc_pc_holds_card();
+}
+
+static bool web_erase(const char* from, bool is_dir) {
+    char* path = erase_path;
+    const size_t path_size = sizeof(erase_path);
+    if (strlen(from) >= path_size) return false;
+    snprintf(path, path_size, "%s", from);
+    walk_stop();
+    tape_eject_if_in(1, path);
+    char* scratch = erase_scratch;
+    const size_t scratch_size = sizeof(erase_scratch);
+    BinResult bin = in_waste_bin(1, path) ? BIN_NONE : to_waste_bin(1, path, is_dir, scratch, scratch_size);
+    if (bin == BIN_OK) {
+        if (is_dir) tape_notes_follow_folder(1, path, scratch, false);
+        else tape_note_follow(1, path, 1, scratch, false);
+        tape_notes_retarget(1, path, 1, scratch, is_dir);
+        return true;
+    }
+    if (bin == BIN_FAILED) return false;
+    bool ok = is_dir ? fsops::remove_tree(Drive::EXTERNAL_SD_CARD, path, path_size, find_dirs, 0, ERASE_MAX_DEPTH,
+        scratch, scratch_size) : fsops::remove_path(Drive::EXTERNAL_SD_CARD, path);
+    if (ok) {
+        if (is_dir) tape_notes_follow_folder(1, path, nullptr, false);
+        else tape_note_follow(1, path, 1, nullptr, false);
+        tape_labels_follow(1, path, 1, nullptr, is_dir);
+    }
+    return ok;
+}
+
+static bool web_rename(const char* from, const char* to, bool is_dir) {
+    walk_stop();
+    tape_eject_if_in(1, from);
+    if (fsops::rename_path(Drive::EXTERNAL_SD_CARD, from, to) != FILEOP_OK) return false;
+    if (is_dir) tape_notes_follow_folder(1, from, to, false);
+    else tape_note_follow(1, from, 1, to, false);
+    tape_notes_retarget(1, from, 1, to, is_dir);
+    return true;
+}
+
+// What the screen shows, kept in snap_load_buffer after the screen
+struct WebState {
+    settings::Settings scratch;         // (reading Picomenu.ini's [WiFi] again needs one)
+    settings::Wifi wifi;
+    char last[40];                      // the last thing done, "Received Exolon.z80"
+    uint16_t sent, received, other;
+    uint8_t shown_state;                // what the screen showed: the state, and whether it has changed since
+    bool changed;
+    bool open;
+    bool bt;                            // (the standard build) opened as B - Bluetooth tape
+    const char* problem;                // why it can't start (shown instead)
+};
+static const uint32_t WEB_STATE_AT = 6912;
+static const uint32_t WEB_ARENA_AT = 8192;
+// The end of what the radio's screens may use of snap_load_buffer: in the Pico W build its last
+// 16 KB hold the Bluetooth's (and BTstack's) variables (memmap_picomenu_w.ld)
+#ifdef PICOMENU_BT_SHARED
+static const uint32_t RADIO_ARENA_END = SNAP_LOAD_BUFFER_SIZE - PICOMENU_BT_SHARED;
+#else
+static const uint32_t RADIO_ARENA_END = SNAP_LOAD_BUFFER_SIZE;
+#endif
+static_assert(WEB_STATE_AT + sizeof(WebState) <= WEB_ARENA_AT, "the file transfer's state fits before its arena");
+static WebState& web_state() { return *reinterpret_cast<WebState*>(reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_STATE_AT); }
+
+static void web_event(char what, const char* path) {
+    WebState& w = web_state();
+    const char* verb = what == 'S' ? "Sent" : what == 'R' ? "Received" : what == 'E' ? "Erased" : what == 'N' ? "Renamed" : "Made";
+    if (what == 'S') w.sent++;
+    else if (what == 'R') w.received++;
+    else w.other++;
+    snprintf(w.last, sizeof(w.last), "%s %s", verb, web::base_of(path));
+    w.changed = true;
+    LOG("Web: %s %s\n", verb, path);
+}
+
+static const web::Hooks WEB_HOOKS = { web_card_ok, web_erase, web_rename, web_event };
+
+// The WiFi is on (its memory is snap_load_buffer's): it is stopped as soon as anything else
+// could use that memory, whatever the way the screen was left (the Spectrum reset, say)
+static bool web_on = false;
+static void web_off() {
+#ifdef WIFI_ENABLE
+    if (web_on) wifi::stop();
+#endif
+    web_on = false;
+}
+
+// Something is being sent or received: the main loop does not sleep
+static bool web_busy() {
+#ifdef WIFI_ENABLE
+    return wifi::state() != wifi::OFF;
+#else
+    return false;
+#endif
+}
+
+// Picomenu.ini's [WiFi], read again
+static void web_read_ini(WebState& w) {
+    memset(&w.wifi, 0, sizeof(w.wifi));
+    new (&w.scratch) settings::Settings();
+    settings::Parser parser(w.scratch);
+    parser.wifi = &w.wifi;
+    FileHandle f;
+    if ((sd_card_mounted && f.open(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME, true)) ||
+            f.open(Drive::INTERNAL_FLASH, settings::FILE_NAME, true)) {
+        read_text_lines(f, [&](const char* t, size_t n) { parser.line(t, n); });
+        f.close();
+    }
+}
+
+static void web_draw(uint8_t* screen) {
+    WebState& w = web_state();
+    slots_banner(screen, "", w.bt ? "Bluetooth tape" : "File transfer (WiFi)");
+    char t[48];
+    int row = 2;
+    auto text = [&](int r, const char* s, uint8_t attr) { help_put_text(screen, r, 1, s, (int) strlen(s), attr); };
+    if (w.problem != nullptr) {
+        // why it can't (the lines of the text are split at '\n')
+        const char* p = w.problem;
+        while (*p != '\0' && row < 20) {
+            const char* nl = strchr(p, '\n');
+            size_t n = nl ? (size_t) (nl - p) : strlen(p);
+            help_put_text(screen, row++, 1, p, (int) n, row == 3 ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+            p = nl ? nl + 1 : p + n;
+        }
+    } else {
+#ifdef WIFI_ENABLE
+        wifi::State st = wifi::state();
+        if (st == wifi::JOINING) {
+            snprintf(t, sizeof(t), "Joining %.21s ...", w.wifi.ssid);
+            text(2, t, gameinfo::ATTR_TEXT);
+        } else if (st == wifi::FAILED) {
+            snprintf(t, sizeof(t), "Could not join %.15s:", w.wifi.ssid);
+            text(2, t, gameinfo::ATTR_TEXT);
+            text(3, wifi::why(), gameinfo::ATTR_HEADING);
+            text(5, "Check ssid and password in", gameinfo::ATTR_DIM);
+            text(6, "[WiFi] of Picomenu.ini.", gameinfo::ATTR_DIM);
+        } else if (st == wifi::UP) {
+            snprintf(t, sizeof(t), "On %.27s", w.wifi.ssid);
+            text(2, t, gameinfo::ATTR_TEXT);
+            text(4, "On a PC or phone on the same", gameinfo::ATTR_DIM);
+            text(5, "network, open in a browser:", gameinfo::ATTR_DIM);
+            snprintf(t, sizeof(t), "http://%s/", wifi::name());
+            text(7, t, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "http://%s.local", wifi::name());
+            text(8, t, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "http://%s", wifi::address());
+            text(9, t, gameinfo::ATTR_HEADING);
+            text(10, "(whichever the browser finds)", gameinfo::ATTR_DIM);
+            if (w.wifi.web_password[0] != '\0') {
+                text(11, "Password: web_password (any", gameinfo::ATTR_DIM);
+                text(12, "user name)", gameinfo::ATTR_DIM);
+            }
+            snprintf(t, sizeof(t), "Sent %u  Received %u", (unsigned) w.sent, (unsigned) w.received);
+            text(14, t, gameinfo::ATTR_TEXT);
+            if (w.last[0] != '\0') text(15, w.last, gameinfo::ATTR_DIM);
+        }
+#endif
+        text(20, "The Spectrum waits here.", gameinfo::ATTR_DIM);
+    }
+    text(22, "BREAK-Stop and go back", gameinfo::ATTR_KEYS);
+    preview_screen = screen;
+}
+
+// ACTION_WIFI: BYTE param1 = the key (0: opened; 255: none, has the screen changed?).
+// Status 0 as it is, 1 closed, 2 shown again
+__attribute__((noinline)) static void nmi_action_wifi() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+#if PICOMENU_BT
+    // B - Bluetooth tape comes the same way, opened with 0xFE
+    if (key == 0xFE || (key != 0 && bt_screen)) {
+        nmi_action_bt(key);
+        return;
+    }
+    if (key == 0) bt_off();             // one radio at a time
+#endif
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    WebState& w = web_state();
+#if !PICOMENU_BT
+    if (key == 0xFE) {                  // B - Bluetooth tape: not in this build
+        memset(&w, 0, sizeof(w));
+        w.bt = true;
+        w.problem = "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it.";
+        web_draw(screen);
+        nmi_rom_data[0] = 2;
+        return;
+    }
+#endif
+    if (key == 0) {
+        memset(&w, 0, sizeof(w));
+        w.open = true;
+        walk_stop();
+        web_read_ini(w);
+#ifndef WIFI_ENABLE
+        w.problem = "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it.";
+#else
+        if (!web_card_ok()) {
+            w.problem = "There is no SD card (or the PC\nhas it as a USB drive).";
+        } else if (w.wifi.ssid[0] == '\0') {
+            w.problem = "Put the WiFi's name and password\nin Picomenu.ini on the SD card:\n\n[WiFi]\nssid = MyNetwork\npassword = secret\n\nand, to ask for one on the page:\nweb_password = another";
+        } else {
+            web_on = true;
+            const char* why = wifi::start(w.wifi.ssid, w.wifi.password, w.wifi.web_password,
+                reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_ARENA_AT, RADIO_ARENA_END - WEB_ARENA_AT, &WEB_HOOKS);
+            if (why != nullptr) LOG("WiFi: %s\n", why);
+        }
+        w.shown_state = (uint8_t) wifi::state();
+#endif
+        web_draw(screen);
+        nmi_rom_data[0] = 2;
+        return;
+    }
+    if (is_key_break(key) || key == 'x' || key == 'X') {
+        web_off();
+        w.open = false;
+        nmi_rom_data[0] = 1;
+        return;
+    }
+    bool redraw = w.changed;
+#ifdef WIFI_ENABLE
+    redraw = redraw || w.shown_state != (uint8_t) wifi::state();
+    w.shown_state = (uint8_t) wifi::state();
+#endif
+    w.changed = false;
+    if (redraw) web_draw(screen);
+    nmi_rom_data[0] = redraw ? 2 : 0;
+}
+
+#ifdef PICOFACE_HOST
+// The simulator's "http": a request (all of it) answered as a browser connection would be,
+// into out. The connection is in snap_load_buffer, as on the Pico W.
+void host_http(const char* request, size_t n, std::string& out) {
+    WebState& w = web_state();
+    memset(&w, 0, sizeof(w));
+    web_read_ini(w);
+    web::Conn* c = new (reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_ARENA_AT) web::Conn();
+    c->begin(&WEB_HOOKS, w.wifi.web_password);
+    walk_stop();
+    // fed in pieces, as TCP gives them
+    for (size_t i = 0; i < n; i += 700) c->feed(reinterpret_cast<const uint8_t*>(request) + i, n - i < 700 ? n - i : 700);
+    out.clear();
+    for (int guard = 0; guard < 100000 && !c->finished(); guard++) {
+        const uint8_t* p;
+        size_t k = c->ready(&p);
+        if (k > 1000) k = 1000;
+        out.append(reinterpret_cast<const char*>(p), k);
+        c->sent(k);
+        if (k == 0 && !c->finished()) break;    // (a request not finished: it waits for more)
+    }
+    if (!c->finished()) c->abort();
+}
+#endif
+
 
 // The order V shows a game's pictures in: Picomenu.ini's [Screen grab order], or with no such
 // section the order file (order.txt, or order) in /Scraper/Screen Grabs
@@ -6758,6 +7069,11 @@ static const char* fw_error_text(fwupdate::Error e) {
         case fwupdate::TOO_SMALL: return "Too small to be a PicoMenu";
         case fwupdate::NOT_PICOFACE: return "Not a PicoMenu firmware";
         case fwupdate::BAD_BOOT2: return "The start-up code is damaged";
+#ifdef WIFI_ENABLE
+        case fwupdate::WRONG_BOARD: return "Not the Pico W firmware";
+#else
+        case fwupdate::WRONG_BOARD: return "It is the Pico W firmware";
+#endif
         default: return "Cannot use the file";
     }
 }
@@ -6817,7 +7133,11 @@ static uint8_t fw_check_file(fwupdate::Error* error_out) {
     }
     f_close(&file);
     if (e == fwupdate::OK) {
-        e = fw_checker.finish();
+#ifdef WIFI_ENABLE
+        e = fw_checker.finish(true);
+#else
+        e = fw_checker.finish(false);
+#endif
     }
     if (e != fwupdate::OK) {
         *error_out = e;
@@ -7129,6 +7449,9 @@ void processNmiRequest() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t action = nmi_rom_data[1];
     LOG("Action to process: %d\n", action);
+#if PICOMENU_BT
+    if (bt_on && !bt_keeps(action)) bt_off();      // its memory is the end of snap_load_buffer
+#endif
     if (action == ACTION_BEGIN_SNAP_READ) {
         nmi_action_begin_snap_read();
     }
@@ -7229,6 +7552,9 @@ void processNmiRequest() {
         return;
     }  else if (action == ACTION_SLOTS) {
         nmi_action_slots();
+        return;
+    }  else if (action == ACTION_WIFI) {
+        nmi_action_wifi();
         return;
     }  else if (action == ACTION_CHECKPOINTS) {
         nmi_action_checkpoints();
@@ -7416,6 +7742,33 @@ static constexpr uint8_t TAPE_HOOK[] = {
 static_assert(TAPE_HOOK_ADDR + sizeof(TAPE_HOOK) - 8 == 0x0596, "the hook's LD HL,glyph");
 static_assert(TAPE_HOOK_ADDR + sizeof(TAPE_HOOK) <= 0x05E3, "LD-EDGE-2 must stay");
 
+// The hook for a tape put in (T): the same, with a third answer, 4: the block comes from the EAR
+// socket (B - Bluetooth tape plays it), so the ROM's own LD-BYTES is to load it. A', F', IX and
+// DE are put back, what 0x0562-0x056A do is done in the hook (0x0562 is where the bus handler
+// takes over), and its RET goes on at 0x056B (LD-BREAK) in the internal ROM. It is only served
+// with the internal ROM (rom_data holds it at 0x0563, after a NOP): in the patched 48K ROM the
+// longer hook would cover LD-BYTES's own code from 0x056B, so that one keeps TAPE_HOOK.
+// (tools/picosim/tests/tapehook.asm, assembled at 0x0562: its addresses are moved on by one)
+static constexpr uint8_t TAPE_IN_HOOK[] = {
+    0x08, 0xF3, 0x32, 0xF9, 0x3F, 0xDD, 0x22, 0xFA, 0x3F, 0xED, 0x53, 0xFC,
+    0x3F, 0x9F, 0xE6, 0x01, 0x32, 0xFE, 0x3F, 0x3E, 0x01, 0x32, 0xF8, 0x3F,
+    0x3A, 0xF8, 0x3F, 0xFE, 0x02, 0x38, 0xF9, 0xFE, 0x04, 0x28, 0x1D, 0xDD,
+    0x19, 0xFE, 0x03, 0xF5, 0x21, 0x9A, 0x05, 0x11, 0xF8, 0x3F, 0x01, 0x08,
+    0x00, 0xED, 0xB0, 0x11, 0x00, 0x00, 0xF1, 0xC9, 0x3C, 0x42, 0x99, 0xA1,
+    0xA1, 0x99, 0x42, 0x3C, 0x3A, 0xFE, 0x3F, 0x1F, 0x14, 0x3A, 0xF9, 0x3F,
+    0x08, 0x15, 0xD5, 0x21, 0x9A, 0x05, 0x11, 0xF8, 0x3F, 0x01, 0x08, 0x00,
+    0xED, 0xB0, 0xD1, 0x21, 0x6B, 0x05, 0xE5, 0xDB, 0xFE, 0x1F, 0xE6, 0x20,
+    0xF6, 0x02, 0x4F, 0xBF, 0x18, 0xD1
+};
+static const uint32_t TAPE_IN_HOOK_RET = 0x37;          // its RET (the bus handler hands back there)
+static const uint32_t TAPE_IN_HOOK_GLYPH = 0x38;
+static const uint32_t TAPE_IN_HOOK_LDHL[2] = { 0x28, 0x4B };    // its two LD HL,glyph
+static_assert(TAPE_IN_HOOK[TAPE_IN_HOOK_RET] == 0xC9 && TAPE_IN_HOOK[TAPE_IN_HOOK_GLYPH] == 0x3C, "RET, then the glyph");
+static_assert(TAPE_IN_HOOK[0x28] == 0x21 && TAPE_IN_HOOK[0x29] == 0x9A && TAPE_IN_HOOK[0x4B] == 0x21 &&
+    TAPE_IN_HOOK[0x4C] == 0x9A, "LD HL,glyph (0x059A as assembled)");
+static_assert(TAPE_IN_HOOK[0x57] == 0x21 && TAPE_IN_HOOK[0x58] == 0x6B && TAPE_IN_HOOK[0x59] == 0x05, "LD HL,056B");
+static_assert(TAPE_HOOK_ADDR + 1 + sizeof(TAPE_IN_HOOK) <= 0x05E3, "below LD-EDGE-2");
+
 // What an unmodified 48K ROM has where we patch it
 static const uint8_t TAPE_ROM_LDBYTES_SIG[] = {
     0x14, 0x08, 0x15, 0xF3, 0x3E, 0x0F, 0xD3, 0xFE, 0x21, 0x3F, 0x05, 0xE5
@@ -7467,8 +7820,8 @@ static uint32_t tape_done = 0;  // data blocks the tape has gone past since its 
 static bool tape_goto(uint32_t block);
 // Tape in (T in Browse Games): see tape_in_start()
 static const uint32_t TAPE_IN_ENTRY = TAPE_HOOK_ADDR;   // as in piohandler.S
-static const uint32_t TAPE_IN_EXIT = TAPE_HOOK_ADDR + 1 + (sizeof(TAPE_HOOK) - 8) - 1;   // its RET
-static_assert(TAPE_IN_EXIT == 0x0596, "piohandler.S has TAPE_IN_EXIT 0x0596");
+static const uint32_t TAPE_IN_EXIT = TAPE_HOOK_ADDR + 1 + TAPE_IN_HOOK_RET;   // TAPE_IN_HOOK's RET
+static_assert(TAPE_IN_EXIT == 0x059A, "piohandler.S's comments have TAPE_IN_EXIT 0x059A");
 static_assert(TAPE_HOOK[sizeof(TAPE_HOOK) - 9] == 0xC9, "the hook ends with RET before its glyph");
 static_assert(TAPE_HOOK[36] == 0x21 && TAPE_HOOK[37] == 0x96 && TAPE_HOOK[38] == 0x05, "LD HL,glyph");
 static const uint32_t TAPE_IN_ENTRY_SHIFTED = (0u << 14 | TAPE_IN_ENTRY) << 17;   // an M1 read
@@ -7683,6 +8036,12 @@ static void tape_service_poll() {
         mbox[0] = ok ? 2 : 3;
         return;
     }
+#if PICOMENU_BT
+    if (bt_takes_load()) {
+        mbox[0] = 4;                    // B - Bluetooth tape has it: the ROM loads from EAR
+        return;
+    }
+#endif
     bool load = mbox[6] != 0;
     bool ok = tape_serve_block(flag, dest, length, load);
     mbox[0] = ok ? 2 : 3;
@@ -7694,6 +8053,11 @@ void host_tape_poll() { tape_service_poll(); }
 #endif
 
 static void tape_service_stop() {
+#if PICOMENU_BT
+    bt_playing = false;
+    bt_tape_ready = false;
+    bt_owns = false;
+#endif
     tape_in_watch(false);
     tape_in = false;
     tape_rec = false;
@@ -7716,6 +8080,11 @@ static void tape_eject() {
         return;
     }
     if (tape_service_active && !tape_ejected) {
+#if PICOMENU_BT
+        bt_playing = false;
+        bt_tape_ready = false;
+        bt_owns = false;
+#endif
         if (tape_file_open) {
             tape_file.close();
             tape_file_open = false;
@@ -7783,8 +8152,10 @@ static void tape_in_hook_to_rom() {
     memset(rom_data, 0, 16384);
     uint8_t* hook = rom_data + TAPE_IN_ENTRY;
     hook[0] = 0x00;
-    memcpy(hook + 1, TAPE_HOOK, sizeof(TAPE_HOOK));
-    hook[1 + 37] = (uint8_t) ((TAPE_IN_EXIT + 1) & 0xFF);         // LD HL,glyph: it is one on
+    memcpy(hook + 1, TAPE_IN_HOOK, sizeof(TAPE_IN_HOOK));
+    for (uint32_t at : TAPE_IN_HOOK_LDHL) {
+        hook[1 + at + 1] = (uint8_t) ((TAPE_IN_EXIT + 1) & 0xFF);  // LD HL,glyph: it is one on
+    }
     memcpy(rom_data + TAPE_SAVE_ENTRY, TAPE_SAVE_HOOK, sizeof(TAPE_SAVE_HOOK));
 }
 
@@ -7895,7 +8266,7 @@ static void level_loaders_poll() {
     LOG("Level loaders: %d patched\n", n);
 }
 #ifdef PICOFACE_HOST
-void host_level_loaders_poll() { level_loaders_poll(); }
+void host_level_loaders_poll() { if (!bt_on) level_loaders_poll(); }
 #endif
 
 // ---- Recording (W on the tape position screen) ----
@@ -8017,6 +8388,9 @@ static void nmi_action_tape_insert() {
     uint8_t drive = nmi_rom_data[4] == 1 ? 1 : 0;
     uint16_t why_at = (nmi_rom_data[6] << 8) | nmi_rom_data[5];
     const char* why = nullptr;
+#if PICOMENU_BT
+    bool to_bt = false;
+#endif
     int i = file_entry_for(drive, offset);
     char* path = grab_path;                         // free here (no grab, save or recent list now)
     static_assert(sizeof(grab_path) >= BROWSE_PATH_MAX, "a whole path");
@@ -8031,12 +8405,44 @@ static void nmi_action_tape_insert() {
         } else if (n < 0 || n >= (int) sizeof(grab_path)) {
             why = "That path is too long";
         } else {
+#if PICOMENU_BT
+            // A Pico W: the tape is for the trap (it loads at once) or B - Bluetooth tape (in real time).
+            // Asked first (status 2, the question in why_at; the NMI ROM asks it on the key row); the key
+            // comes back in param6 with the same request. BREAK: not put in; another key: asked again.
+            if (!tape_asking) {
+                if (why_at < 16384 - SNAPLIST_PATH_SIZE) {
+                    snprintf(reinterpret_cast<char*>(nmi_rom_data + why_at), SNAPLIST_PATH_SIZE, "%s", "Tape: Trap (T) or Bluetooth (B)");
+                }
+                tape_asking = true;
+                nmi_rom_data[0] = 2;
+                return;
+            }
+            uint8_t answer = nmi_rom_data[7];
+            if (answer == 'b' || answer == 'B') {
+                to_bt = true;
+            } else if (answer == 0x18) {
+                tape_asking = false;
+                why = "No tape put in";
+                if (why_at < 16384 - SNAPLIST_PATH_SIZE) {
+                    snprintf(reinterpret_cast<char*>(nmi_rom_data + why_at), SNAPLIST_PATH_SIZE, "%s", why);
+                }
+                nmi_rom_data[0] = 1;
+                return;
+            } else if (answer != 't' && answer != 'T') {
+                nmi_rom_data[0] = 2;                        // (the question is still there)
+                return;
+            }
+            tape_asking = false;
+#endif
             walk_stop();                            // the folder may be read again; nothing is open
             why = tape_in_start(drive, path, 0);
             if (why == nullptr) {
                 remember_last_game(drive, list_entry_dir[i], name);    // Q names its saves after it
                 persist_last_game();
                 game_running = true;
+#if PICOMENU_BT
+                if (to_bt) bt_browse_takes();       // B: the Bluetooth's (LOAD "" plays it)
+#endif
             }
         }
     }
@@ -8378,15 +8784,24 @@ NOTES_FUNC static bool txt_save() {
 // file has it; after: as changed).
 static const size_t OPT_IN_MAX = 12 * 1024;
 static const size_t OPT_OUT_MAX = 16 * 1024;
-static_assert(OPT_IN_MAX + OPT_OUT_MAX + 2 * sizeof(options::Edit) + 16 <= LIST_POOL_SIZE, "Options fits in the list's memory");
+static const size_t OPT_TYPED_MAX = sizeof(settings::Wifi::password);
+// the WiFi page of Options (W): in the Pico W build (and the simulator, which tests it)
+#if defined(WIFI_ENABLE) || defined(PICOFACE_HOST)
+#define PICOMENU_WIFI_UI 1
+#else
+#define PICOMENU_WIFI_UI 0
+#endif
+static_assert(OPT_IN_MAX + OPT_OUT_MAX + 2 * sizeof(options::Edit) + OPT_TYPED_MAX + 16 <= LIST_POOL_SIZE, "Options fits in the list's memory");
 static char* opt_in() { return list_pool; }
 static char* opt_out() { return list_pool + OPT_IN_MAX; }
 static options::Edit* opt_before() { return reinterpret_cast<options::Edit*>(list_pool + OPT_IN_MAX + OPT_OUT_MAX); }
 static options::Edit* opt_after() { return opt_before() + 1; }
+static char* opt_typed() { return reinterpret_cast<char*>(opt_after() + 1); }   // what is being typed (W)
 static size_t opt_in_len = 0;
-static uint8_t opt_page = 0;            // 0 the settings, 1 the screen grab order
-static uint8_t opt_cursor[2] = { 0, 0 };
-static uint8_t opt_state = 0;           // 0 changing, 1 "Save changes?", 2 a message: any key closes
+static uint8_t opt_page = 0;            // 0 the settings, 1 the screen grab order, 2 WiFi
+static uint8_t opt_cursor[3] = { 0, 0, 0 };
+static uint8_t opt_state = 0;           // 0 changing, 1 "Save changes?", 2 a message: any key closes,
+                                        // 3 Diagnostics, 4 typing a WiFi value (opt_typed)
 static const char* opt_msg = nullptr;
 static bool opt_on_sd = true;           // where the file is (or will be)
 
@@ -8415,6 +8830,7 @@ __attribute__((noinline)) static bool opt_open() {
     char folder[options::FOLDER_MAX];
     folder[0] = '\x01';                             // the file has no start_folder
     settings::Parser parser(b->s, folder, sizeof(folder));
+    parser.wifi = &b->wifi;
     parser.text(opt_in(), opt_in_len);
     if (folder[0] != '\x01') snprintf(b->start_folder, sizeof(b->start_folder), "%s", folder[0] == '\0' ? "/" : folder);
     screengrab::Order order;
@@ -8469,11 +8885,11 @@ static void opt_draw(uint8_t* screen) {
     memset(screen, 0, 6144);
     memset(screen + 6144, ui_attr(0x07), 768);
     memset(screen + 6144, gameinfo::ATTR_BANNER, 32);
-    const char* title = opt_page == 0 ? "Options (Picomenu.ini)" : "Options: Screen grab order";
+    const char* title = opt_page == 0 ? "Options (Picomenu.ini)" : opt_page == 1 ? "Options: Screen grab order" : "Options: WiFi and Bluetooth";
     help_put_text(screen, 0, 1, title, (int) strlen(title), gameinfo::ATTR_BANNER);
     char v[40];
     if (opt_page == 0) {
-        for (int i = 0; i < options::COUNT; i++) {
+        for (int i = 0; i < options::MAIN_COUNT; i++) {
             int row = 1 + i;
             bool here = i == opt_cursor[0];
             uint8_t attr = here ? OPT_ATTR_CURSOR : gameinfo::ATTR_TEXT;
@@ -8493,10 +8909,61 @@ static void opt_draw(uint8_t* screen) {
             help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
         }
         const char* hint = options::ITEMS[opt_cursor[0]].hint;
-        static_assert(1 + options::COUNT <= 20, "the items above the hint");
+        static_assert(1 + options::MAIN_COUNT <= 20, "the items above the hint");
         help_put_text(screen, 20, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
         help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Exit", 29, gameinfo::ATTR_KEYS);
+#if PICOMENU_WIFI_UI
+        help_put_text(screen, 22, 1, "N-Order W-WiFi/BT D-Diagnostics", 31, gameinfo::ATTR_KEYS);
+#else
         help_put_text(screen, 22, 1, "N-Grab order  D-Diagnostics", 27, gameinfo::ATTR_KEYS);
+#endif
+#if PICOMENU_WIFI_UI
+    } else if (opt_page == 2) {
+        // the network's name and passwords for F - File transfer (a Pico W), typed (the
+        // passwords shown as * except while they are typed); then B - Bluetooth tape's settings,
+        // chosen as on the settings page
+        help_put_text(screen, 2, 1, "WiFi: F - File transfer", 23, gameinfo::ATTR_DIM);
+        help_put_text(screen, 8, 1, "Bluetooth: B - Bluetooth tape", 29, gameinfo::ATTR_DIM);
+        for (int k = 0; k < options::WIFI_COUNT; k++) {
+            uint8_t id = (uint8_t) (options::WIFI_FIRST + k);
+            int row = options::typed(id) ? 3 + k : 9 + (id - options::BT_VOLUME);
+            bool here = k == opt_cursor[2];
+            uint8_t attr = here ? OPT_ATTR_CURSOR : gameinfo::ATTR_TEXT;
+            if (here) memset(screen + 6144 + row * 32, OPT_ATTR_CURSOR, 32);
+            if (options::changed(b, a, id)) help_put_text(screen, row, 0, "*", 1, here ? attr : gameinfo::ATTR_HEADING);
+            const char* key = options::ITEMS[id].key;
+            help_put_text(screen, row, 1, key, (int) strlen(key), attr);
+            char val[options::FOLDER_MAX];
+            options::value_text(a, id, val, sizeof(val));
+            size_t len = strlen(val);
+            if (len == 0) {
+                snprintf(val, sizeof(val), "%s", id == options::WIFI_WEB_PASSWORD ? "(none)" : "-");
+            } else if (id == options::WIFI_PASSWORD || id == options::WIFI_WEB_PASSWORD) {
+                size_t stars = len < 16 ? len : 16;
+                memset(val, '*', stars);
+                val[stars] = '\0';
+            }
+            len = strlen(val);
+            const char* shown = val + (len > 16 ? len - 16 : 0);
+            help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
+        }
+        const char* hint = options::ITEMS[options::WIFI_FIRST + opt_cursor[2]].hint;
+        help_put_text(screen, 15, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
+        if (opt_state == 4) {
+            char t[40];
+            snprintf(t, sizeof(t), "Type the %s:", options::ITEMS[options::WIFI_FIRST + opt_cursor[2]].key);
+            help_put_text(screen, 17, 1, t, (int) strlen(t), gameinfo::ATTR_HEADING);
+            const char* typed = opt_typed();
+            size_t tl = strlen(typed);
+            snprintf(t, sizeof(t), "%s_", typed + (tl > 29 ? tl - 29 : 0));
+            help_put_text(screen, 18, 1, t, (int) strlen(t), gameinfo::ATTR_TEXT);
+            help_put_text(screen, 20, 1, "ENTER-Done  DELETE  BREAK-Back", 30, gameinfo::ATTR_KEYS);
+            help_put_text(screen, 21, 1, "(CAPS SHIFT for capitals)", 25, gameinfo::ATTR_DIM);
+        } else {
+            help_put_text(screen, 20, 1, "Q/A-Up/Down  ENTER-Type/Change", 30, gameinfo::ATTR_KEYS);
+            help_put_text(screen, 21, 1, "N-Settings  X-Exit", 18, gameinfo::ATTR_KEYS);
+        }
+#endif
     } else {
         help_put_text(screen, 2, 1, "V shows a game's pictures in", 28, gameinfo::ATTR_DIM);
         help_put_text(screen, 3, 1, "this order (hidden: not shown)", 30, gameinfo::ATTR_DIM);
@@ -8527,13 +8994,43 @@ __attribute__((noinline)) static void nmi_action_options() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t key = nmi_rom_data[2];
     uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+#if PICOMENU_WIFI_UI
+    if (key != 0 && opt_state == 4) {
+        // typing a WiFi value: as it is typed (capitals and all)
+        options::Edit& a = *opt_after();
+        uint8_t id = (uint8_t) (options::WIFI_FIRST + opt_cursor[2]);
+        char* typed = opt_typed();
+        size_t len = strlen(typed);
+        size_t max = id == options::WIFI_PASSWORD ? sizeof(a.wifi.password) : sizeof(a.wifi.ssid);
+        if (is_key_break(key)) {
+            opt_state = 0;
+        } else if (key == notes::KEY_ENTER || key == 13) {
+            char* to = id == options::WIFI_SSID ? a.wifi.ssid : id == options::WIFI_PASSWORD ? a.wifi.password : a.wifi.web_password;
+            size_t a0 = 0, n = len;
+            while (a0 < n && typed[a0] == ' ') a0++;        // (spaces at the ends: the file can't keep them)
+            while (n > a0 && typed[n - 1] == ' ') n--;
+            memcpy(to, typed + a0, n - a0);
+            to[n - a0] = '\0';
+            opt_state = 0;
+        } else if (key == notes::KEY_DELETE) {
+            if (len > 0) typed[len - 1] = '\0';
+        } else if (key >= 32 && key < 127 && len + 1 < max) {
+            typed[len] = (char) key;
+            typed[len + 1] = '\0';
+        }
+        opt_draw(screen);
+        preview_screen = screen;
+        nmi_rom_data[0] = 0;
+        return;
+    }
+#endif
     if (key >= 'A' && key <= 'Z') key = (uint8_t) (key - 'A' + 'a');
     const bool up = key == notes::KEY_UP || key == 'q' || key == '7';
     const bool down = key == notes::KEY_DOWN || key == 'a' || key == '6';
     const bool leave = key == 'x' || is_key_break(key);
     if (key == 0) {
         opt_page = 0;
-        opt_cursor[0] = opt_cursor[1] = 0;
+        opt_cursor[0] = opt_cursor[1] = opt_cursor[2] = 0;
         opt_state = 0;
         opt_msg = nullptr;
         if (!opt_open()) opt_state = 2;
@@ -8558,7 +9055,7 @@ __attribute__((noinline)) static void nmi_action_options() {
     } else {
         opt_msg = nullptr;
         options::Edit& a = *opt_after();
-        int count = opt_page == 0 ? options::COUNT : screengrab::CATEGORIES;
+        int count = opt_page == 0 ? options::MAIN_COUNT : opt_page == 1 ? screengrab::CATEGORIES : options::WIFI_COUNT;
         uint8_t& cur = opt_cursor[opt_page];
         if (leave) {
             if (!options::any_changed(*opt_before(), a)) {
@@ -8571,7 +9068,20 @@ __attribute__((noinline)) static void nmi_action_options() {
         } else if (down) {
             cur = (uint8_t) (cur + 1 >= count ? 0 : cur + 1);
         } else if (key == 'n' || key == 'p') {
-            opt_page ^= 1;
+            opt_page = opt_page == 0 ? 1 : 0;
+#if PICOMENU_WIFI_UI
+        } else if (opt_page == 0 && key == 'w') {
+            opt_page = 2;
+        } else if (opt_page == 2 && (key == notes::KEY_ENTER || key == 13 || key == 'c')) {
+            uint8_t id = (uint8_t) (options::WIFI_FIRST + cur);
+            if (options::typed(id)) {
+                // type it: starting from what it is
+                options::value_text(*opt_after(), id, opt_typed(), OPT_TYPED_MAX);
+                opt_state = 4;
+            } else {
+                options::cycle(a, id, sd_cwd);          // a Bluetooth setting: the next value
+            }
+#endif
         } else if (opt_page == 0 && key == 'd') {
             help_draw_page(screen, HELP_PAGE_COUNT - 1);       // Diagnostics (the last page of Help)
             opt_state = 3;
@@ -8927,6 +9437,10 @@ static const char TAPE_LABELS_TITLE[] = "PicoMenu tape labels";
 static const uint32_t TAPE_LABELS_OFFSET = 90112, TAPE_LABELS_MAX = 2048;
 static_assert(TAPE_LABELS_OFFSET >= 82944 + 6912 && TAPE_LABELS_OFFSET + 2 * TAPE_LABELS_MAX <= 98304,
     "the labels between the menu grab and the Help text");
+#ifdef PICOMENU_BT_SHARED
+static_assert(TAPE_LABELS_OFFSET + 2 * TAPE_LABELS_MAX <= RADIO_ARENA_END,
+    "the labels before the Bluetooth's memory (the tape player is used while it is on)");
+#endif
 static char* tape_labels_text() { return snap_load_buffer + TAPE_LABELS_OFFSET; }
 
 // The labels file of the tape tpath (a path on its drive), in tape_note_mem.path
@@ -9264,6 +9778,10 @@ static char tape_pos_msg[33] = "";
 
 // Plays the tape from its start to just before data block 'block'
 static bool tape_goto(uint32_t block) {
+#if PICOMENU_BT
+    bt_tape_ready = false;          // the Bluetooth's player starts again from tape_done
+    bt_playing = false;
+#endif
     if (!tape_open_file()) return false;
     const bool tzx = tape_is_tzx(tape_name);
     for (uint32_t i = 0; i < block; i++) {
@@ -9338,9 +9856,10 @@ static uint32_t tape_label_block = 0;           // the line's first data block
 static uint8_t tape_label_line = 0;             // its number on the page (1-10)
 static const size_t TAPE_LABEL_MAX = 16;
 
-static void nmi_action_tape_position() {
-    uint8_t* nmi_rom_data = rom_data + 16384;
-    uint8_t key = nmi_rom_data[2];
+// The tape player's screen for a key (0: opened), drawn in snap_load_buffer: its status, 0
+// shown, 1 closed. (It is given back, not put in the ROM's status byte straight away: the
+// Spectrum runs on as the Pico draws, and would take a status written early as the answer)
+static uint8_t tape_position_screen(uint8_t key) {
     const uint8_t BANNER = 0x4F, TEXT = 0x47, DONE = 0x07, HEADING = 0x46, KEYS = 0x45, NOW = 0x44;
     uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
     bool keep_msg = false;              // drawn again after recording starts: its message stays
@@ -9395,8 +9914,7 @@ static void nmi_action_tape_position() {
         if (tape_rec_naming) {
             tape_rec_name_draw(screen);
             preview_screen = screen;
-            nmi_rom_data[0] = 0;
-            return;
+            return 0;
         }
     }
     if (tape_label_state == 1 && key != 0) {
@@ -9411,8 +9929,7 @@ static void nmi_action_tape_position() {
         tape_rec_why = nullptr;
         tape_rec_name_draw(screen);
         preview_screen = screen;
-        nmi_rom_data[0] = 0;
-        return;
+        return 0;
     }
     bool playing = tape_service_active && !tape_ejected;
     if (key == 'l' && playing && !tape_rec) {          // L: label a line
@@ -9420,8 +9937,7 @@ static void nmi_action_tape_position() {
         key = 0x7F;
     }
     if (key == 'x' || key == 0x18 || key == 0x13 || (key != 0 && key != 'e' && key != 0x7F && !playing)) {
-        nmi_rom_data[0] = 1;            // closed
-        return;
+        return 1;            // closed
     }
     if (key == 'e' && playing && tape_rec) {    // stop recording
         const char* name = strrchr(tape_name, '/');
@@ -9432,8 +9948,7 @@ static void nmi_action_tape_position() {
         tape_eject();
         playing = false;
     } else if (key == 'e') {
-        nmi_rom_data[0] = 1;
-        return;
+        return 1;
     }
     memset(screen, 0, 6144);
     memset(screen + 6144, ui_attr(0x07), 768);
@@ -9441,7 +9956,6 @@ static void nmi_action_tape_position() {
     const char* title = playing && tape_rec ? "Recording" : "Virtual Tape Player";
     help_put_text(screen, 0, 1, title, strlen(title), BANNER);
     preview_screen = screen;
-    nmi_rom_data[0] = 0;
     if (!playing) {
         const char* const lines[] = {
             tape_service_active ? "The tape is out (ejected)." : "No tape is being played.",
@@ -9459,7 +9973,7 @@ static void nmi_action_tape_position() {
         if (tape_pos_msg[0] != '\0') help_put_text(screen, 21, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
         static const char k[] = "W-Record  Any other key: back";
         help_put_text(screen, 23, 1, k, sizeof(k) - 1, KEYS);
-        return;
+        return 0;
     }
     const bool tzx = tape_is_tzx(tape_name);
     TzxState saved = tz;
@@ -9468,9 +9982,16 @@ static void nmi_action_tape_position() {
     // the lines, and the one the tape is at (the next load's)
     uint32_t count = 0, now = 0;
     bool at_end = true;
+#if PICOMENU_BT
+    // the Bluetooth's place while it has the tape (P in B - Bluetooth tape): the blocks it has
+    // played are dim as it goes
+    const uint32_t pos = bt_tape_ready ? bt_position() : tape_done;
+#else
+    const uint32_t pos = tape_done;
+#endif
     if (open) {
         tape_entries(f, tzx, [&](const TapeEntry& e) {
-            if (at_end && tape_done < e.first + e.blocks) {
+            if (at_end && pos < e.first + e.blocks) {
                 now = count;
                 at_end = false;
             }
@@ -9604,10 +10125,16 @@ static void nmi_action_tape_position() {
         }
         static const char kr[] = "E-Stop recording  N P X-Exit";
         help_put_text(screen, 23, 1, kr, sizeof(kr) - 1, KEYS);
-        return;
+        return 0;
     }
     const char* where = at_end ? "At the end: it starts again" : "> the next load";
     help_put_text(screen, 14, 0, where, strlen(where), NOW);
+#if PICOMENU_BT
+    if (bt_tape_ready || bt_owns) {
+        const char* in = bt_tape_ready ? "Playing by Bluetooth (T-B)" : "For Bluetooth: LOAD plays it";
+        help_put_text(screen, 15, 0, in, strlen(in), DONE);
+    } else
+#endif
     if (tape_in) {
         static const char in[] = "In with T: for the Spectrum ROM";
         help_put_text(screen, 15, 0, in, sizeof(in) - 1, DONE);
@@ -9617,7 +10144,7 @@ static void nmi_action_tape_position() {
         help_put_text(screen, 17, 0, q, sizeof(q) - 1, HEADING);
         static const char kq[] = "1-0 the line  Other keys: back";
         help_put_text(screen, 23, 1, kq, sizeof(kq) - 1, KEYS);
-        return;
+        return 0;
     }
     if (tape_label_state == 2) {
         char q[40];
@@ -9629,7 +10156,7 @@ static void nmi_action_tape_position() {
         help_put_text(screen, 20, 0, e1, sizeof(e1) - 1, DONE);
         static const char kt[] = "ENTER-Save DELETE BREAK-Back";
         help_put_text(screen, 23, 1, kt, sizeof(kt) - 1, KEYS);
-        return;
+        return 0;
     }
     static const char* const help[] = {
         "1-0 the next load starts there", "R   rewind to the start",
@@ -9642,13 +10169,556 @@ static void nmi_action_tape_position() {
     if (tape_pos_msg[0] != '\0') help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
     static const char k1[] = "1-0 L-Label E-Eject N P X-Exit";
     help_put_text(screen, 23, 1, k1, sizeof(k1) - 1, KEYS);
+    return 0;
 }
 
+static void nmi_action_tape_position() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    nmi_rom_data[0] = tape_position_screen(nmi_rom_data[2]);
+}
+
+// ---- B - Bluetooth tape (Tools; the Pico W build) ----
+// The tape put in (T in Browse Games, or one the trap is playing) is played as sound to a
+// Bluetooth receiver wired to the Spectrum's EAR socket (or a speaker held to it), in real time,
+// as a phone's tape app plays it: the Spectrum's own loader loads it, so a turbo or protected
+// loader works as with a real tape. The sound is made from the tape file (tapeaudio.h) as
+// Bluetooth needs it (bt.cxx).
+//
+// The tape is the Bluetooth's (bt_owns) from P, or from leaving this screen connected, or from T
+// in Browse Games ([Bluetooth] tapes = bluetooth). Then the trap's hook answers 4 to the ROM's
+// LD-BYTES (TAPE_IN_HOOK): the ROM loads from the EAR socket, and the load starts the tape
+// (auto_play), so LOAD "" (or a multi-load game's next load) plays it as a deck would be started.
+// Opening the menu while a block plays loses that block (the Spectrum stops listening while the
+// receiver plays on a moment): the tape goes back to the start of its line, for the next load.
+// A few seconds after the tape ends it switches off (auto_off), so autosave can go on.
+//
+// Memory: the Bluetooth's variables are in the last 16 KB of snap_load_buffer (the Pico W
+// build's memmap_picomenu_w.ld). It stays on only while nothing else can use that: its own
+// screen, the menu being opened and closed (the screen's stash and restore), and the game
+// running. Anything else the menu does (bt_keeps), autosaving and the level loader scan wait or
+// switch it off first (bt_off). The tape's place is kept in ordinary RAM (bt_tape), so P goes on
+// from where it was after the Bluetooth was off.
+#if PICOMENU_BT
+#ifdef WIFI_ENABLE
+// (in the scratch RAM bank, where core 1's stack is, as the main RAM is all used)
+static tapeaudio::Audio<FileHandle> bt_tape __attribute__((section(".scratch_x.bt_tape")));
+#else
+static tapeaudio::Audio<FileHandle> bt_tape;
+#endif
+static uint32_t bt_lead = 0;                // samples of silence before the tape (P)
+static uint8_t bt_volume = 0;               // 0 1/2 (the one that loads best), 1 3/4, 2 full
+static const char* bt_msg = nullptr;
+static bool bt_auto = false;                // connect to the one paired last, once it is ready
+static uint8_t bt_shown = 0xFF;             // what the screen showed (state, found, playing)
+static uint32_t bt_shown_block = 0xFFFFFFFF;
+static bool bt_vtp = false;                 // T: the tape player, opened from this screen (its X comes back)
+static bool bt_want_play = false;           // a load asked for the tape (auto_play): played once connected
+static bool bt_want_connect = false;        // connect to the receiver paired last once the chip is ready
+static bool bt_menu_seen = false;           // an NMI (the menu) came while it played: seen
+static uint32_t bt_end_ms = 0;              // when the tape was found to have ended (auto_off)
+static const char* bt_note = nullptr;       // what happened while the screen was closed: shown when it opens
+static const uint32_t BT_LEAD_LOAD = 4;     // the silence before the tape when a load starts it: 1/4 s
+static const uint64_t BT_CUT_WITHIN = 3500000 / 2;  // data played this recently (T-states) is lost with the menu
+
+
+// The sound (bt.cxx asks for it as it is due)
+static void bt_source(int16_t* out, uint32_t n, void*) {
+    if (!bt_playing || rom_state.nmi_active || !tape_file_open) {
+        memset(out, 0, n * sizeof(int16_t));     // the menu is open (the Spectrum waits): silence
+        return;
+    }
+    uint32_t i = 0;
+    for (; i < n && bt_lead > 0; i++, bt_lead--) out[i] = 0;
+    if (i < n) {
+        static const int16_t AMP[] = { 15000, 22500, 30000 };
+        bt_tape.fill(out + i, n - i, AMP[bt_volume]);
+    }
+#ifdef PICOFACE_HOST
+    static uint32_t shown = 0xFFFFFFFF;
+    if (bt_tape.data_position() != shown) {
+        shown = bt_tape.data_position();
+        LOG("Bluetooth tape: block %u (%u ms played)\n", (unsigned) shown, (unsigned) bt_tape.played_ms());
+    }
+#endif
+    if (bt_tape.state() != tapeaudio::Audio<FileHandle>::PLAYING) {
+        bt_playing = false;                     // ended, or a stop
+        LOG("Bluetooth tape: %s at block %u\n", bt_tape.state() == tapeaudio::Audio<FileHandle>::HELD ? "stopped by the tape" :
+            bt_tape.state() == tapeaudio::Audio<FileHandle>::ENDED ? "ended" : "could not be read", (unsigned) bt_tape.data_position());
+    }
+}
+
+// The next data block the Bluetooth plays (bt_tape_ready), counted as tape_done is
+static uint32_t bt_position() { return bt_tape.data_position(); }
+
+// The trap has the tape again (it was the Bluetooth's): from where the Bluetooth got to
+static void bt_trap_back() {
+    bt_owns = false;
+    bt_want_play = false;
+    if (!bt_tape_ready) return;             // the Bluetooth has played none of it
+    uint32_t at = bt_tape.data_position();
+    bt_playing = false;
+    if (tape_in && tape_service_active && !tape_ejected && !tape_rec && tape_goto(at)) {
+        tape_done = at;
+        tape_in_watch(true);
+    }
+    bt_tape_ready = false;
+}
+
+// The watchdog, on while the Bluetooth is (bt_poll feeds it from the main loop): if the Pico
+// hangs, it starts again (the crash recorder, bt.h, says so on the B screen) rather than
+// leaving the menu dead
+static void bt_watchdog(bool on) {
+#ifdef WIFI_ENABLE
+    if (on) watchdog_enable(8000, true);
+    else hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
+#else
+    (void) on;
+#endif
+}
+
+static void bt_off() {
+    if (!bt_on) return;
+    bt::stop();
+    bt_on = false;
+    bt_watchdog(false);
+    bt_want_connect = false;
+    bt_end_ms = 0;
+    bt_trap_back();
+}
+
+// The radio on (the menu is up): for this screen, or T in Browse Games. Null, or why not
+static const char* bt_radio_start() {
+    web_off();                              // one radio at a time
+    walk_stop();
+    sna_in_buffer = false;                  // (a save not finished: its snapshot is let go)
+    const char* why = bt::start(reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_ARENA_AT,
+        RADIO_ARENA_END - WEB_ARENA_AT, bt_source, nullptr);
+    bt_on = why == nullptr;
+    bt_volume = cfg.bt_volume;
+    if (why != nullptr) LOG("Bluetooth: %s\n", why);
+    bt_watchdog(bt_on);
+    return why;
+}
+
+// Whether the menu doing this leaves the Bluetooth on: the screen's stash and restore as the
+// menu opens and closes, and its own screen (and the ROM reading it: its first 6912 bytes)
+static bool bt_keeps(uint8_t action) {
+    // (and V - the tape player, whose screen is there too, its labels further on: before the
+    // Bluetooth's part)
+    return action == ACTION_SCREEN_STASH || action == ACTION_SCREEN_RESTORE ||
+        (action == ACTION_WIFI && (bt_screen || rom_data[16384 + 2] == 0xFE)) ||
+        action == ACTION_TAPE_POSITION ||
+        (action == ACTION_PREVIEW_READ && (bt_screen || preview_screen == reinterpret_cast<uint8_t*>(snap_load_buffer)));
+}
+
+// Plays the tape from where it is (from where the trap's tape is, the first time), after
+// lead/rate() of silence (a receiver can take a moment to start sounding). Null, or why not
+static const char* bt_start(uint32_t lead) {
+    if (!bt_tape_ready) {
+        // from where the trap's tape is (the next data block it would give)
+        uint32_t at = tape_done;
+        if (!bt_tape.begin(&tape_file, tape_is_tzx(tape_name), bt::rate())) return "The tape cannot be read";
+        if (at > 0 && !bt_tape.skip_to(at)) return "The tape has ended";
+        bt_tape_ready = true;
+    } else if (bt_tape.state() == tapeaudio::Audio<FileHandle>::ENDED) {
+        return "The tape has ended (R rewinds)";
+    }
+    bt_tape.play();                         // (after a "stop the tape")
+    bt::note(0x42);
+    bt_lead = bt::rate() / lead;
+    bt_owns = true;                         // the ROM loads from the EAR socket (the hook's 4)
+    bt_playing = true;
+    LOG("Bluetooth tape: playing from block %u\n", (unsigned) bt_tape.data_position());
+    return nullptr;
+}
+
+// A tape put in that the Bluetooth can have (not recording, not ejected)
+static bool bt_tape_usable() {
+    return tape_service_active && !tape_ejected && tape_file_open && tape_in && !tape_rec;
+}
+
+// P: plays now (the menu goes)
+static const char* bt_play() {
+    if (!tape_service_active || tape_ejected || !tape_file_open) return "Put a tape in first (T on it)";
+    if (tape_rec) return "Not while recording";
+    if (!tape_in) return "Put it in with T in Browse Games";
+    if (bt::state() != bt::CONNECTED) return "Connect to the receiver first";
+    return bt_start(1);                     // a second of silence first
+}
+
+// The trap's hook asks for a block (the ROM's LD-BYTES): true if the Bluetooth has the tape, so
+// the ROM is to load it from the EAR socket; the tape starts (auto_play) as soon as it can
+static bool bt_takes_load() {
+    if (!bt_owns || !bt_on || !bt_tape_usable()) return false;
+    bt::State st = bt::state();
+    if (st == bt::READY && bt::connect_saved()) st = bt::state();     // (it went: connected to again)
+    if (st != bt::CONNECTED && st != bt::CONNECTING && st != bt::STARTING) return false;
+    if (cfg.bt_auto_play && !bt_playing) bt_want_play = true;
+    bt::note(0x41);
+    return true;
+}
+
+// The menu came while a block was being played (bt_tape.cut): the Spectrum's loader has lost it.
+// The tape goes back to the start of that block's line in the tape player (its header with it),
+// and waits for the next load.
+static void bt_cut_back() {
+    uint32_t block = bt_tape.cut_block();
+    uint32_t first = block, line = 0, i = 0;
+    const bool tzx = tape_is_tzx(tape_name);
+    TzxState saved = tz;
+    FileHandle f;
+    if (f.open(tape_drive == 1 ? Drive::EXTERNAL_SD_CARD : Drive::INTERNAL_FLASH, tape_name, true)) {
+        tape_entries(f, tzx, [&](const TapeEntry& e) {
+            if (block < e.first + e.blocks) {
+                first = e.first;
+                line = i;
+                return false;
+            }
+            i++;
+            return true;
+        });
+        f.close();
+    }
+    tz = saved;
+    bt::note(0x43);
+    tape_goto(first);                       // (the Bluetooth's player starts again from there)
+    static char note[40];
+    snprintf(note, sizeof(note), "Menu mid-block: back to line %u", (unsigned) (line + 1));
+    bt_note = note;
+    LOG("Bluetooth tape: the menu cut block %u: back to %u (line %u)\n", (unsigned) block, (unsigned) first, (unsigned) (line + 1));
+}
+
+// V: the volume, kept in Picomenu.ini ([Bluetooth] volume) as O - Options keeps it
+static bool bt_save_volume() {
+    if (!opt_open()) return false;
+    opt_after()->s.bt_volume = bt_volume;
+    bool ok = opt_save();
+    list_pool_busy = false;
+    return ok;
+}
+
+// T in Browse Games, then B (Bluetooth): the tape just put in is the Bluetooth's, and the
+// receiver paired last is connected to (the menu goes; LOAD "" plays it)
+static void bt_browse_takes() {
+    if (!bt_on && bt_radio_start() != nullptr) {
+        bt_note = "Bluetooth did not start";
+        return;                             // the trap has it
+    }
+    bt_owns = true;
+    bt::State st = bt::state();
+    if (st != bt::CONNECTED && st != bt::CONNECTING) bt_want_connect = true;
+}
+
+// What the screen shows, kept in snap_load_buffer after the screen
+static void bt_draw(uint8_t* screen) {
+    slots_banner(screen, "", "Bluetooth tape");
+    char t[48];
+    auto text = [&](int r, const char* s, uint8_t attr) { help_put_text(screen, r, 1, s, (int) strlen(s), attr); };
+    bt::State st = bt::state();
+    int row = 2;
+    switch (st) {
+    case bt::OFF: text(row, "Off", gameinfo::ATTR_TEXT); break;
+    case bt::STARTING: text(row, "Starting ...", gameinfo::ATTR_TEXT); break;
+    case bt::FAILED:
+        text(row, "Bluetooth did not start:", gameinfo::ATTR_TEXT);
+        text(row + 1, bt::why(), gameinfo::ATTR_HEADING);
+        break;
+    case bt::READY:
+        if (bt::saved_name()[0] != '\0') {
+            snprintf(t, sizeof(t), "Paired: %.22s", bt::saved_name());
+            text(row, t, gameinfo::ATTR_TEXT);
+        } else {
+            text(row, "Not paired with a receiver", gameinfo::ATTR_TEXT);
+        }
+        break;
+    case bt::SEARCHING: text(row, "Searching (10 seconds) ...", gameinfo::ATTR_TEXT); break;
+    case bt::CONNECTING:
+        snprintf(t, sizeof(t), "Connecting to %.16s", bt::connected_name());
+        text(row, t, gameinfo::ATTR_TEXT);
+        break;
+    case bt::CONNECTED:
+        snprintf(t, sizeof(t), "On %.29s", bt::connected_name());
+        text(row, t, gameinfo::ATTR_HEADING);
+        snprintf(t, sizeof(t), "(%s, %u Hz)", bt::mono() ? "mono" : "stereo", (unsigned) bt::rate());
+        text(row + 1, t, gameinfo::ATTR_DIM);
+        break;
+    }
+    if (st != bt::CONNECTED && st != bt::FAILED && bt::why()[0] != '\0') text(3, bt::why(), gameinfo::ATTR_HEADING);
+    // the last restart was a crash or a hang: what and where (the crash recorder, bt.h)
+    if (bt::crashed()) {
+        bt::crash_text(0, t, sizeof(t));
+        text(4, t, gameinfo::ATTR_HEADING);
+        bt::crash_text(1, t, sizeof(t));
+        text(13, t, gameinfo::ATTR_DIM);
+    }
+    // what was found
+    int n = bt::found_count();
+    if ((st == bt::SEARCHING || st == bt::READY) && n > 0) {
+        for (int i = 0; i < n && i < bt::FOUND_MAX; i++) {
+            const bt::Found& f = bt::found(i);
+            snprintf(t, sizeof(t), "%d %.27s", i + 1, f.name[0] != '\0' ? f.name : "(no name yet)");
+            text(5 + i, t, gameinfo::ATTR_TEXT);
+        }
+    } else if (st == bt::READY && n == 0 && bt::saved_name()[0] == '\0') {
+        text(5, "Switch the receiver on (ready", gameinfo::ATTR_DIM);
+        text(6, "to pair: its light flashing),", gameinfo::ATTR_DIM);
+        text(7, "then S to search for it.", gameinfo::ATTR_DIM);
+    }
+    // the tape
+    if (tape_service_active && !tape_ejected && tape_file_open) {
+        const char* name = strrchr(tape_name, '/');
+        snprintf(t, sizeof(t), "Tape: %.24s", name != nullptr ? name + 1 : tape_name);
+        text(14, t, gameinfo::ATTR_TEXT);
+        uint32_t block = bt_tape_ready ? bt_tape.data_position() : tape_done;
+        if (bt_tape_ready && bt_tape.state() == tapeaudio::Audio<FileHandle>::ENDED) {
+            snprintf(t, sizeof(t), "At the end of the tape");
+        } else {
+            const char* how = !bt_tape_ready ? "ready" :
+                bt_playing ? "playing" :
+                bt_tape.state() == tapeaudio::Audio<FileHandle>::HELD ? "stopped by the tape" : "paused";
+            snprintf(t, sizeof(t), "Block %u, %s", (unsigned) (block + 1), how);
+        }
+        text(15, t, gameinfo::ATTR_DIM);
+        // how far it has got, as C - Convert shows it: the time played, a bar of the file read
+        // (green), the percentage
+        int size = tape_file.size();
+        uint32_t at = (uint32_t) tape_file.tell();
+        bool ended = bt_tape_ready && bt_tape.state() == tapeaudio::Audio<FileHandle>::ENDED;
+        uint32_t pct = ended ? 100 : size > 0 ? (uint32_t) ((uint64_t) at * 100 / (uint32_t) size) : 0;
+        if (pct > 100) pct = 100;
+        if (!ended && pct > 99) pct = 99;
+        if (!bt_tape_ready && tape_done == 0) pct = 0;      // (the start: the file's header read)
+        uint32_t secs = bt_tape_ready ? (uint32_t) (bt_tape.played_ms() / 1000) : 0;
+        snprintf(t, sizeof(t), "%u:%02u", (unsigned) (secs / 60), (unsigned) (secs % 60));
+        text(16, t, gameinfo::ATTR_TEXT);
+        const int BAR_AT = 7, CELLS = 20;
+        for (int i = 0; i < CELLS; i++) {
+            screen[6144 + 16 * 32 + BAR_AT + i] = (uint32_t) i * 100 < pct * (uint32_t) CELLS ? 0x20 : 0x08;   // green or blue paper
+        }
+        snprintf(t, sizeof(t), "%u%%", (unsigned) pct);
+        help_put_text(screen, 16, BAR_AT + CELLS + 1, t, (int) strlen(t), gameinfo::ATTR_TEXT);
+    } else {
+        text(14, "No tape in: T on one in Browse", gameinfo::ATTR_DIM);
+        text(15, "Games puts it in.", gameinfo::ATTR_DIM);
+    }
+    static const char* const VOL[] = { "1/2", "3/4", "full" };
+    if (st == bt::CONNECTED) {
+        if (cfg.bt_auto_play) {
+            text(17, "LOAD \"\" or the Tape Loader", gameinfo::ATTR_DIM);
+            text(18, "plays it (or P to play now).", gameinfo::ATTR_DIM);
+        } else {
+            text(17, "P plays (the menu goes), then", gameinfo::ATTR_DIM);
+            text(18, "LOAD \"\" or the Tape Loader.", gameinfo::ATTR_DIM);
+        }
+        snprintf(t, sizeof(t), "V-Volume: %s", VOL[bt_volume]);
+        text(19, t, gameinfo::ATTR_DIM);
+    }
+    if (bt_msg != nullptr) text(20, bt_msg, gameinfo::ATTR_HEADING);
+    if (st == bt::CONNECTED) {
+        text(21, "P-Play T-Tape player R-Rewind", gameinfo::ATTR_KEYS);
+    } else if (st == bt::READY) {
+        text(21, bt::saved_name()[0] != '\0' ? (n > 0 ? "S-Search 1-8 C-Connect F-Forget" : "S-Search C-Connect F-Forget") :
+            (n > 0 ? "S-Search again 1-8 Pair" : "S-Search"), gameinfo::ATTR_KEYS);
+    }
+    text(22, st == bt::CONNECTED ? "D-Disconnect O-Off BREAK-Back" : "T-Tape player O-Off BREAK-Back", gameinfo::ATTR_KEYS);
+    preview_screen = screen;
+}
+
+// What the screen showed, packed: has anything changed?
+static uint8_t bt_summary() {
+    return (uint8_t) ((uint8_t) bt::state() | (bt::found_count() << 3) | (bt_playing ? 0x80 : 0));
+}
+
+// ACTION_WIFI opened with 0xFE (B in Tools), then its keys and polls (255: none): status 0 as it
+// is, 1 closed, 2 shown again, 3 leave the menu (P)
+static void nmi_action_bt(uint8_t key) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    bool redraw = false;
+    if (bt_vtp && key != 0xFE) {
+        // T: the Virtual Tape Player, its keys as V on the menu has them (this screen's polls
+        // leave it as it is); when it closes (X, BREAK) this screen is back
+        if (key == 255) {
+            nmi_rom_data[0] = 0;
+            return;
+        }
+        if (tape_position_screen(key) == 0) {
+            nmi_rom_data[0] = 2;            // its screen, shown again
+            return;
+        }
+        bt_vtp = false;
+        key = 255;                          // this screen again, as it is now
+        redraw = true;
+    }
+    if (key == 0xFE) {
+        bt_screen = true;
+        bt_vtp = false;
+        bt_msg = bt_note;                   // (what happened while it was closed)
+        bt_note = nullptr;
+        if (!bt_on) {
+            bt_auto = bt_radio_start() == nullptr && cfg.bt_auto_connect;
+        } else {
+            web_off();
+            walk_stop();
+            sna_in_buffer = false;
+        }
+        redraw = true;
+    } else if (key != 255) {
+        bt_msg = nullptr;
+        redraw = true;
+        bt::State st = bt::state();
+        if (is_key_break(key) || key == 'x' || key == 'X') {
+            bt_screen = false;
+            bt::crash_clear();                  // (seen)
+            // connected (or connecting) with a tape in: the tape is the Bluetooth's, for the next
+            // load; else the trap has it again
+            if (bt_tape_usable() && (st == bt::CONNECTED || st == bt::CONNECTING)) bt_owns = true;
+            else if (!bt_playing) bt_trap_back();
+            nmi_rom_data[0] = 1;
+            return;
+        } else if (key == 'o' || key == 'O') {
+            bt_off();
+            bt_msg = "Bluetooth off";
+        } else if ((key == 's' || key == 'S') && st == bt::READY) {
+            bt_auto = false;
+            bt::search();
+        } else if ((key == 'c' || key == 'C') && (st == bt::READY || st == bt::SEARCHING)) {
+            bt_auto = false;
+            if (!bt::connect_saved()) bt_msg = "Not paired yet: S to search";
+        } else if (key >= '1' && key <= '8' && (st == bt::READY || st == bt::SEARCHING) && key - '1' < bt::found_count()) {
+            bt_auto = false;
+            bt::connect(key - '1');
+        } else if ((key == 'f' || key == 'F') && st == bt::READY && bt::saved_name()[0] != '\0') {
+            bt::forget();
+            bt_msg = "Forgotten (paired again with S)";
+        } else if ((key == 'd' || key == 'D') && st == bt::CONNECTED) {
+            bt_playing = false;
+            bt_owns = false;
+            bt::disconnect();
+        } else if (key == 't' || key == 'T') {
+            bt_vtp = true;
+            tape_position_screen(0);        // the tape player opened
+            nmi_rom_data[0] = 2;
+            return;
+        } else if ((key == 'v' || key == 'V') && st == bt::CONNECTED) {
+            bt_volume = (uint8_t) ((bt_volume + 1) % 3);
+            if (!bt_save_volume()) bt_msg = "Volume not saved in Picomenu.ini";
+        } else if ((key == 'r' || key == 'R') && tape_service_active && !tape_ejected) {
+            bt_playing = false;
+            tape_goto(0);                               // (the trap's tape too)
+            bt_msg = "Rewound to the start";
+        } else if (key == 'p' || key == 'P') {
+            const char* why = bt_play();
+            if (why == nullptr) {
+                bt_screen = false;
+                nmi_rom_data[0] = 3;                    // the menu goes: the tape plays
+                return;
+            }
+            bt_msg = why;
+        }
+    }
+    // connect to the receiver paired last, as soon as the chip is ready
+    if (bt_auto && bt::state() == bt::READY) {
+        bt_auto = false;
+        bt::connect_saved();
+    }
+    uint8_t sum = bt_summary();
+    uint32_t block = bt_tape_ready ? bt_tape.data_position() : tape_done;
+    if (sum != bt_shown || block != bt_shown_block) redraw = true;
+    bt_shown = sum;
+    bt_shown_block = block;
+    if (redraw) bt_draw(screen);
+    nmi_rom_data[0] = redraw ? 2 : 0;
+}
+
+// From the main loop: the Bluetooth's work
+static void bt_poll() {
+    if (!bt_on) return;
+#ifdef WIFI_ENABLE
+    watchdog_update();
+#endif
+    bt::poll();
+    // a connection lost (the receiver off, out of range, or taken by a phone), or not made: the
+    // Bluetooth is started afresh before it is used again (as O, then B), as BTstack may not be
+    // left tidy; the tape stays the Bluetooth's, and the next load (or C) connects again
+    if (bt::lost()) {
+        static const char* lost_why;
+        lost_why = bt::why()[0] != '\0' ? bt::why() : "The connection was lost";
+        bt::note(0x40);
+        LOG("Bluetooth: %s: started again\n", lost_why);
+        bt_playing = false;
+        bt::stop();
+        bt_on = false;
+        if (bt_radio_start() != nullptr) {
+            bt_note = "Bluetooth did not start again";
+            bt_trap_back();
+            return;
+        }
+        bt_note = lost_why;
+        if (bt_screen) bt_msg = lost_why;
+        return;
+    }
+    bt::State st = bt::state();
+    if (bt_want_connect && st == bt::READY) {
+        bt_want_connect = false;
+        if (!bt::connect_saved()) {
+            bt_note = "Pair a receiver first (S)";
+            bt_trap_back();                     // (none paired: the trap loads it)
+        }
+        st = bt::state();
+    }
+    if (bt_want_play) {
+        if (bt_playing || !bt_owns) {
+            bt_want_play = false;
+        } else if (st == bt::CONNECTED) {
+            bt_want_play = false;
+            const char* why = bt_start(BT_LEAD_LOAD);
+            if (why != nullptr) bt_note = why;
+        }
+    }
+    // the menu (an NMI) while it plays: a block cut short goes back to its start
+    if (rom_state.nmi_active) {
+        if (bt_playing && !bt_menu_seen) {
+            bt_menu_seen = true;
+            if (bt_tape.cut(BT_CUT_WITHIN)) bt_cut_back();
+        }
+    } else {
+        bt_menu_seen = false;
+    }
+    // the tape has ended: off a few seconds on (auto_off), so autosave and the level loader can go on
+    if (cfg.bt_auto_off && bt_tape_ready && bt_tape.state() == tapeaudio::Audio<FileHandle>::ENDED &&
+            !rom_state.nmi_active) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (bt_end_ms == 0) {
+            bt_end_ms = now | 1;
+        } else if (now - bt_end_ms >= 5000) {
+            bt::note(0x44);
+            bt_off();
+            bt_note = "Switched off: the tape ended";
+            LOG("Bluetooth: off, the tape ended\n");
+        }
+    } else {
+        bt_end_ms = 0;
+    }
+}
+
+#ifdef PICOFACE_HOST
+// the simulator's main loop (the firmware's does it)
+void host_bt_poll() { bt_poll(); }
+#endif
+#endif
+
 uint8_t* beginSendSnapDataToMachine() {
+#if PICOMENU_BT
+    bt_off();                               // (a snapshot from the PC: all of snap_load_buffer)
+#endif
     return reinterpret_cast<uint8_t*>(snap_load_buffer);
 }
 
 uint8_t* getRamLoadBuffer() {
+#if PICOMENU_BT
+    bt_off();
+#endif
     return reinterpret_cast<uint8_t*>(snap_load_buffer + SNA_HEADER_SIZE);
 }
 
@@ -9824,6 +10894,7 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
     else {
 
         uint8_t* nmi_rom_data = rom_data + 16384;
+        web_off();                           // (its memory is snap_load_buffer)
         checkpoint_flush();                      // (a checkpoint not yet written: snap_load_buffer is needed)
         // the menu, or the S or G screen on its own (the button): the ROM turns the sound down
         // for them, the card is checked, and the game's time stops for the checkpoints
@@ -9838,6 +10909,9 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         walk_stop();
         sna_in_buffer = false;
         list_pool_busy = false;
+#if PICOMENU_BT
+        tape_asking = false;
+#endif
         move_picked = false;
         screen_stashed = false;
         preview_screen = nullptr;
@@ -10974,6 +12048,14 @@ int main() {
 
     nmi_rom_unpack(rom_data + 16384);
     rom_state.flags = 0;
+#ifdef WIFI_ENABLE
+    // (outside .bss in this build, so not cleared by the start up: memmap_picomenu_w.ld)
+    memset(snap_load_buffer, 0, sizeof(snap_load_buffer));
+    // the crash recorder: a crash or hang before this start is kept for the B screen; the
+    // watchdog (on while the Bluetooth is) is off until the Bluetooth is on again
+    bt::crash_boot();
+    hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
+#endif
 
     multicore_launch_core1(do_my_pio);
 
@@ -10989,59 +12071,19 @@ int main() {
     sleep_ms(200);
     initFileSystem();
 
-    #ifdef WIFI_ENABLE
-    if (cyw43_arch_init()) {
-        printf("failed to initialise\n");
-        return 1;
-    }
-
-    cyw43_arch_enable_sta_mode();
-
-    printf("Connecting to Wi-Fi...\n");
-
-    if (cyw43_arch_wifi_connect_async(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK) != 0) {
-        printf("failed to connect.\n");
-        return 1;
-    }
-
-    #endif
-
     uint8_t* nmi_rom_data = rom_data + 16384;
-
-    bool areConnected = false;
-
 
     while (true) {
         #ifdef WIFI_ENABLE
-        #if PICO_CYW43_ARCH_POLL
-                // if you are using pico_cyw43_arch_poll, then you must poll periodically from your
-                // main loop (not from a timer) to check for Wi-Fi driver or lwIP work that needs to be done.
-                cyw43_arch_poll();
-                // you can poll as often as you like, however if you have nothing else to do you can
-                // choose to sleep until either a specified time, or cyw43_arch_poll() has work to do:
-                //cyw43_arch_wait_for_work_until(make_timeout_time_ms(2));
-        #else
-                // if you are not using pico_cyw43_arch_poll, then WiFI driver and lwIP work
-                // is done via interrupt in the background. This sleep is just an example of some (blocking)
-                // work you might be doing.
-        #endif
+        if (web_on && !rom_state.nmi_active) web_off();     // the menu went (a reset): WiFi off
+        wifi::poll();           // F - File transfer (only while it is open)
+        bt_poll();              // B - Bluetooth tape (while it is on)
         #endif
         usb_msc_task();
-        if (!usb_msc_busy()) {
+        if (!usb_msc_busy() && !web_busy()) {
             sleep_ms(1);        // while the PC is using the SD card go as fast as the card does
         }
         pollUsbCommandHandler();
-
-        #ifdef WIFI_ENABLE
-        bool linkup = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
-        if (linkup != areConnected) {
-            printf("WIFI connected: %d\n", linkup);
-            if (linkup) {
-                start_http_server();
-            }
-            areConnected = linkup;
-        }
-        #endif
 
         if (nmi_rom_data[0] == 255) {
             sd_setup_early();
@@ -11049,8 +12091,15 @@ int main() {
         }
 
         tape_service_poll();
+        #ifdef WIFI_ENABLE
+        if (!bt_on) {           // (the Bluetooth's memory is in snap_load_buffer, which they use)
+            level_loaders_poll();
+            checkpoint_poll();
+        }
+        #else
         level_loaders_poll();
         checkpoint_poll();
+        #endif
 
         bool isup = gpio_get(PIN_USER_SWITCH);
         if (!isup) {

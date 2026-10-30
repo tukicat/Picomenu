@@ -36,8 +36,14 @@ namespace options {
 enum Id : uint8_t {
     THEME, SHOW_ALL, DETAILS, SORT, FOLDERS, START_DRIVE, START_FOLDER,
     SAVE_TYPE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT, CHECKPOINTS,
-    LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K, COUNT
+    LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K,
+    // the WiFi and Bluetooth page (W): the WiFi's typed, the Bluetooth's chosen
+    WIFI_SSID, WIFI_PASSWORD, WIFI_WEB_PASSWORD,
+    BT_VOLUME, BT_AUTO_CONNECT, BT_AUTO_PLAY, BT_AUTO_OFF, COUNT
 };
+static const uint8_t MAIN_COUNT = WIFI_SSID;            // the items of the settings page
+static const uint8_t WIFI_FIRST = WIFI_SSID, WIFI_COUNT = COUNT - WIFI_SSID;    // (the W page: all of them)
+inline bool typed(uint8_t id) { return id >= WIFI_SSID && id <= WIFI_WEB_PASSWORD; }
 
 struct Item {
     const char* key;            // as in the file
@@ -65,9 +71,16 @@ static const Item ITEMS[COUNT] = {
     { "waste_bin", settings::SEC_BIN, "[Waste Bin] erase to the bin" },
     { "level_loaders", settings::SEC_TAPES, "[Tapes] multi-load levels" },
     { "lock_48k", settings::SEC_TAPES, "[Tapes] 48K mode on a 128" },
+    { "ssid", settings::SEC_WIFI, "[WiFi] the network's name" },
+    { "password", settings::SEC_WIFI, "[WiFi] the network's password" },
+    { "web_password", settings::SEC_WIFI, "[WiFi] for the web page" },
+    { "volume", settings::SEC_BLUETOOTH, "[Bluetooth] the tape's volume" },
+    { "auto_connect", settings::SEC_BLUETOOTH, "[Bluetooth] to the last paired" },
+    { "auto_play", settings::SEC_BLUETOOTH, "[Bluetooth] LOAD \"\" plays it" },
+    { "auto_off", settings::SEC_BLUETOOTH, "[Bluetooth] off at tape's end" },
 };
 
-static const char* const SECTION_NAME[] = { "", "Browse", "Saving", "Buttons", "Converting", "Waste Bin", "Screen grab order", "Display", "Tapes" };
+static const char* const SECTION_NAME[] = { "", "Browse", "Saving", "Buttons", "Converting", "Waste Bin", "Screen grab order", "Display", "Tapes", "WiFi", "Bluetooth" };
 static_assert(sizeof(SECTION_NAME) / sizeof(SECTION_NAME[0]) == settings::SEC_UNKNOWN, "a name for each section");
 
 static const size_t FOLDER_MAX = 64;
@@ -78,6 +91,7 @@ struct Edit {
     char start_folder[FOLDER_MAX] = "";             // "/" or "/Games"; "" the file has none
     uint8_t list[screengrab::CATEGORIES] = {};      // the screen grab order, first to last
     bool shown[screengrab::CATEGORIES] = {};        // by category
+    settings::Wifi wifi = {};                       // [WiFi] (a Pico W's file transfer)
 
     // The order the pictures are in, from what the file (or order.txt) says
     void set_order(screengrab::Order order) {
@@ -131,6 +145,13 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
     case WASTE_BIN: w = s.waste_bin ? "on" : "off"; break;
     case LEVEL_LOADERS: w = s.level_loaders ? "patch" : "off"; break;
     case LOCK_48K: w = s.lock_48k == 0 ? "off" : s.lock_48k == 2 ? "always" : "tapes"; break;
+    case WIFI_SSID: w = e.wifi.ssid; break;
+    case WIFI_PASSWORD: w = e.wifi.password; break;
+    case WIFI_WEB_PASSWORD: w = e.wifi.web_password; break;
+    case BT_VOLUME: w = s.bt_volume == 1 ? "3/4" : s.bt_volume == 2 ? "full" : "1/2"; break;
+    case BT_AUTO_CONNECT: w = s.bt_auto_connect ? "on" : "off"; break;
+    case BT_AUTO_PLAY: w = s.bt_auto_play ? "on" : "off"; break;
+    case BT_AUTO_OFF: w = s.bt_auto_off ? "on" : "off"; break;
     default: break;
     }
     snprintf(out, size, "%s", w);
@@ -170,6 +191,10 @@ inline void cycle(Edit& e, uint8_t id, const char* folder_now) {
     case WASTE_BIN: s.waste_bin = !s.waste_bin; break;
     case LEVEL_LOADERS: s.level_loaders = !s.level_loaders; break;
     case LOCK_48K: s.lock_48k = (uint8_t) ((s.lock_48k + 1) % 3); break;
+    case BT_VOLUME: s.bt_volume = (uint8_t) ((s.bt_volume + 1) % 3); break;
+    case BT_AUTO_CONNECT: s.bt_auto_connect = !s.bt_auto_connect; break;
+    case BT_AUTO_PLAY: s.bt_auto_play = !s.bt_auto_play; break;
+    case BT_AUTO_OFF: s.bt_auto_off = !s.bt_auto_off; break;
     default: break;
     }
 }

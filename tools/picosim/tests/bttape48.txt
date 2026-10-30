@@ -1,0 +1,86 @@
+# B - Bluetooth tape in Tools (a pretend receiver here, bt_host.cpp, wired to the EAR input):
+# the tape put in with T is played as sound in real time and the Spectrum's own ROM loads it
+# (the trap is off while it plays: no blocks are handed over). The menu opened while it plays
+# holds it (silence) and it goes on after.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+# Tools, B
+nmi
+wait 30
+key t
+wait 30
+expect B-Bluetooth tape
+key b
+wait 30
+expect Bluetooth tape
+expect Not paired with a receiver
+expect Tape: tapein.tap
+expect Block 1, ready
+expect S-Search
+key s
+wait 60
+expect 1 Speccy BT receiver
+expect 2 Kitchen speaker
+key 1
+wait 30
+expect On Speccy BT receiver
+expect P-Play T-Tape player R-Rewind
+expect D-Disconnect O-Off BREAK-Back
+expect V-Volume: 1/2
+key p
+wait 30
+expectnot Bluetooth tape
+# LOAD "" as the first tone plays
+key j
+key SYM+p
+key SYM+p
+key ENTER
+# into the program's header: the menu opened (the tape waits), then closed
+wait 150
+nmi
+wait 30
+expect T-Tools
+wait 200
+key x
+wait 30
+wait 1500
+expectmem 30000 0x55
+expecttapemax 0
+expectear 2
+# the tape played on to its end while the program waited for a key (as a real tape would), and
+# the Bluetooth switched itself off a few seconds later (auto_off): the screen again says so,
+# and connects again; the trap has the tape, at its end
+clock 6000
+wait 20
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect Switched off: the tape ended
+expect On Speccy BT receiver
+expect Block 7, ready
+key r
+wait 30
+expect Rewound to the start
+expect Block 1, ready
+key o
+wait 30
+expect Bluetooth off
+key BREAK
+wait 30
+expect B-Bluetooth tape

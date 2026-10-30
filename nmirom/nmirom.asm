@@ -390,6 +390,10 @@ ACTION_CHECKPOINT_ASK equ 0x2F
 // A piece of the end of the 128K bank paged in at 0xC000 (from 0xDB00), sent as it is before the
 // banks: the pico hashes it (s1, s2 of the save header). WORD param1 = where, WORD param2 = how many
 ACTION_SNA_HASH equ 0x30
+// F in Tools: file transfer over WiFi (a Pico W). The pico draws the screen and runs the
+// connection. BYTE param1 = the key (0: opened, 255: none pressed, just asking whether the
+// screen has changed). Status 0 stays as it is, 1 closed, 2 shown again (it changed)
+ACTION_WIFI equ 0x31
 // Saves the game's screen (the pico has it from when the menu opened) in the folder
 // Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
@@ -1189,6 +1193,47 @@ startmenu:
 // I: the controls and instructions of the game last loaded
 // C in Tools: the batch converter. The folder is chosen (status 3: convert it), then the
 // game information screen in mode 3 runs the tapes
+// F: file transfer over WiFi. The pico draws the screen and works the connection; about five
+// times a second it is asked whether the screen has changed (the address, what was sent)
+// B: the Bluetooth tape, the same way (opened with 0xFE in place of 0). Status 3 there leaves
+// the menu (P - Play: the tape plays to the Spectrum's EAR socket as the game loads)
+.handle_bt:
+    ld a, 0xFE
+    jr 1F
+.handle_wifi:
+    xor a
+1:  ld ix, 0
+    ld (ix + 2), a
+    ld (ix + 1), ACTION_WIFI
+    call waitpico
+    cp 1
+    jr z, .helpexit         // closed
+    cp 3
+    jr z, .btexit           // leave the menu
+    cp 2
+    call z, previewfrompico // changed: shown again
+    ld b, 20                // about 0.2 s, looking at the keys
+2:  push bc
+    ld de, 100
+    call pause
+    call getkeypress
+    pop bc
+    or a
+    jr z, 3F
+    cp 255
+    jr nz, 4F
+3:  djnz 2B
+    ld a, 255               // no key
+    jr 1B
+4:  push af
+    call waitforkeyrelease
+    pop af
+    jr 1B
+.btexit:
+    xor a
+    ld (.intools), a        // the next NMI opens the menu itself
+    ret                     // (as X - Exit)
+
 .handle_batch:
     call machine128         // a = 1 if it can page memory: opened with that (Auto makes 128K snapshots)
     ld c, ACTION_BATCH
@@ -1619,12 +1664,16 @@ startmenu:
     MENU_ITEM 'u', 5, 2, .updatemsg, .handle_update
     MENU_ITEM 'w', 6, 2, .binmsg, .handle_bin
     MENU_ITEM 'c', 7, 2, .batchmsg, .handle_batch
-    MENU_ITEM 'x', 9, 2, .backmsg, .handle_toolsback
+    MENU_ITEM 'f', 8, 2, .wifimsg, .handle_wifi
+    MENU_ITEM 'b', 9, 2, .btmsg, .handle_bt
+    MENU_ITEM 'x', 11, 2, .backmsg, .handle_toolsback
     MENU_END
 .toolsmsg: DZ "Tools"
 .backmsg: DZ "Back"
 .optionsmsg: DZ "Options"
 .batchmsg: DZ "Batch convert"
+.wifimsg: DZ "File transfer (WiFi)"
+.btmsg: DZ "Bluetooth tape"
 .intools: BYTE 0
 .testromshow: DZ "Test ROM (diagnostics)"
 .tapemsg: DZ "Virtual Tape Player"
@@ -3210,7 +3259,9 @@ loadscreen:
     jp .loadfile            // (not a .rom, .pok or .scr)
 
 // T: put a tape in for the Spectrum's own ROMs (tape in) and go back to the program, where
-// LOAD "" or the 128's Tape Loader loads from it
+// LOAD "" or the 128's Tape Loader loads from it. Status 0 it is in, 1 why not (in MOVE_INFO),
+// 2 a question (there too: on a Pico W, the trap or the Bluetooth?), asked on the key row: the
+// key goes back in param6 with the same request
 .tapeinhandler:
     ld hl, .tapeinwhich
     call .pickfile
@@ -3222,11 +3273,18 @@ loadscreen:
     ld hl, spare_space + MOVE_INFO
     ld (ix + 5), hl
     ld (ix + 1), ACTION_TAPE_INSERT
-    call waitpico
+2:  call waitpico
     or a
     jr z, 1F
-    ld hl, spare_space + MOVE_INFO      // why not
-    call .message
+    ld hl, spare_space + MOVE_INFO      // why not, or the question
+    cp 2
+    jr nz, 3F
+    call .row13
+    call waitforkeypress
+    ld (ix + 7), a
+    call waitforkeyrelease
+    jr 2B
+3:  call .message
     jp .refresh
 1:  ld sp, (menusp)                     // out of all the menus, as X from the top one
     jp nmientry.exittopscreen
@@ -3537,10 +3595,10 @@ loadscreen:
 .clear DZ "Clear"
 .findtitle DZ "Find a game"
 .findlabel DZ "Name contains:"
-.findhelp1 DZ "ENTER to search, BREAK to exit"
+.findhelp1 DZ "ENTER searches, BREAK exits"
 .findhelp2 DZ "Looks in this folder and below"
 .findbusy DZ "Searching..."
-.findstop DZ "Searching... BREAK to stop"
+.findstop DZ "Searching: BREAK stops"
 .stopflag BYTE 0
 .showinfo BYTE 0            // 2 while the file details are shown, else 0
 .showall BYTE 0             // 4 while L-All lists everything, else 0
@@ -3554,7 +3612,7 @@ loadscreen:
     BYTE FOLDER_MAXLEN, 1
 .renametitle DZ "Rename"
 .renamelabel DZ "New name:"
-.renamehelp1 DZ "ENTER to rename, BREAK to exit"
+.renamehelp1 DZ "ENTER renames, BREAK exits"
 .renamewhich DZ "Rename which file/folder? 1-0"
 .renameerror DZ "Could not rename it"
 .rename equ .renametitle         // the same text
@@ -3621,7 +3679,7 @@ loadscreen:
 .inputkeep BYTE 0
 .foldertitle DZ "New folder"
 .folderlabel DZ "Name:"
-.folderhelp1 DZ "ENTER to make it, BREAK to exit"
+.folderhelp1 DZ "ENTER makes it, BREAK exits"
 .folderhelp2 DZ "It goes in this folder"
 .nameinuse DZ "That name is already in use"
 .foldererror DZ "Could not make that folder"
@@ -4028,7 +4086,7 @@ savesnapshotscreen:
     ASSERT ACTION_SNA_SAVE_NAME_MAX < 32 && ACTION_SNA_SAVE_NAME_MAX <= 30
 
 .titlemsg DZ "Save Snapshot"
-.help1 DZ "ENTER to save, BREAK To exit"
+.help1 DZ "ENTER saves, BREAK exits"
 .help2 DZ "Shift 1-8 to change saved"
 .help3 DZ "border colour"
 .help4 DZ "Shift 9 to change where it goes"
@@ -4751,7 +4809,7 @@ pokescreen:
     BYTE 3, 0
 .asktitle DZ "Poke value"
 .asklabel DZ "Value 0-255:"
-.askhelp1 DZ "ENTER to poke, BREAK to cancel"
+.askhelp1 DZ "ENTER pokes, BREAK cancels"
 .askhelp2 DZ "This cheat needs a number"
 .badvalue DZ "That is not 0 to 255"
 .pokedtext DZ "Pokes made: "
@@ -6001,12 +6059,13 @@ bigtitle:
     rrca
     and 15
     call .widen
-    ex af, af'
-    pop af
+    pop bc                      // b: the byte again (not AF', which is the game's: a game,
+    push af                     // or the ROM's LD-BYTES with its flag byte, keeps a value there)
+    ld a, b
     and 15
     call .widen
     ld c, a                     // the right half
-    ex af, af'
+    pop af
     ld b, a                     // the left half
     call .twolines
     call .twolines

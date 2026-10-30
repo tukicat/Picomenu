@@ -19,7 +19,10 @@
 
 #include "pico_hal.h"
 
-#define FS_SIZE (1800 * 1024)
+#ifndef PICOMENU_FS_KB
+#define PICOMENU_FS_KB 1800     // (the Pico W build: 1400, for its bigger program)
+#endif
+#define FS_SIZE (PICOMENU_FS_KB * 1024)
 
 static int pico_hal_read(lfs_block_t block, lfs_off_t off, void* buffer, lfs_size_t size);
 static int pico_hal_prog(lfs_block_t block, lfs_off_t off, const void* buffer, lfs_size_t size);

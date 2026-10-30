@@ -12,24 +12,31 @@
 #ifndef LWIP_SOCKET
 #define LWIP_SOCKET                 0
 #endif
-#if PICO_CYW43_ARCH_POLL
-#define MEM_LIBC_MALLOC             1
-#else
-// MEM_LIBC_MALLOC is incompatible with non polling versions
+// PicoMenu (the Pico W build): all of lwIP's memory is one heap at picomenu_lwip_heap, lent
+// from snap_load_buffer while the file transfer is open (wifi.cxx); the pools come from it too,
+// so none of it is in the program's own RAM, which is nearly all used.
 #define MEM_LIBC_MALLOC             0
+#define MEMP_MEM_MALLOC             1
+#ifdef __cplusplus
+extern "C" {
 #endif
+extern unsigned char* picomenu_lwip_heap;
+#ifdef __cplusplus
+}
+#endif
+#define LWIP_RAM_HEAP_POINTER       picomenu_lwip_heap
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4000
-#define MEMP_NUM_TCP_SEG            32
+#define MEM_SIZE                    (64 * 1024)
+#define MEMP_NUM_TCP_SEG            24
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              12
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
-#define TCP_WND                     (8 * TCP_MSS)
+#define TCP_WND                     (6 * TCP_MSS)
 #define TCP_MSS                     1460
-#define TCP_SND_BUF                 (8 * TCP_MSS)
+#define TCP_SND_BUF                 (6 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    1
@@ -45,17 +52,21 @@
 #define LWIP_IPV4                   1
 #define LWIP_TCP                    1
 #define LWIP_UDP                    1
-#define LWIP_DNS                    1
+#define LWIP_DNS                    0
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
 
-#ifndef NDEBUG
-#define LWIP_DEBUG                  1
-#define LWIP_STATS                  1
-#define LWIP_STATS_DISPLAY          1
-#endif
+#define LWIP_STATS                  0
+// PicoMenu: lwIP is started again each time the file transfer opens, on memory that has been
+// used for other things meanwhile (wifi.cxx). LWIP_TESTMODE gives it the timeout list to clear
+// (nothing else changes), and IP fragments are not put together (no list of them is kept).
+#define LWIP_TESTMODE               1
+// http://picomenu.local: a group (multicast) is joined for mDNS (wifi.cxx answers it itself)
+#define LWIP_IGMP                   1
+#define IP_REASSEMBLY               0
+#define IP_FRAG                     0
 
 #define ETHARP_DEBUG                LWIP_DBG_OFF
 #define NETIF_DEBUG                 LWIP_DBG_OFF

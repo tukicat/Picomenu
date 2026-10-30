@@ -1,0 +1,53 @@
+# B - Bluetooth tape with a "stop the tape" block (TZX 0x20): the tape plays the program and the
+# first part, stops by itself (silence), and P on the B screen plays on to the second part
+flash /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/bt-manual.ini
+sd /Tapes/tapestop.tzx {HERE}/tapestop.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+key p
+wait 30
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1100
+expectmem 30000 0x55
+# the program waits for a key, then loads the second part: the tape has stopped
+key a
+wait 200
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect Block 5, stopped by the tape
+key p
+wait 30
+expectnot Bluetooth tape
+wait 600
+expectmem 30007 0x99
+expecttapemax 0

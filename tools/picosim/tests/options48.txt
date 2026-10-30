@@ -15,13 +15,13 @@ expect dark
 expect [Display] dark or light menus
 expect sort
 expect waste_bin
-expect N-Grab order  D-Diagnostics
+expect N-Order W-WiFi/BT D-Diagnostics
 # D: the Diagnostics page, any key back to the settings
 key d
 wait 30
 expect Diagnostics
 expect Firmware
-expect Rev 2.3.0
+expect Rev 2.4.0
 expect Any key: back to Options
 key x
 wait 30

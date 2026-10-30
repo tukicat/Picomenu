@@ -1,0 +1,79 @@
+# The file transfer's web side (F in Tools, a Pico W), as a browser would use it: the page, a
+# folder listed, a file sent and one received, a folder made, a file renamed and erased (to
+# the Waste Bin), a name in use (409), a bad path, and web_password (401 without it). On the
+# standard build F says it needs a Pico W.
+sd /48.rom {ROM48}
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/My Game.sna {OUT}/dummy.scr
+boot
+# the page
+http GET /
+expecthttp HTTP/1.1 200 OK
+expecthttp <title>PicoMenu</title>
+expecthttp /api/list?p=
+# the root, then /Games
+http GET /api/list?p=%2F
+expecthttp {"path":"/","items":[
+expecthttp {"n":"Games","d":1
+http GET /api/list?p=%2FGames
+expecthttp "path":"/Games"
+expecthttp {"n":"Alpha.z80","d":0,"h":0,"s":44809}
+expecthttp {"n":"My Game.sna","d":0,"h":0,"s":6912}
+http GET /api/list?p=%2FNope
+expecthttp 404 Not Found
+# a file sent to the browser: as it is on the card
+http GET /api/get?p=%2FGames%2FMy%20Game.sna
+expecthttp Content-Length: 6912
+expecthttp Content-Disposition: attachment; filename="My Game.sna"
+httpsave {OUT}/web-got.sna
+# one received: a new name, then the same name (409), then over it (o=1)
+http PUT /api/put?p=%2FGames%2Fnew.tap {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+expecthttp 200 OK
+expecthttp Saved
+get sd /Games/new.tap {OUT}/web-new.tap
+http PUT /api/put?p=%2FGames%2Fnew.tap {OUT}/dummy.scr
+expecthttp 409 Conflict
+http PUT /api/put?p=%2FGames%2Fnew.tap&o=1 {OUT}/dummy.scr
+expecthttp Saved
+http GET /api/list?p=%2FGames
+expecthttp {"n":"new.tap","d":0,"h":0,"s":6912}
+# a folder made, a file renamed
+http POST /api/mkdir?p=%2FGames%2FMore
+expecthttp Made
+http POST /api/mkdir?p=%2FGames%2FMore
+expecthttp 409 Conflict
+http POST /api/ren?p=%2FGames%2Fnew.tap&to=Newer.tap
+expecthttp Renamed
+nofile sd /Games/new.tap
+get sd /Games/Newer.tap {OUT}/web-newer.tap
+http POST /api/ren?p=%2FGames%2FNewer.tap&to=Alpha.z80
+expecthttp 409 Conflict
+# erased: to the Waste Bin, as E in Browse Games
+http POST /api/del?p=%2FGames%2FNewer.tap
+expecthttp Erased
+nofile sd /Games/Newer.tap
+get sd /Waste Bin/Newer.tap {OUT}/web-bin.tap
+# paths it does not take
+http GET /api/list?p=%2FGames%2F..%2F..
+expecthttp 400 Bad Request
+http GET /api/list
+expecthttp 400 Bad Request
+http GET /nothing
+expecthttp 404 Not Found
+# F on the menu: the standard build has no WiFi
+nmi
+wait 30
+key t
+wait 30
+expect F-File transfer (WiFi)
+key f
+wait 40
+expect File transfer (WiFi)
+expect This needs a Pico W
+key BREAK
+wait 40
+expect F-File transfer (WiFi)
+key x
+wait 30
+key x
+wait 30

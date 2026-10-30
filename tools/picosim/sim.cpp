@@ -23,6 +23,10 @@ not, see <https://www.gnu.org/licenses/>.
 //   nmi                                press the Picoface button (the NMI menu)
 //   nmi2                               press it twice quickly (save_press says: the save screen or the grab question)
 //   nmihold                            hold it a second (the other of the two)
+//   http <METHOD> <target> [<file on PC>]  a browser's request to the file transfer (F, a Pico W):
+//                                      the file (if any) is the body; the reply is kept
+//   expecthttp <text>                  fail unless the last reply has the text
+//   expecthttpnot <text>               fail if it has
 //   checkpoint                         a checkpoint is due now (checkpoints on): prints how long the game waited
 //   button <what> <ms> [<up ms> <ms>]  the button down so long (and again after so long up), read
 //                                      as the Pico does: fail unless it is short, double, hold or
@@ -32,6 +36,7 @@ not, see <https://www.gnu.org/licenses/>.
 //   regs                               print PC, SP and the interrupt state
 //   expecttape <n>                     fail unless the tape trap has handed over n blocks
 //   expectmem <address> <byte>         fail unless the Spectrum's RAM holds that byte there
+//   (B - Bluetooth tape: a pretend receiver, bt_host.cpp, plays the tape to the EAR input)
 //   (keys: a letter or digit, ENTER, SPACE, BREAK, DOWN (CAPS SHIFT 6), SYM+<key> (with SYMBOL SHIFT))
 //   wait <frames>                      run (50 frames a second)
 //   shot <file.scr>                    save the screen
@@ -88,24 +93,30 @@ static bool m128 = false, nmi = false, locked = false;
 static uint8_t p7ffd = 0, rows[8];
 static Z80 cpu;
 static uint64_t frames = 0;
-static int requests = 0, tape_requests = 0;
+// (debug logs, SIM_PCLOG and SIM_EARLOG in the environment: looked up once, not on every read)
+static const bool sim_pclog = getenv("SIM_PCLOG") != nullptr;
+static const bool sim_earlog = getenv("SIM_EARLOG") != nullptr;
+static uint64_t tstates = 0;            // T-states run before the current z80_run (the EAR's clock)
+static int requests = 0, tape_requests = 0, ear_answers = 0;   // ear: the hook told to load from EAR (4)
 static const uint16_t TAPE_MBOX = 0x3FF8;
 // Tape in, as piohandler.S does it: lr (the watched fetch) is taken from rom_state.tape_entry at
 // the start and each time the NMI ROM exits; while the internal ROM serves, an M1 fetch there
 // (0x0562 playing, 0x04C2 recording) makes the Pico serve rom_data until the hook's last byte
-// (rom_state.tape_exit: 0x0596 or 0x04E2) is read
-static const uint16_t TAPE_IN_ENTRY = 0x0562, TAPE_IN_EXIT = 0x0596;
+// (rom_state.tape_exit: 0x059A or 0x04E2) is read
+static const uint16_t TAPE_IN_ENTRY = 0x0562, TAPE_IN_EXIT = 0x059A;
 static uint32_t lr_watch = 1;           // the bus handler's lr
 static uint32_t exit_watch = 1;         // its r_nmi_exit outside the NMI ROM (shifted, or 1)
 static int tape_in_takeovers = 0;
 void host_tape_poll();
 void host_level_loaders_poll();
 bool host_checkpoint_poll(bool take);
+void host_http(const char* request, size_t n, std::string& out);
+static std::string http_reply, http_auth;
 // The firmware waits for an NMI it asked for (the tape trap's "load memory"): the Spectrum
 // runs on meanwhile, and takes the NMI as the Picoface's button would give it
 extern "C" void host_step(void) {
     if ((rom_state.flags & 2) && !nmi) z80_nmi(&cpu);
-    z80_run(&cpu, 200);
+    tstates += z80_run(&cpu, 200);
 }
 
 static const uint8_t* rom_for() {
@@ -146,6 +157,8 @@ static zuint8 rd(void*, zuint16 a) {
     return slot(a)[a & 0x3FFF];
 }
 static zuint8 fetch_op(void* c, zuint16 a) {
+    if (sim_pclog && !nmi && (a == 0x056C || a == 0x058F || a == 0x05A9 || a == 0x053F || a == 0x0556))
+        printf("PC %04X at %.3f s\n", a, (tstates + cpu.cycles) / 3500000.0);
     if (a == 0x66 && (rom_state.flags & 2) && !nmi) { nmi = true; rom_state.nmi_active = 1; rom_state.flags &= ~2u; }
     else if (!nmi && !(rom_state.flags & 1) && ((uint32_t) a << 17) == lr_watch) {
         // activate_tape: the hook's NOP is served, then rom_data until its RET
@@ -169,13 +182,21 @@ static void wr(void*, zuint16 a, zuint8 v) {
 }
 static uint8_t kempston = 0;            // the joystick: bit 0 right, 1 left, 2 down, 3 up, 4 fire
 static uint8_t ay_reg[16], ay_sel = 0;  // the 128's sound chip (registers only)
+// B - Bluetooth tape: the pretend receiver's sound at the EAR input (bt_host.cpp)
+int host_bt_ear(uint64_t t);
+void host_bt_poll();                    // the firmware's main loop's Bluetooth step (it polls bt.h)
+void host_bt_drop();                    // the pretend receiver goes away
 static zuint8 in(void*, zuint16 port) {
     if (m128 && (port & 0xC002) == 0xC000) return ay_reg[ay_sel & 15];   // 0xFFFD
     if ((port & 0xE0) == 0 && (port & 1)) return kempston;     // port 0x1F (A5-A7 low, as the Picoface decodes it)
     if (!(port & 1)) {
         uint8_t v = 0x1F, high = port >> 8;
         for (int r = 0; r < 8; r++) if (!(high & (1 << r))) v &= rows[r];
-        return v | 0xA0;
+        int e = host_bt_ear(tstates + cpu.cycles);
+        static int last_e = 0; static uint64_t edges = 0, shown_at = 0;
+        if (e != last_e) { edges++; last_e = e; }
+        if (sim_earlog && tstates - shown_at > 3500000 / 4) { shown_at = tstates; printf("EAR %.2f s: %llu edges, PC %04X nmi %d\n", tstates / 3500000.0, (unsigned long long) edges, Z80_PC(cpu), nmi); }
+        return v | 0xA0 | (e ? 0x40 : 0);
     }
     return 0xFF;
 }
@@ -190,14 +211,19 @@ static void out(void*, zuint16 port, zuint8 v) {
 static void run_frames(uint32_t n) {
     while (n--) {
         z80_int(&cpu, true);
-        z80_run(&cpu, 32);
+        tstates += z80_run(&cpu, 32);
         z80_int(&cpu, false);
         // run in small steps so the Pico answers the NMI ROM's requests as it would
         for (int k = 0; k < 70; k++) {
-            z80_run(&cpu, 1000);
+            tstates += z80_run(&cpu, 1000);
+            host_bt_poll();                             // (the firmware's main loop does)
             if (rom_data[16384] == 255) { requests++; processNmiRequest(); }
             // the tape trap's mailbox (as the firmware's main loop polls it)
-            if (!nmi && (rom_state.flags & 1) && rom_data[TAPE_MBOX] == 1) { tape_requests++; host_tape_poll(); }
+            if (!nmi && (rom_state.flags & 1) && rom_data[TAPE_MBOX] == 1) {
+                host_tape_poll();
+                if (rom_data[TAPE_MBOX] == 4) ear_answers++;    // B - Bluetooth tape has it: the ROM loads from EAR
+                else tape_requests++;
+            }
             if (!nmi) host_level_loaders_poll();       // as the firmware's main loop
             if (!nmi) host_checkpoint_poll(false);
         }
@@ -405,6 +431,39 @@ int main(int argc, char** argv) {
             if (!button_act(pr)) printf("NMI not sent\n");
             else if ((rom_state.flags & 2) && !nmi) z80_nmi(&cpu);
             run_frames(25);
+        } else if (c == "http") {           // http <METHOD> <target> [<body file>]
+            std::string target = p2, body;
+            size_t sp = target.find(' ');
+            if (sp != std::string::npos) {
+                std::string f = target.substr(sp + 1);
+                target = target.substr(0, sp);
+                FILE* in = fopen(f.c_str(), "rb");
+                if (in == nullptr) { printf("no file %s\n", f.c_str()); return 2; }
+                char buf[4096];
+                size_t k;
+                while ((k = fread(buf, 1, sizeof(buf), in)) > 0) body.append(buf, k);
+                fclose(in);
+            }
+            std::string req = std::string(p1) + " " + target + " HTTP/1.1\r\nHost: picomenu\r\n";
+            if (!http_auth.empty()) req += "Authorization: Basic " + http_auth + "\r\n";
+            if (strcmp(p1, "PUT") == 0 || strcmp(p1, "POST") == 0) req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+            req += "\r\n" + body;
+            host_http(req.data(), req.size(), http_reply);
+            size_t eol = http_reply.find("\r\n");
+            printf("http %s %s: %s (%zu bytes)\n", p1, target.c_str(), http_reply.substr(0, eol).c_str(), http_reply.size());
+        } else if (c == "httpauth") {       // httpauth <base64 of user:password> (none: httpauth -)
+            http_auth = strcmp(p1, "-") == 0 ? "" : p1;
+        } else if (c == "httpsave") {       // httpsave <file on PC>: the last reply's body
+            size_t at = http_reply.find("\r\n\r\n");
+            FILE* o = fopen(p1, "wb");
+            if (o && at != std::string::npos) fwrite(http_reply.data() + at + 4, 1, http_reply.size() - at - 4, o);
+            if (o) fclose(o);
+        } else if (c == "expecthttp" || c == "expecthttpnot") {
+            std::string want = std::string(p1) + (p2[0] ? std::string(" ") + p2 : "");
+            bool has = http_reply.find(want) != std::string::npos;
+            bool ok = c == "expecthttp" ? has : !has;
+            printf("%s %s \"%s\"\n", ok ? "PASS" : "FAIL", c.c_str(), want.c_str());
+            if (!ok) { failures++; printf("%.600s\n", http_reply.c_str()); }
         } else if (c == "checkpoint") {     // checkpoint: a checkpoint is due now
             if (host_checkpoint_poll(true)) {
                 z80_nmi(&cpu);
@@ -434,6 +493,11 @@ int main(int argc, char** argv) {
         } else if (c == "expecttapemax") {  // expecttapemax <n>: fail if the tape trap gave more than n blocks
             if (tape_requests <= atoi(p1)) printf("PASS expecttapemax %s (%d)\n", p1, tape_requests);
             else { printf("FAIL expecttapemax %s (%d)\n", p1, tape_requests); failures++; }
+        } else if (c == "btdrop") {         // btdrop: the pretend receiver goes away (bt_host.cpp)
+            host_bt_drop();
+        } else if (c == "expectear") {      // expectear n: at least n loads were told to load from EAR
+            if (ear_answers >= atoi(p1)) printf("PASS expectear %s (%d)\n", p1, ear_answers);
+            else { printf("FAIL expectear %s (%d)\n", p1, ear_answers); failures++; }
         } else if (c == "regs") {           // where the Spectrum is
             printf("PC %04X SP %04X IFF1 %d IM %d I %02X nmi %d rom flags %u halt %d 7FFD %02X\n", Z80_PC(cpu), Z80_SP(cpu), cpu.iff1, cpu.im, cpu.i, nmi, rom_state.flags, cpu.halt_line, p7ffd);
         } else if (c == "hold") {           // hold <key> <frames>: a key held down longer
@@ -591,6 +655,6 @@ int main(int argc, char** argv) {
         }
     }
     if (tape_in_takeovers) printf("tape in: the Pico took over (0x0562 playing, 0x04C2 recording) %d time(s)\n", tape_in_takeovers);
-    printf("%d requests answered, %d tape blocks asked for, %llu frames, %d failure(s)\n", requests, tape_requests, (unsigned long long) frames, failures);
+    printf("%d requests answered, %d tape blocks asked for, %d loads from EAR, %llu frames, %d failure(s)\n", requests, tape_requests, ear_answers, (unsigned long long) frames, failures);
     return failures ? 1 : 0;
 }

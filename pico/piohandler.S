@@ -52,14 +52,14 @@ r_nmi_data .req r12
 // hook's RET at TAPE_IN_EXIT is read. In the 128K editor ROM 0x0556-0x05A0 is text, so it is
 // never fetched as an instruction there. pico/picoface.cxx has the hook (TAPE_IN_HOOK).
 #define TAPE_IN_ENTRY 0x0562
-#define TAPE_IN_EXIT 0x0596
+#define TAPE_IN_EXIT 0x059A
 #define TAPE_MBOX 0x3FF8
 
 // rom_state: +0 flags, +4 nmi_active, +8 writableStartAddress, +12 flags_on_nmi_exit,
 // +16 exit_after_nmi (r_nmi_exit after the NMI ROM exits: the hook's exit while it runs,
 // else 1), +20 tape_entry (lr), +24 tape_exit (the watched hook's last byte, shifted)
 // Two hooks can be watched, one at a time: loading (playing a tape put in with T: LD-BYTES at
-// 0x0562, which RETs at 0x0596) or saving (recording, W on the tape position screen: SA-BYTES
+// 0x0562, which RETs at 0x059A) or saving (recording, W on the tape position screen: SA-BYTES
 // at 0x04C2, whose last byte 0x04E2 ends its JP to SA/LD-RET at 0x053F in the Spectrum's ROM).
 // In the 128K editor ROM 0x04B0-0x05A0 is all text, never fetched as an instruction.
 

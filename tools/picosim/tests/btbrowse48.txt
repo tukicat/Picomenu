@@ -1,0 +1,70 @@
+# B - Bluetooth tape from Browse Games: T on a tape asks "Trap (T) or Bluetooth (B)"; B puts it
+# in for the Bluetooth, which starts and connects to the receiver paired last as the menu goes;
+# LOAD "" then plays it (it may come while it is still connecting: the ROM waits for the tone).
+# Another key asks again; BREAK puts nothing in.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+# paired once (no tape in), then off
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+key o
+wait 30
+expect Bluetooth off
+key BREAK
+wait 30
+key x
+wait 30
+key x
+wait 30
+# Browse Games, T on the tape: the menu goes
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 30
+expect Tape: Trap (T) or Bluetooth (B)
+key z
+wait 20
+expect Tape: Trap (T) or Bluetooth (B)
+key BREAK
+wait 30
+expect No tape put in
+key a
+wait 50
+key t
+wait 20
+key 1
+wait 30
+key b
+wait 50
+expectnot Browse Games
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1500
+expectmem 30000 0x55
+expecttapemax 0
+expectear 2
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect On Speccy BT receiver

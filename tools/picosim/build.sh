@@ -35,7 +35,9 @@ $CC -O1 -g -c $INC $P/littlefs-lib/lfs.c -o $O/lfs.o
 $CC -O1 -g -c $INC $H/pico_hal_host.c -o $O/pico_hal_host.o
 $CC -O1 -c $INC $H/ramdisk.c -o $O/ramdisk.o
 $CXX -std=c++17 -O1 -c $INC $H/host_stubs.cpp -o $O/host_stubs.o
+$CXX -std=c++17 -O1 -c $INC $P/webpage.cxx -o $O/webpage.o
+$CXX -std=c++17 -O1 -c $INC $H/bt_host.cpp -o $O/bt_host.o
 $CC -O1 -c $INC $O/nmi.c -o $O/nmi.o
 $CXX -std=c++17 -O1 -g -DZ80_STATIC $INC $H/sim.cpp $O/picoface.o $O/file_wrapper.o $O/tzxconv_pico.o $O/z80.o \
-    $O/lz4.o $O/ff.o $O/ffunicode.o $O/ffsystem.o $O/lfs.o $O/pico_hal_host.o $O/ramdisk.o $O/host_stubs.o $O/nmi.o -o $H/sim
+    $O/lz4.o $O/webpage.o $O/bt_host.o $O/ff.o $O/ffunicode.o $O/ffsystem.o $O/lfs.o $O/pico_hal_host.o $O/ramdisk.o $O/host_stubs.o $O/nmi.o -o $H/sim
 echo built $H/sim

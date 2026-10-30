@@ -1,0 +1,56 @@
+# B - Bluetooth tape after the trap: LOAD "" with the tape put in (T) loads the program and the
+# first part at once through the trap; then B - Bluetooth tape plays the rest from there (block
+# 5: a "stop the tape" just before it is passed, as P means play) for the game's next load
+flash /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/bt-manual.ini
+sd /Tapes/tapestop.tzx {HERE}/tapestop.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 300
+expectmem 30000 0x55
+expecttape 4
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect Block 5, ready
+key s
+wait 60
+key 1
+wait 30
+key p
+wait 30
+expectnot Bluetooth tape
+key a
+wait 600
+expectmem 30007 0x99
+expecttapemax 4
+# off again: the trap has the tape back, at its end
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect At the end of the tape
+key o
+wait 30
+expect Bluetooth off
+expect Block 7, ready

@@ -43,12 +43,20 @@ not, see <https://www.gnu.org/licenses/>.
 namespace fwupdate {
 
 static const uint32_t FLASH_BASE = 0x10000000;
-static const uint32_t APP_MAX = 0x3E000;            // the file system starts here (2 MB - 1800 KB)
+#ifndef PICOMENU_FS_KB
+#define PICOMENU_FS_KB 1800
+#endif
+#ifndef PICOMENU_RESERVE_KB
+#define PICOMENU_RESERVE_KB 0
+#endif
+// the file system starts here: 2 MB - 1800 KB (the Pico W build: - 1400 KB, and the program
+// ends 8 KB before it, where the Bluetooth pairing is kept)
+static const uint32_t APP_MAX = 2 * 1024 * 1024 - PICOMENU_FS_KB * 1024 - PICOMENU_RESERVE_KB * 1024;
 static const uint32_t APP_MIN = 0x10000;            // a Picoface image is far bigger than this
 static const uint32_t SECTOR = 4096;
 static const uint32_t PAGE = 256;
 static const uint32_t FAMILY_RP2040 = 0xE48BFF56;
-static const int MAX_BLOCKS = 64;                   // file system blocks the image can use: 63 x 4088 bytes
+static const int MAX_BLOCKS = 192;                  // file system blocks the image can use: 191 x 4088 bytes (Map is in snap_load_buffer)
 static const size_t VERSION_MAX = 31;
 static const char MARKER[] = "tapeloader v";        // the firmware's version text starts like this (up to v65, and in the hidden id since)
 static const char MARKER_REV[] = "Rev ";            // from Rev 1.0: "Rev 1.0", digits and dots
@@ -63,6 +71,7 @@ enum Error {
     TOO_SMALL = 6,          // too short to be a Picoface
     NOT_PICOFACE = 7,       // no version text of this firmware inside
     BAD_BOOT2 = 8,          // the first 256 bytes do not start the Pico
+    WRONG_BOARD = 9,        // the Pico W build on a Pico, or the other way round
 };
 
 inline uint32_t u32(const uint8_t* p) {
@@ -104,6 +113,7 @@ public:
         tail_len_ = 0;
         version_[0] = '\0';
         version_ok_ = false;
+        pico_w_ = false;
         error_ = (file_size == 0 || file_size % 512 != 0) ? BAD_SIZE : OK;
     }
 
@@ -140,8 +150,8 @@ public:
         return OK;
     }
 
-    // after the last block
-    Error finish() {
+    // after the last block; pico_w: this firmware is the Pico W build (the new one must be too)
+    Error finish(bool pico_w = false) {
         if (error_ != OK) {
             return error_;
         }
@@ -157,12 +167,16 @@ public:
         if (!boot2_ok(first_)) {
             return error_ = BAD_BOOT2;
         }
+        if (pico_w_ != pico_w) {
+            return error_ = WRONG_BOARD;
+        }
         return OK;
     }
 
     uint32_t size() const { return seen_ * PAGE; }              // the program's bytes
     uint32_t crc() const { return ~crc_; }                       // of those bytes
     const char* version() const { return version_; }
+    bool pico_w() const { return pico_w_; }                     // "Rev 2.4.0 W": the Pico W build
     Error error() const { return error_; }
 
 private:
@@ -205,7 +219,7 @@ private:
             while (end < n && end - i <= VERSION_MAX && ((window[end] >= '0' && window[end] <= '9') || (rev && window[end] == '.'))) {
                 end++;
             }
-            if (end == n || end - i == mlen) {
+            if (end + 2 > n || end - i == mlen) {
                 continue;                           // cut off by the end of the block (look again with the next), or no number
             }
             if (rev && !(window[i + mlen] >= '0' && window[i + mlen] <= '9' && window[end - 1] >= '0' && window[end - 1] <= '9')) {
@@ -216,6 +230,7 @@ private:
             }
             version_[end - i] = '\0';
             version_ok_ = true;
+            pico_w_ = rev && window[end] == ' ' && window[end + 1] == 'W';     // "Rev 2.4.0 W (...
             return;
         }
         tail_len_ = n < TAIL ? n : TAIL;
@@ -230,6 +245,7 @@ private:
     uint8_t tail_[TAIL];
     char version_[VERSION_MAX + 1];
     bool version_ok_ = false;
+    bool pico_w_ = false;
     Error error_ = OK;
 };
 

@@ -1,0 +1,75 @@
+# B - Bluetooth tape when the receiver goes away (switched off, out of range, taken by a phone):
+# the Bluetooth is started afresh at once (as O, then B), the B screen says why, and C connects
+# again; then the receiver goes away in the middle of a load: BREAK, and LOAD "" connects again by
+# itself (the receiver paired last) and plays the tape.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+key BREAK
+wait 30
+key x
+wait 30
+key x
+wait 30
+# gone, while the tape waits for a load
+btdrop
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect The receiver went away
+expect Paired: Speccy BT receiver
+expect C-Connect
+key c
+wait 50
+expect On Speccy BT receiver
+key BREAK
+wait 30
+key x
+wait 30
+key x
+wait 30
+# gone in the middle of a load (the header's tone): BREAK, then LOAD "" again
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 150
+btdrop
+wait 100
+key BREAK
+wait 50
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1500
+expectmem 30000 0x55
+expecttapemax 0
+expectear 2

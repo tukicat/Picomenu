@@ -1,0 +1,99 @@
+# O - Options, W: the WiFi page ([WiFi] of Picomenu.ini): ssid, password and web_password typed
+# on the Spectrum (ENTER, the letters, DELETE, ENTER; BREAK leaves it as it was), the passwords
+# shown as *; saved into the file like the other settings (a [WiFi] section is added). Then the
+# Bluetooth settings on the same page, chosen with ENTER (a [Bluetooth] section is added).
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/settings-b.ini
+boot
+nmi
+wait 30
+key o
+wait 40
+expect N-Order W-WiFi/BT D-Diagnostics
+key w
+wait 30
+expect Options: WiFi and Bluetooth
+expect ssid
+expect password
+expect web_password  (none)
+expect [WiFi] the network's name
+# the ssid: "homex", DELETE, ENTER -> "home"
+key ENTER
+wait 20
+expect Type the ssid:
+key h
+key o
+key m
+key e
+key x
+key DELETE
+wait 10
+expect home_
+key ENTER
+wait 20
+expect ssid          home
+# the password, shown as *
+key a
+wait 10
+key ENTER
+wait 20
+key s
+key e
+key c
+key r
+key e
+key t
+key 1
+key ENTER
+wait 20
+expect password      *******
+expectnot secret1
+# BREAK while typing: as it was
+key a
+wait 10
+key ENTER
+wait 20
+key z
+key BREAK
+wait 20
+expect web_password  (none)
+# the Bluetooth settings below: chosen (ENTER), not typed
+expect Bluetooth: B - Bluetooth tape
+expect volume        1/2
+expect auto_play     on
+key a
+wait 10
+expect [Bluetooth] the tape's volume
+key ENTER
+wait 20
+expect volume        3/4
+# N: the settings page, and W back
+key n
+wait 20
+expect Options (Picomenu.ini)
+key w
+wait 20
+expect ssid          home
+# saved
+key x
+wait 30
+expect Save changes?
+key y
+wait 60
+expectfile sd /Picomenu.ini|[WiFi]
+expectfile sd /Picomenu.ini|ssid = home
+expectfile sd /Picomenu.ini|password = secret1
+expectfile sd /Picomenu.ini|[Bluetooth]
+expectfile sd /Picomenu.ini|volume = 3/4
+# open again: what was saved
+key o
+wait 40
+key w
+wait 30
+expect ssid          home
+expect password      *******
+expect volume        3/4
+key x
+wait 30
+key x
+wait 30

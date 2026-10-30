@@ -1,5 +1,5 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.3.0
-=================================================
+THIRD-PARTY NOTICES - PicoMenu Rev 2.4.0
+========================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
 and the changes in this fork are licensed under the GNU General Public
@@ -9,7 +9,9 @@ The firmware also contains, or is built together with, the third-party
 components below. Each keeps its own licence, reproduced in full here
 (the Apache 2.0 text is in pico/FatFs_SPI/LICENSE-Apache-2.0.txt). All of
 these licences are compatible with distributing the combined firmware under
-the GPL v3.
+the GPL v3 - except the cyw43 driver and BTstack of the Pico W build, for
+which the copyright holders of picoFace and PicoMenu give an additional
+permission (at the top of LICENSE; see "The Pico W build").
 
 Summary
 -------
@@ -42,10 +44,13 @@ Summary
                             linked from the Arm GNU      Exception (GPL v3
                             toolchain                    with exception)
 
-Not linked: lwIP, cyw43 and mbedtls are not in the firmware (WiFi is
-disabled in this build). pico/lwipopts.h, which came with picoFace, is the
-lwIP settings file from Raspberry Pi's pico-examples (BSD 3-clause, the same
-licence as the Pico SDK, section 5); this build does not use it. The sjasmplus assembler that builds the Z80 ROM (and the
+The standard build (picomenu-...uf2, for a Pico) has no WiFi: lwIP, the cyw43
+driver and mbedtls are not in it. The Pico W build (picomenu-...-W.uf2) has
+lwIP, BTstack and the cyw43 driver with the WiFi chip's firmware: see "The Pico W build"
+below, with the additional permission that lets that .uf2 be passed on. pico/lwipopts.h, which came
+with picoFace, is the lwIP settings file from Raspberry Pi's pico-examples
+(BSD 3-clause, the same licence as the Pico SDK, section 5), changed for
+PicoMenu; only the Pico W build uses it. The sjasmplus assembler that builds the Z80 ROM (and the
 loader of the snapshot-to-tape converter, tools/z80tap/loader.asm) is a separate tool you
 install yourself and is not part of the source or the firmware.
 
@@ -54,8 +59,11 @@ and unpacker of the NMI ROM and the Help text (pico/lzss_pack.py, asm_to_c_file.
 .png writer and reader of the screen grabs (pico/menushot.h; stored, uncompressed, with its
 own CRC-32 and Adler-32), the snapshot-to-tape converter and its loader (pico/z80tap.h,
 tools/z80tap), the settings and Options (pico/settings.h, options.h) and the simulator's test
-files (tools/picosim/tests, including the made-up game of make_levelloader.py). No new
-third-party code was added for Rev 2.0, Rev 2.1.0, Rev 2.2.0 or Rev 2.3.0.
+files (tools/picosim/tests, including the made-up game of make_levelloader.py), and the
+file transfer's web server and page (pico/webfiles.h, webpage.cxx, wifi.cxx). No new
+third-party code was added for Rev 2.0 to Rev 2.3.0; Rev 2.4.0 adds the Pico W build
+(below). The old picoFace web server (http_server.cxx), which only that build used,
+is gone.
 
 The Spectrum ROM images and any games or snapshots you use with the
 Picoface are not covered by any licence here. None are in this source: the
@@ -84,6 +92,56 @@ Sharing the firmware: the .uf2 contains the components above, so pass it on
 together with LICENSE and this file (the firmware zip has all three), and with
 the source (the source zip) or a written offer of it, as the GPL v3 and the
 LGPL v3 (for the Z80 emulator) ask.
+
+The Pico W build
+----------------
+ Component                  Where                        Licence
+ lwIP (Swedish Institute    linked into the Pico W       BSD 3-clause
+   of Computer Science      firmware, from the Pico SDK  (section 11)
+   and others)              (lib/lwip); not in this tree
+ cyw43-driver and the       linked into the Pico W       Raspberry Pi's
+   CYW43439 WiFi chip's     firmware, from the Pico SDK  licence (section 12):
+   firmware (George         (lib/cyw43-driver); not in   only with Raspberry
+   Robotics Pty Ltd)        this tree                    Pi's chips (RP2040)
+ BTstack (BlueKitchen       linked into the Pico W       Raspberry Pi's
+   GmbH): the Bluetooth     firmware, from the Pico SDK  licence (section 13):
+   of B - Bluetooth tape    (lib/btstack); not in this   only with the Pico W
+                            tree
+ SBC encoder (Broadcom,     linked into the Pico W       Apache 2.0
+   in BTstack's 3rd-party/  firmware, from the Pico SDK  (pico/FatFs_SPI/
+   bluedroid)               (lib/btstack)                LICENSE-Apache-2.0.txt)
+
+lwIP's licence is like the others above. The cyw43 driver's is not: it lets it
+be used and passed on only with Raspberry Pi's chips (the Pico W is one), and
+it is not an open source licence. The GPL v3 asks that everything linked into
+a program it covers can be shared on the GPL's terms, and the cyw43 driver
+can't. So the copyright holders of picoFace (Brian Apps) and PicoMenu (Scott Ralph)
+add this permission to the GPL, as its section 7 allows (it is at the top of LICENSE):
+
+  Additional permission under GNU GPL version 3 section 7
+
+  If you modify Picoface or PicoMenu, or any covered work, by linking or combining it with the
+  cyw43-driver (including the firmware of the CYW43439 wireless chip) or BTstack, as supplied by
+  Raspberry Pi Ltd in the Raspberry Pi Pico SDK (or a modified version of those libraries),
+  containing parts covered by the terms of Raspberry Pi Ltd's licences for them, the copyright
+  holders of Picoface and PicoMenu grant you additional permission to convey the resulting work.
+  Corresponding Source for a non-source form of such a combination need not include the source
+  code of the cyw43-driver, the wireless chip's firmware or BTstack, which are available from
+  Raspberry Pi Ltd in the Pico SDK.
+
+With it, the Pico W .uf2 can be passed on as the standard one can: with LICENSE,
+this file and the source (the source zip), as the GPL v3 asks. The cyw43
+driver's own licence still applies to it: only with Raspberry Pi's chips. This
+is not legal advice. The source zip has none of the cyw43 code: it comes from
+the Pico SDK when the Pico W build is made.
+
+BTstack is the same. Raspberry Pi's licence for it (LICENSE.RP of the SDK's
+pico_btstack) lets it be used and passed on only as part of a Pico W (or a
+product made with one), and BTstack's own licence is for personal,
+non-commercial use. The additional permission above covers BTstack too; its
+own terms still apply (the Pico W only, and not for commercial use).
+Its SBC encoder (Broadcom, Apache 2.0) is compatible with the GPL v3. The
+source zip has none of BTstack: it comes from the Pico SDK.
 
 
 ================================================================
@@ -493,7 +551,9 @@ THE SOFTWARE.
 10. Unscii 8 font - Viznut
 ================================================================
 
-The menu and Help screens use the 8x8 font Unscii 8 by Viznut
+The menu and Help screens, and the Pico W's file transfer web page (as a
+web font, pico/webfont.inc, made by tools/make_webfont.py), use the 8x8 font
+Unscii 8 by Viznut
 (http://viznut.fi/unscii/, https://github.com/viznut/unscii, the file
 fontfiles/unscii-8.hex), converted with tools/make_font.py. Its README says:
 "You can consider it Public Domain (or CC-0) except for the files derived from
@@ -504,3 +564,152 @@ those files. No conditions apply; the credit is given here and in README.md.
 terms are informal rather than a licence, and forbid redistributing the font
 files; earlier source trees also held its download, nmirom/Carton.zip. Rev 1.9
 replaces the font and removes that file.)
+
+
+================================================================
+11. lwIP - Swedish Institute of Computer Science (Pico W build only)
+================================================================
+
+Copyright (c) 2001, 2002 Swedish Institute of Computer Science.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
+OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGE.
+
+
+================================================================
+12. cyw43-driver - George Robotics Pty Ltd (Pico W build only)
+================================================================
+
+Used under the Raspberry Pi licence (LICENSE.RP of cyw43-driver):
+
+Copyright (C) 2019-2022 George Robotics Pty Ltd
+
+Raspberry Pi Ltd (Licensor) hereby grants to you a non-exclusive license to
+use this software solely with the Licensor's microcontroller chip (RP2040) or
+any other semiconductor device produced by the Licensor. No other use is
+permitted under the terms of this licence.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. The software can only be used and redistributed in conjunction with RP2040
+   or any other semiconductor device produced by the Licensor.
+2. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+3. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE LICENSOR AND COPYRIGHT OWNER "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE LICENSOR OR COPYRIGHT OWNER BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+This software is also available from the copyright owner under different
+terms (its LICENSE: for personal, non-commercial use; commercial licences from
+contact@georgerobotics.com.au).
+
+
+================================================================
+13. BTstack - BlueKitchen GmbH (Pico W build only)
+================================================================
+
+Used under the Raspberry Pi licence (LICENSE.RP of the Pico SDK's
+pico_btstack):
+
+“BlueKitchen” shall refer to BlueKitchen GmbH.
+“Raspberry Pi” shall refer to Raspberry Pi Ltd.
+“Product” shall refer to Raspberry Pi hardware products Raspberry Pi Pico W or Raspberry Pi Pico WH.
+“Customer” means any purchaser of a Product.
+“Customer Products” means products manufactured or distributed by Customers which use or are derived from Products.
+
+Raspberry Pi grants to the Customer a non-exclusive, non-transferable, non-sublicensable, irrevocable, perpetual
+and worldwide licence to use, copy, store, develop, modify, and transmit BTstack in order to use BTstack with or
+integrate BTstack into Products or Customer Products, and distribute BTstack as part of these Products or
+Customer Products or their related documentation or SDKs.
+
+All use of BTstack by the Customer is limited to Products or Customer Products, and the Customer represents and
+warrants that all such use shall be in compliance with the terms of this licence and all applicable laws and
+regulations, including but not limited to, copyright and other intellectual property laws and privacy regulations.
+
+BlueKitchen retains all rights, title and interest in, to and associated with BTstack and associated websites.
+Customer shall not take any action inconsistent with BlueKitchen’s ownership of BTstack, any associated services,
+websites and related content.
+
+There are no implied licences under the terms set forth in this licence, and any rights not expressly granted
+hereunder are reserved by BlueKitchen.
+
+BTSTACK IS PROVIDED BY RASPBERRY PI "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED TO THE FULLEST EXTENT
+PERMISSIBLE UNDER APPLICABLE LAW. IN NO EVENT SHALL RASPBERRY PI OR BLUEKITCHEN BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF BTSTACK, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+BTstack's own licence (lib/btstack/LICENSE), under which it is also
+available:
+
+Copyright (C) 2009 BlueKitchen GmbH
+All rights reserved 
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holders nor the names of
+   contributors may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+4. Any redistribution, use, or modification is done solely for
+   personal benefit and not for any commercial purpose or for
+   monetary gain.
+
+THIS SOFTWARE IS PROVIDED BY BLUEKITCHEN GMBH AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL BLUEKITCHEN 
+GMBH OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
+THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+Please inquire about commercial licensing options at 
+contact@bluekitchen-gmbh.com

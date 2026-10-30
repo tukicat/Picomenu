@@ -1,0 +1,113 @@
+# B - Bluetooth tape: T opens the Virtual Tape Player from the B screen and its X comes back to
+# it; the blocks the Bluetooth has played are dim there, and the B screen has the green bar and
+# the time played. A place chosen in the tape player is where P plays from. V on the menu opens
+# the tape player with the Bluetooth left on (the tape plays on after it). The volume starts at 1/2.
+flash /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/bt-manual.ini
+sd /Tapes/tapestop.tzx {HERE}/tapestop.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+expect V-Volume: 1/2
+expect P-Play T-Tape player R-Rewind
+expect Block 1, ready
+expect 0:00
+expect 0%
+# T: the tape player, X back
+key t
+wait 30
+expect Virtual Tape Player
+expect 1> Program: tapein
+expect In with T: for the Spectrum ROM
+key x
+wait 30
+expect On Speccy BT receiver
+expect Block 1, ready
+# P: the program and the first part load, then the tape stops itself
+key p
+wait 30
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1100
+expectmem 30000 0x55
+key a
+wait 200
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect Block 5, stopped by the tape
+expect 0:18
+expect 78%
+# the bar (row 16 from column 7): green as far as it has got, blue after
+expectmem 23047 0x20
+expectmem 23066 0x08
+# T: the lines played are dim (white, not bright), the next marked (green)
+key t
+wait 30
+expect 3> Bytes: partB
+expect Playing by Bluetooth (T-B)
+expectmem 22627 0x07
+expectmem 22691 0x44
+key BREAK
+wait 30
+expect Block 5, stopped by the tape
+# P plays on; the menu's V while it plays leaves the Bluetooth on: the rest loads by it, not
+# by the trap
+key p
+wait 30
+nmi
+wait 30
+key v
+wait 30
+expect Virtual Tape Player
+expect Playing by Bluetooth (T-B)
+key x
+wait 30
+key x
+wait 30
+wait 600
+expectmem 30007 0x99
+expecttapemax 0
+# the tape player opened from B moves the tape: P then plays from there
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect At the end of the tape
+key t
+wait 30
+key 1
+wait 30
+expect The next load starts at 1
+key x
+wait 30
+expect Block 1, ready
+expect 0%

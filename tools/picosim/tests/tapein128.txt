@@ -17,6 +17,8 @@ key t
 wait 20
 expect Put in which tape? 1-0
 key 1
+wait 20
+key t
 wait 50
 expectnot Browse Games
 key ENTER

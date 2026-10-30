@@ -1,3 +1,35 @@
+PicoMenu, a fork of picoFace for the ZX Spectrum
+Copyright (C) Brian Apps (picoFace) and Scott Ralph (PicoMenu)
+
+PicoMenu is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version, with the additional permission below.
+
+PicoMenu is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for more details.
+
+Additional permission under GNU GPL version 3 section 7
+-------------------------------------------------------
+
+If you modify Picoface or PicoMenu, or any covered work, by linking or combining it with the
+cyw43-driver (including the firmware of the CYW43439 wireless chip) or BTstack, as supplied by
+Raspberry Pi Ltd in the Raspberry Pi Pico SDK (or a modified version of those libraries),
+containing parts covered by the terms of Raspberry Pi Ltd's licences for them, the copyright
+holders of Picoface and PicoMenu grant you additional permission to convey the resulting work.
+Corresponding Source for a non-source form of such a combination need not include the source
+code of the cyw43-driver, the wireless chip's firmware or BTstack, which are available from
+Raspberry Pi Ltd in the Pico SDK.
+
+(This permission is given by the copyright holders of picoFace (Brian Apps) and of PicoMenu
+(Scott Ralph). It covers only their code: the other parts of the firmware keep their own
+licences, listed in THIRD-PARTY-NOTICES.txt. As GPL v3 section 7 allows, anyone passing on a
+modified version may remove this permission from it.)
+
+The GNU General Public License version 3 follows.
+
+================================================================================
+
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 

@@ -2,6 +2,109 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.4.0 (2026-10-30)
+Changes since Rev 2.3.0. The first PicoMenu with a firmware for the Pico W. There are two firmware files now:
+- `picomenu-Rev2.4.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.4.0 (tapeloader v240)`;
+- `picomenu-Rev2.4.0-W.uf2` for a Pico W: `Rev 2.4.0 W (tapeloader v240)`.
+
+Diagnostics shows "Rev 2.4.0" or "Rev 2.4.0 W". The standard firmware has T-F and T-B too, which say they need a Pico W and the Pico W firmware.
+
+### File transfer over WiFi (Pico W)
+- **T-F File transfer (WiFi)** in Tools joins the network set in O - Options (or `[WiFi]` in Picomenu.ini) and shows the page's addresses, "whichever the browser finds": `http://picomenu/`, `http://picomenu.local` and the number (such as `http://192.168.1.57`). Open one in a browser on a PC, tablet or phone on the same network.
+- **The page** shows the SD card:
+  - folders open with a click, and a file downloads with a click;
+  - **Upload files**, or files dropped on the page, go into the folder shown (one of the same name asks first);
+  - **Rename**, **Erase** (to the Waste Bin, with tape notes following, as E in Browse Games) and **New folder**.
+
+  The page is all in the firmware: nothing comes from the internet.
+- **How it looks:** the top bar is the Spectrum's bright blue all the way across, with PicoMenu's title as the NMI menu draws it. All the page's text uses the NMI menu's own font (Unscii 8) as a small web font built into the page (2.7 KB; `pico/webfont.inc`, made from nmirom.asm by `tools/make_webfont.py`), drawn at twice its size with square pixels. A character the font doesn't have shows in the browser's own font, and the browser's own boxes (rename, erase, new folder) keep the system font. On a narrow phone screen each file's size and buttons go on a line under its name.
+- **The Spectrum screen** waits on T-F while the transfer is on, showing the addresses and what was sent and received. BREAK stops it, switches the WiFi off and goes back to Tools. The WiFi runs at no other time, and is switched off whenever the menu goes (a reset, say).
+- **The names:**
+  - **mDNS:** the Pico answers for `picomenu.local` itself, and says it once on joining (Windows 10 and later, macOS, iPhone and iPad, Linux with Avahi, newer Android). It has a responder of its own, as lwIP's mDNS keeps state that does not survive lwIP being started afresh; the group 224.0.0.251 is joined (IGMP) while T-F is open.
+  - **NetBIOS:** it answers to `picomenu`, so `http://picomenu/` works on Windows.
+  - **The number always works.** The router may also know the name (the Pico gives "PicoMenu" when it asks for its address).
+- **A password for the page:** with `web_password` set the browser asks for it (HTTP Basic, any user name).
+- **How it works:**
+  - The WiFi chip's driver and lwIP (from the Pico SDK) start when T-F opens and stop when it closes.
+  - All their memory, and the browser connections' (up to three at once), is lent from the snapshot buffer, which is free while the menu is up, so the program's own RAM hardly grows. lwIP is started afresh each time on that memory.
+  - Files go straight between the network and the SD card through FatFs, 512 bytes to 2 KB at a time.
+  - The web side (`pico/webfiles.h`, `webpage.cxx`) is separate from the WiFi (`pico/wifi.cxx`), so the simulator tests it with the same code.
+- **Removed:** picoFace's old web server (`http_server.cxx`). It served only the internal flash, needed the WiFi name and password built into the firmware, and was not built by default.
+
+### Bluetooth tape (Pico W)
+PicoMenu takes a phone's place for a Bluetooth receiver wired to the Spectrum's EAR socket. The tape is played as sound in real time and the Spectrum's own loader loads it, so turbo loaders work.
+- **T-B Bluetooth tape** in Tools:
+  - **S** searches for receivers and **1-8** pairs with one. It is remembered (saved to the flash only when it is a new one), so later it connects by itself; **C** connects, **F** forgets.
+  - **P** plays the tape put in, **R** rewinds, **D** disconnects, **O** switches the Bluetooth off.
+  - **V** sets the volume: 1/2 (the start, which loads best), 3/4 and full, and round again. V saves it.
+  - **T** opens the Virtual Tape Player. Its keys work as from V on the menu (1-0 chooses where the next load starts, R rewinds, L labels ...); X or BREAK comes back to the B screen, and P plays from the place chosen. Choosing a place stops the Bluetooth's playing, so P starts afresh from there.
+  - **The C - Convert bar:** the tape's time played, a green bar of how much of the file has been played (blue for the rest) and the percentage. It is seen when the menu is opened: during the load the Spectrum's screen is the game's.
+  - **Key lines:** `P-Play T-Tape player R-Rewind` and `D-Disconnect O-Off BREAK-Back`; not connected, `T-Tape player O-Off BREAK-Back`.
+- **T in Browse Games asks `Tape: Trap (T) or Bluetooth (B)`** after the tape's number. T puts it in for the tape trap (loads at once), as before. B puts it in for the Bluetooth: it switches on, connects to the receiver paired last as the menu goes, and LOAD "" plays it. Another key asks again; BREAK puts nothing in ("No tape put in"). The standard firmware doesn't ask.
+- **LOAD "" starts the tape** (`auto_play`). Leaving the B screen connected with a tape in gives the tape to the Bluetooth. Then the ROM's own loader starts it: `LOAD ""`, the 128's Tape Loader, or a multi-load game's next load after a TZX "stop the tape", with no P. It works through the tape trap's routine at 0x0562, which has a third answer, "load it from the EAR socket": it puts the registers back as the ROM had them and goes on in the ROM's own LD-BYTES at 0x056B. A loader of a game's own (in RAM) can't be seen, so P on B is there for those. With the Bluetooth off, or no receiver to connect to, the trap loads the tape as before.
+- **While it plays:**
+  - The menu opened pauses it, and a TZX "stop the tape" stops it.
+  - **The menu opened mid-block:** if a block's data was playing (or had played in the last half second), the Spectrum has lost it, as the receiver plays on a moment after it stops listening. The tape goes back to the start of that block's line in the tape player (its header with it), and B says `Menu mid-block: back to line n`; LOAD (or RUN) again plays it from there. A menu opened in a tone or a gap carries on.
+  - **V on the menu leaves the Bluetooth on**, so a tape playing by Bluetooth carries on after the tape player is looked at. While the Bluetooth has the tape, the blocks it has played are dim and `>` marks the next; the screen says "Playing by Bluetooth (T-B)".
+  - **Off by itself** a few seconds after the tape ends (`auto_off`), so autosave and the level loader can go on; B says `Switched off: the tape ended` when it next opens.
+- **A lost receiver** (switched off, out of range or taken by a phone): PicoMenu switches the Bluetooth fully off and on at once, so the next connection starts from a clean Bluetooth stack. The tape stays the Bluetooth's: the next LOAD (or C on B) connects again. B says why (`The receiver went away`, `Could not connect`). The Bluetooth stack's fixed pools (connections, channels, AVDTP) have room for two connections, so a new one can't run out of room while an old one is still closing.
+- **How:**
+  - BTstack (in the Pico SDK) as an A2DP source, as a phone is, with SBC: mono at 44.1 kHz where the receiver takes it, else joint stereo.
+  - The sound is made from the tape (`pico/tapeaudio.h`) with each edge kept to a fraction of a sample, and coded on the Pico as it is due, every 10 ms. The coding takes about 17% of one core in mono, 31% in stereo.
+  - Speedlock 1, 2 and 6 and Power-Load tapes were turned into the sound, SBC-coded and decoded (`tools/btaudio`) and loaded by their own loaders in the emulator.
+  - The pairing is kept in 8 KB of flash just before the file system.
+  - The Bluetooth's variables use the last 16 KB of the snapshot buffer (13.9 KB used), so while it is on, autosave and the level loader wait, and loading a snapshot switches it off. Starting the radio starts lwIP afresh each time on lent memory, as T-F does (`wifi::lend_lwip`).
+  - One radio at a time (T-F and T-B).
+- **The tape trap's routine for a tape put in (T)** is new: 102 bytes, not 60 (`TAPE_IN_HOOK`, `tools/picosim/tests/tapehook.asm`). Its RET, where the bus handler hands back to the internal ROM, is now 0x059A. The patched 48K ROM (a tape loaded with its number) keeps the old one, as the longer one would cover the ROM's own loader there.
+
+### A crash recorder (Pico W)
+- A fault on either core restarts the Pico rather than stopping it, and the watchdog (on while the Bluetooth is, 8 seconds) restarts it if it hangs.
+- What happened is kept in RAM over the restart and shown on B the next time it opens: `Crash <core> PC <address> LR <address>` or `Last restart: a hang`, and `Last:` with the last Bluetooth events as codes. A photo of those two lines says where it went wrong.
+
+### Settings
+- **O - Options, W** opens the "WiFi and Bluetooth" page (Pico W firmware), chosen with ENTER:
+  - `[WiFi]`: `ssid`, `password` (empty: an open network) and `web_password`. ENTER on a line types it (CAPS SHIFT for capitals, SYMBOL SHIFT for symbols, DELETE rubs out); ENTER keeps it, BREAK leaves it as it was. The passwords show as `*` except while typed.
+  - `[Bluetooth]`: `volume` (1/2, 3/4, full), `auto_connect`, `auto_play` and `auto_off` (on or off).
+- They are saved into Picomenu.ini like the other settings (a section is added if the file has none). Set up SD card writes both sections.
+- **The settings page's key line** reads `N-Order W-WiFi/BT D-Diagnostics`. The standard firmware keeps `N-Grab order  D-Diagnostics` and has no W page.
+
+### The Pico W firmware
+- **About 616 KB** (630,628 bytes of program). The WiFi chip's own firmware is most of it.
+- **The internal flash's file system** (littlefs) is 1400 KB in the Pico W build, not 1800 KB, to make room. Putting one kind of firmware on with BOOTSEL where the other was clears the internal flash (it is formatted afresh), so copy anything wanted from it to the SD card first.
+- **Update PicoMenu (T-U)** knows the two apart, by the " W" after the version, and only takes the same kind: "Not the Pico W firmware" on a Pico W, "It is the Pico W firmware" on a Pico. It can stage a firmware of up to about 780 KB.
+- **RAM:** the SD card's read-ahead is 2 sectors in the Pico W build, not 8. In both builds the last game's file is checked against a CRC-32, not kept as a copy (584 bytes less RAM).
+- **Building it:** `cmake -DWIFI_ENABLE=1` (the WiFi name and password are no longer given to cmake). It needs the Pico SDK's `lib/cyw43-driver`, `lib/lwip` and `lib/btstack` submodules.
+
+### NMI ROM
+- **Tools has F - File transfer (WiFi) and B - Bluetooth tape.** About five times a second on T-F the ROM asks the Pico whether the screen has changed, so the address and the counts show without a key being pressed.
+- **T's request has a third answer**, 2: a question, whose key goes back with the same request (the text comes from the Pico). To make room six prompts are shorter, saying the same: `ENTER makes it, BREAK exits`, `ENTER searches, BREAK exits`, `ENTER renames, BREAK exits`, `ENTER saves, BREAK exits`, `ENTER pokes, BREAK cancels`, `Searching: BREAK stops`.
+- 6 bytes free.
+
+### Licences
+- **The standard build:** no change (no WiFi or Bluetooth code in it).
+- **The Pico W build** links lwIP (BSD 3-clause), Raspberry Pi's cyw43 driver with the WiFi chip's firmware, and BTstack.
+- **Additional permission.** Brian Apps (picoFace) and Scott Ralph (PicoMenu) add a permission to the GPL v3, as its section 7 allows, to link or combine PicoMenu with Raspberry Pi's cyw43-driver (and the CYW43439 chip's firmware) and BTstack from the Pico SDK, and to pass the result on; its Corresponding Source need not include those, which come from the Pico SDK. It is at the top of LICENSE, in README.md and in THIRD-PARTY-NOTICES.txt.
+- So the Pico W `.uf2` can be passed on as the standard one can (with LICENSE, THIRD-PARTY-NOTICES.txt and the source). The cyw43 driver and BTstack keep their own terms (Raspberry Pi's chips only; BTstack not for commercial use).
+
+### Tests
+- **New simulator commands:**
+  - `http <METHOD> <target> [<file>]` sends a request to the web side, as a browser would (on the simulated SD card), and `expecthttp`, `expecthttpnot`, `httpsave` and `httpauth` check the reply;
+  - a pretend Bluetooth receiver whose sound goes to the emulated EAR, so the ROM loads it; it takes a moment to connect again, and `btdrop` makes it go away;
+  - `expectear` counts loads told to use EAR apart from the trap's blocks.
+- The simulator's debug switches are looked up once (they were looked up on every memory read, which slowed it enough to upset the autosave timings).
+- **New scripts:**
+  - `webfiles48`: the page, folders listed, a file downloaded and one uploaded (byte for byte), 409 for names in use, a folder made, a rename, an erase to the Waste Bin, bad paths, and F on the standard build;
+  - `webfiles2-48`: `web_password` (401 without it and with a wrong one, 200 with it), and `[WiFi]` read with nothing "not understood";
+  - `wifioptions48`: the WiFi and Bluetooth page (typing, DELETE, BREAK, the `*`), N and W, saving into a file with no `[WiFi]`;
+  - `bttape48`, `btstop48`, `bthybrid48`: loading by Bluetooth; `bt-manual.ini` keeps `btstop48`, `btvtp48` and `bthybrid48` on P;
+  - `btvtp48`, `btvtp128`: the tape player from B and back, the dim lines and the bar, V on the menu mid-load, a place chosen;
+  - `btauto48`: LOAD starts it, the TZX stop and the next load, auto-off, V saved;
+  - `btcut48`: the menu mid-block, with `longrem.tap`;
+  - `btbrowse48`: T in Browse Games answered B, after another key and BREAK;
+  - `btdrop48`: the receiver going away while the tape waits and in the middle of a load.
+- **Updated:** `options48` for the new key line; the scripts that put a tape in with T answer T.
+- 72 scripts, all passing. Pico W program 630,628 bytes; standard 253,076 bytes (876 left).
+
 ## Rev 2.3.0 (2026-10-27)
 Changes since Rev 2.2.0. `FIRMWARE_ID` is `Rev 2.3.0 (tapeloader v230)`: Diagnostics shows "Rev 2.3.0". Autosave was tried as "Rewind" (test 1) and "Checkpoints" (test 2) before it took this form.
 

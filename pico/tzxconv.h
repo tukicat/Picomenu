@@ -69,6 +69,7 @@ public:
         level_ = 0;
         end_ = TapeEnd::PLAYING;
         stops_ = 0;
+        stops48_ = 0;
         closing_ = 0;
         if (tzx) {
             uint8_t h[10];
@@ -124,6 +125,7 @@ public:
         }
     }
     uint32_t stops() const { return stops_; }       // "stop the tape" blocks played through
+    uint32_t stops48() const { return stops48_; }   // of them, "stop the tape if a 48K" (0x2A)
     // Where the tape is, in data blocks (standard and turbo speed and pure data: those the
     // Picoface's tape trap hands over, counted as it counts them): the next one a load would
     // take. A data block that has begun but not ended is taken again from its start.
@@ -681,6 +683,7 @@ private:
             case 0x2A:
                 if (!skip(4)) return bad();
                 stops_++;
+                stops48_++;
                 start_pause(1000);
                 return started();
             case 0x2B:
@@ -739,18 +742,18 @@ private:
 
     struct Saved {
         State s;
-        uint32_t pos, block, stops, unsupported, data_started, read_in, loaded;
+        uint32_t pos, block, stops, stops48, unsupported, data_started, read_in, loaded;
         bool in_data;
         uint8_t level, closing;
         TapeEnd end;
     };
     void save(Saved& v) const {
-        v.s = s_; v.pos = f_->tell(); v.block = block_; v.stops = stops_; v.unsupported = unsupported_;
+        v.s = s_; v.pos = f_->tell(); v.block = block_; v.stops = stops_; v.stops48 = stops48_; v.unsupported = unsupported_;
         v.data_started = data_started_; v.in_data = in_data_; v.read_in = read_in_; v.loaded = loaded_;
         v.level = level_; v.closing = closing_; v.end = end_;
     }
     void restore(const Saved& v) {
-        s_ = v.s; block_ = v.block; stops_ = v.stops; unsupported_ = v.unsupported;
+        s_ = v.s; block_ = v.block; stops_ = v.stops; stops48_ = v.stops48; unsupported_ = v.unsupported;
         data_started_ = v.data_started; in_data_ = v.in_data; read_in_ = v.read_in; loaded_ = v.loaded;
         level_ = v.level; closing_ = v.closing; end_ = v.end;
         if (!f_->seek(v.pos)) bad();
@@ -763,6 +766,7 @@ private:
     TapeEnd end_ = TapeEnd::BAD;
     uint32_t block_ = 0;
     uint32_t stops_ = 0;
+    uint32_t stops48_ = 0;
     uint32_t data_started_ = 0;     // data blocks begun (see data_position)
     bool in_data_ = false;          // the block playing is one of them
     uint32_t read_in_ = 0, loaded_ = 0;     // see loaded_position

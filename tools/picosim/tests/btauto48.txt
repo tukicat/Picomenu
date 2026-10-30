@@ -1,0 +1,66 @@
+# B - Bluetooth tape, as it starts and stops itself: leaving the B screen connected gives the tape
+# to the Bluetooth, and LOAD "" (the ROM's loader) starts it (auto_play). The tape stops itself
+# (TZX "stop the tape") after the first part; the program's next LOAD starts it again (as a
+# multi-load game's next level would), no P. A few seconds after the tape ends the Bluetooth goes
+# off (auto_off), and the B screen says so. V changes the volume and keeps it in Picomenu.ini.
+flash /48.rom {ROM48}
+sd /Tapes/tapestop.tzx {HERE}/tapestop.tzx
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+expect V-Volume: 1/2
+key v
+wait 60
+expect V-Volume: 3/4
+expectfile sd /Picomenu.ini|[Bluetooth]
+expectfile sd /Picomenu.ini|volume = 3/4
+key BREAK
+wait 30
+key x
+wait 30
+key x
+wait 30
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1100
+expectmem 30000 0x55
+# the program waits for a key, then loads the second part: the tape starts again by itself
+key a
+wait 600
+expectmem 30007 0x99
+expecttapemax 0
+expectear 3
+# the tape has ended: off a few seconds on
+clock 6000
+wait 20
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect Switched off: the tape ended
+expect V-Volume: 3/4

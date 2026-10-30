@@ -27,6 +27,8 @@ wait 50
 key t
 wait 20
 key 1
+wait 20
+key t
 wait 100
 poke 0x9000 1
 wait 200
@@ -79,6 +81,8 @@ wait 50
 key t
 wait 20
 key 1
+wait 20
+key t
 wait 100
 poke 0x9000 1
 wait 200

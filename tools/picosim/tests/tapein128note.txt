@@ -14,6 +14,8 @@ wait 50
 key t
 wait 20
 key 1
+wait 20
+key t
 wait 50
 key ENTER
 wait 300

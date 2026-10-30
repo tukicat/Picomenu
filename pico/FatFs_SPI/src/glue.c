@@ -39,7 +39,9 @@ specific language governing permissions and limitations under the License.
    READAHEAD_SECTORS are read with one multiple block read instead and kept
    here.  Writes, and initialising the card, empty the buffer so it never
    holds stale data. */
-#define READAHEAD_SECTORS 8
+#ifndef READAHEAD_SECTORS
+#define READAHEAD_SECTORS 8         /* (the Pico W build: 2, for RAM) */
+#endif
 #define READAHEAD_SECTOR_SIZE 512
 static uint8_t ra_buf[READAHEAD_SECTORS * READAHEAD_SECTOR_SIZE] __attribute__((aligned(4)));
 static BYTE ra_pdrv;
