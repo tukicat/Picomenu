@@ -38,7 +38,7 @@ key 1
 wait 30
 expect On Speccy BT receiver
 expect P-Play T-Tape player R-Rewind
-expect D-Disconnect O-Off BREAK-Back
+expect D-Disconnect O-Off X-Back
 expect V-Volume: 1/2
 key p
 wait 30

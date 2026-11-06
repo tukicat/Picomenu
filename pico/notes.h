@@ -45,17 +45,15 @@ inline void path_for(const char* base, char* out, size_t outsize) {
 static const uint8_t KEY_EDIT = 0x01, KEY_LEFT = 0x05, KEY_DOWN = 0x06, KEY_UP = 0x07, KEY_RIGHT = 0x08;
 static const uint8_t KEY_DELETE = 0x0A, KEY_ENTER = 0x13, KEY_BREAK = 0x18;
 
-// The editor is a template so the game's details can be edited in a taller one (scrolling) than
-// the notes: LINES lines of COLS letters. The notes' is Editor, 18 lines of 30.
-template <int LINES, int COLS>
-class EditorT {
+// The editor: the notes' is Editor, 18 lines of 30; the game's details are edited in a taller
+// one (scrolling), and a one-line one. Each is an EditorT with its lines; the work is EditorCore's
+// (one copy of it in the firmware, whatever the number of lines).
+class EditorCore {
 public:
     enum Result { CONTINUE, SAVE, DISCARD };
 
-    EditorT() { clear(); }
-
     void clear() {
-        for (int i = 0; i < LINES; i++) {
+        for (int i = 0; i < max_; i++) {
             lines_[i][0] = '\0';
         }
         count_ = 1;
@@ -81,7 +79,7 @@ public:
                 c = '\n';
             }
             if (c == '\n') {
-                if (line + 1 >= LINES) {
+                if (line + 1 >= max_) {
                     // a last empty line is not a line
                     if (i + 1 < n) {
                         clear();
@@ -160,7 +158,7 @@ public:
                 prompt_ = true;
                 return CONTINUE;
             case KEY_ENTER:
-                if (LINES == 1) {
+                if (max_ == 1) {
                     // a one-line box: ENTER is the end of it
                     if (!changed_) {
                         return DISCARD;
@@ -237,8 +235,12 @@ public:
     int row() const { return row_; }
     int col() const { return col_; }
 
+protected:
+    EditorCore(char (*lines)[COLS + 1], int lines_max) : lines_(lines), max_(lines_max) { clear(); }
+
 private:
-    char lines_[LINES][COLS + 1];
+    char (*lines_)[COLS + 1];           // the derived editor's lines (max_ of them)
+    int max_;
     int count_;
     int row_, col_;
     int top_ = 0;
@@ -270,7 +272,7 @@ private:
         int len = (int) strlen(l);
         if (len >= COLS) {
             // a full line: typing at its end goes on at the start of a new line below
-            if (col_ == len && count_ < LINES && row_ + 1 == count_) {
+            if (col_ == len && count_ < max_ && row_ + 1 == count_) {
                 row_ = count_++;
                 col_ = 0;
                 lines_[row_][0] = '\0';
@@ -291,7 +293,7 @@ private:
     }
 
     void split() {
-        if (count_ >= LINES || full()) {
+        if (count_ >= max_ || full()) {
             return;
         }
         for (int i = count_; i > row_ + 1; i--) {
@@ -329,6 +331,18 @@ private:
             changed_ = true;
         }
     }
+};
+
+template <int LINES_, int COLS_>
+class EditorT : public EditorCore {
+    static_assert(COLS_ == COLS, "the editors' lines are 30 letters");
+public:
+    EditorT() : EditorCore(store_, LINES_) {}
+    EditorT(const EditorT&) = delete;               // (the core points at store_)
+    EditorT& operator=(const EditorT&) = delete;
+
+private:
+    char store_[LINES_][COLS_ + 1];
 };
 
 using Editor = EditorT<LINES, COLS>;

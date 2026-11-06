@@ -24,16 +24,19 @@ cmake_minimum_required(VERSION 3.13)
 set(WIFI_ENABLE 0 CACHE BOOL "1: the Pico W build (F - File transfer over WiFi in Tools); its own uf2")
 set(PICOMENU_LOG 0 CACHE STRING "1: the firmware sends its log messages on the USB serial port (about 6 KB more)")
 
-# The Pico W build: the WiFi chip's driver and firmware and lwIP are about 300 KB, so the
-# program may be bigger, and the internal flash's file system (littlefs) is smaller: 1400 KB
-# from the end of the flash, not 1800 KB. The network's name and password are in Picomenu.ini.
+# The Pico W build: the WiFi chip's driver and firmware and lwIP are about 300 KB, and HTTPS
+# for ZXDB (mbedtls) about 60 KB more, so the program may be bigger, and the internal flash's
+# file system (littlefs) is smaller: 1280 KB from the end of the flash, not 1800 KB (1400 KB
+# up to 2.4.0: going to 2.5.0 the flash's file system is made afresh, its files lost). The
+# network's name and password are in Picomenu.ini.
 if("${WIFI_ENABLE}")
         message(STATUS "Pico W build: WiFi file transfer")
         set(PICO_BOARD pico_w CACHE STRING "Board type" FORCE)
         # Bluetooth too (B - Bluetooth tape in Tools): BTstack as an A2DP source, with the SBC codec
-        set(WIFI_LIBS pico_cyw43_arch_lwip_poll pico_lwip_netbios pico_btstack_classic pico_btstack_cyw43 pico_btstack_sbc_encoder)
-        set(WIFI_SOURCES wifi.cxx webpage.cxx bt.cxx)
-        set(PICOMENU_FS_KB 1400)
+        set(WIFI_LIBS pico_cyw43_arch_lwip_poll pico_lwip_netbios pico_btstack_classic pico_btstack_cyw43 pico_btstack_sbc_encoder
+                pico_lwip_mbedtls pico_mbedtls)
+        set(WIFI_SOURCES wifi.cxx webpage.cxx bt.cxx net.cxx miniz_tinfl.c)
+        set(PICOMENU_FS_KB 1280)
         # BTstack keeps the speaker's pairing in 8 KB of the flash, just before the file system
         set(PICOMENU_RESERVE_KB 8)
 else()
@@ -133,11 +136,11 @@ if("${WIFI_ENABLE}")
         math(EXPR BANK_OFFSET "(2048 - ${PICOMENU_FS_KB} - ${PICOMENU_RESERVE_KB}) * 1024")
         target_compile_definitions(picoface PRIVATE PICO_FLASH_BANK_STORAGE_OFFSET=${BANK_OFFSET}
                 PICO_FLASH_BANK_TOTAL_SIZE=8192 PICO_FLASH_ASSUME_CORE1_SAFE=1)
-        # The Bluetooth's variables share the last 16 KB of snap_load_buffer (memmap_picomenu_w.ld)
+        # The radios' variables (the Bluetooth's, the ZXDB downloads') share the last 24 KB of snap_load_buffer (memmap_picomenu_w.ld)
         pico_set_linker_script(picoface ${CMAKE_CURRENT_LIST_DIR}/memmap_picomenu_w.ld)
         # (PICOMENU_SNAP_SIZE: snap_load_buffer's size, SNAP_LOAD_BUFFER_SIZE in picoface.cxx, which checks it)
-        target_link_options(picoface PRIVATE -Wl,--defsym=PICOMENU_BT_SHARED=16384 -Wl,--defsym=PICOMENU_SNAP_SIZE=132160)
-        target_compile_definitions(picoface PRIVATE PICOMENU_BT_SHARED=16384 PICOMENU_SNAP_SIZE=132160)
+        target_link_options(picoface PRIVATE -Wl,--defsym=PICOMENU_BT_SHARED=24576 -Wl,--defsym=PICOMENU_SNAP_SIZE=132160)
+        target_compile_definitions(picoface PRIVATE PICOMENU_BT_SHARED=24576 PICOMENU_SNAP_SIZE=132160 MINIZ_NO_MALLOC MINIZ_NO_STDIO)
 endif()
 
 

@@ -1,0 +1,71 @@
+# Instructions up to 8 KB (Game Notes/<game>.info.txt here): more than the 15 pages the NMI ROM can
+# count. The Pico keeps the real page: N and P go through them all and round, the title row says
+# "Pg n/m"; P on the first page is the last. M then I says it is too long for the Spectrum's box.
+sd /48.rom {ROM48}
+sd /Games/Long.z80 {OUT}/dummy.scr
+sd /Game Notes/Long.info.txt {OUT}/long.info.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key v
+wait 10
+key 1
+wait 50
+expect Pg 1/1
+expect Long Games
+key p
+wait 20
+expect LAST LINE
+key n
+wait 20
+expect Pg 1/1
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+key n
+wait 15
+expect Pg 17/1
+key p
+wait 15
+expect Pg 16/1
+key p
+wait 15
+expect Pg 15/1
+key m
+wait 30
+key i
+wait 30
+expect Too long for this screen
+key x
+wait 30

@@ -1,0 +1,36 @@
+# Long instructions from ZXDB (7 KB, as Juggernaut's): all of them go into the game's details now
+# (up to 8 KB; 2 KB were kept up to 2.5.0 test 11), and the V screen pages through them.
+sd /48.rom {ROM48}
+sd /Games/Green_Beret_1986Imagine.tap {HERE}/tapein.tap
+sd /Game Notes/readme.txt {HERE}/short.txt
+net https://api.zxinfo.dk/v5/search/titles/Green%20Beret?mode=tiny&size=10&offset=0* {OUT}/search.http
+net https://archive.org/download/World_of_Spectrum_June_2017_Mirror/World%20of%20Spectrum%20June%202017%20Mirror.zip/World%20of%20Spectrum%20June%202017%20Mirror/sinclair/games-info/* {OUT}/instr-long.http
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key m
+wait 30
+key z
+wait 80
+key 1
+wait 30
+key i
+wait 10
+key s
+wait 150
+expectnet 2
+expect Saved details and instructions
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Part 001 of the long
+key x
+wait 40
+key p
+wait 20
+expect THE END

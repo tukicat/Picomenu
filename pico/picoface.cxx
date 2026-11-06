@@ -56,6 +56,20 @@ not, see <https://www.gnu.org/licenses/>.
 #else
 #define PICOMENU_BT 0
 #endif
+// ZXDB (Spectrum Computing's database, through the ZXInfo API) from the WiFi screen and the
+// game information's M menu: in the Pico W build, and in the simulator (a pretend network,
+// tools/picosim/net_host.cpp, answering with files its script names)
+#if defined(WIFI_ENABLE) || defined(PICOFACE_HOST)
+#define PICOMENU_NET 1
+#define PICOMENU_ASSETS 1           // E in Tools, Erase all assets (the standard firmware has no room)
+#include "net.h"
+#include "zxdb.h"
+#include "unzip.h"
+static bool zx_live = false;                // a ZXDB screen is up (zx(), further on, holds its state)
+#else
+#define PICOMENU_NET 0
+#define PICOMENU_ASSETS 0
+#endif
 #if PICOMENU_BT
 // The Bluetooth (B - Bluetooth tape, further on): on, and its screen open
 static bool bt_on = false;
@@ -242,7 +256,7 @@ void __time_critical_func(do_my_pio)() {
 
 #ifdef PICOMENU_SNAP_SIZE
 // The Pico W build: placed by its linker script (memmap_picomenu_w.ld), which puts the
-// Bluetooth's memory in its last 16 KB (see bt_off)
+// radios' memory (the Bluetooth's, the ZXDB downloads') in its last 24 KB (see bt_off)
 static_assert(PICOMENU_SNAP_SIZE == SNAP_LOAD_BUFFER_SIZE, "CMakeLists.txt's PICOMENU_SNAP_SIZE is snap_load_buffer's size");
 extern "C" char picomenu_snapbuf[SNAP_LOAD_BUFFER_SIZE];
 static char (&snap_load_buffer)[SNAP_LOAD_BUFFER_SIZE] = picomenu_snapbuf;
@@ -830,9 +844,9 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
 // " W" after the number: the Pico W build (Update PicoMenu only takes the same kind: fwupdate.h)
 #ifdef WIFI_ENABLE
-static const char FIRMWARE_ID[] = "Rev 2.4.0 W (tapeloader v240)";
+static const char FIRMWARE_ID[] = "Rev 2.5.0 W (tapeloader v250)";
 #else
-static const char FIRMWARE_ID[] = "Rev 2.4.0 (tapeloader v240)";
+static const char FIRMWARE_ID[] = "Rev 2.5.0 (tapeloader v250)";
 #endif
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
@@ -4282,6 +4296,14 @@ static char slot_typed[slots::LABEL_MAX + 1];
 static const char* slot_msg = nullptr;
 
 static bool is_key_break(uint8_t key) { return key == notes::KEY_BREAK; }
+// The keys to leave a screen: BREAK always; X too where nothing is being typed. Their names on
+// the screens: "BREAK-Back" where X is typed, else "X-Back" (back a step) or "X-Exit" (out of the
+// menu, back to the game: the menu's own X, and S or G opened alone by the button)
+static bool is_key_back(uint8_t key) { return key == notes::KEY_BREAK || key == 'x' || key == 'X'; }
+static bool menu_alone() {
+    const uint8_t c = (rom_data + 16384)[STARTUP_COMMAND_OFFSET];
+    return c == STARTUP_ACTION_SAVE_SCREEN || c == STARTUP_ACTION_GRAB_SCREEN;
+}
 
 // The slots, one on each of rows 2 to 10. only_used: the empty ones are left out (the question).
 static void slots_draw_list(uint8_t* screen, const SlotEntry* e, int last, bool only_used) {
@@ -4465,7 +4487,7 @@ __attribute__((noinline)) static void nmi_action_slots() {
     help_put_text(screen, 13, 5, "Save to a slot", 14, gameinfo::ATTR_TEXT);
     help_put_text(screen, 14, 1, "L-Label  V-View  E-Erase", 24, gameinfo::ATTR_KEYS);
     help_put_text(screen, 15, 1, "S-Save snapshot (own name)", 26, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 16, 1, "X-Exit", 6, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 16, 1, menu_alone() ? "X-Exit" : "X-Back", 6, gameinfo::ATTR_KEYS);
     char t[48];
     switch (slot_state) {
     case SLOT_OVERWRITE:
@@ -4479,7 +4501,7 @@ __attribute__((noinline)) static void nmi_action_slots() {
         const char* what = slot_state == SLOT_PICK_LABEL ? "Label which slot? 1-9" :
             slot_state == SLOT_PICK_VIEW ? "View which slot? 1-9" : "Erase which slot? 1-9";
         help_put_text(screen, 19, 1, what, (int) strlen(what), gameinfo::ATTR_HEADING);
-        help_put_text(screen, 20, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 20, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
         break;
     }
     case SLOT_TYPING:
@@ -4653,11 +4675,11 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
     help_put_text(screen, 15, 5, "View a slot's screen", 20, gameinfo::ATTR_TEXT);
     help_put_text(screen, 16, 1, "E", 1, gameinfo::ATTR_KEYS);
     help_put_text(screen, 16, 5, "Erase a slot", 12, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 17, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 17, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
     if (ask_view == 1 || ask_view == 3) {
         const char* what = ask_view == 1 ? "View which slot? 1-9" : "Erase which slot? 1-9";
         help_put_text(screen, 19, 1, what, (int) strlen(what), gameinfo::ATTR_HEADING);
-        help_put_text(screen, 20, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 20, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
     } else if (ask_view == 4) {
         char t[24];
         snprintf(t, sizeof(t), "Erase slot %d?", slot_pick);
@@ -5062,9 +5084,9 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     }
     help_put_text(screen, 15, 1, "O", 1, gameinfo::ATTR_KEYS);
     help_put_text(screen, 15, 5, rw.on ? "Turn autosave off" : "Turn autosave on", rw.on ? 17 : 16, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 17, 1, "BREAK-Back", 10, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 17, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
     const char* ask = nullptr;
-    const char* keys = "BREAK-Back";
+    const char* keys = "X-Back";
     switch (cp_state) {
     case 1: snprintf(t, sizeof(t), "View which? 1-%d", count); ask = t; break;
     case 3: snprintf(t, sizeof(t), "Move which? 1-%d", count); ask = t; break;
@@ -5253,8 +5275,8 @@ static void help_draw_page(uint8_t* screen, int page) {
         }
         p += len + (end ? 1 : 0);
     }
-    const char* keys = HELP_PAGE_COUNT == 1 ? "Any key: back to Options" : page == 0 ? "N-Next page      X-Exit" :
-        page == HELP_PAGE_COUNT - 1 ? "P-Previous page  X-Exit" : "N-Next  P-Previous  X-Exit";
+    const char* keys = HELP_PAGE_COUNT == 1 ? "Any key: back to Options" : page == 0 ? "N-Next page      X-Back" :
+        page == HELP_PAGE_COUNT - 1 ? "P-Previous page  X-Back" : "N-Next  P-Previous  X-Back";
     help_put_text(screen, 23, 1, keys, strlen(keys), KEYS);
 }
 
@@ -5266,37 +5288,44 @@ alignas(8) static extras::PokFile pok_file;
 
 static const char POKE_LIST_DIR[] = "/Poke List";     // in the root of the SD card
 
-// Looks for <name>.pok (.POK too) in the Poke List folder. Returns the number of cheats.
-
-static int pok_load_for_last_game() {
-    pok_file.clear();
+// Looks for <name>.pok (.POK too) in the Poke List folder, for the game last loaded (or its name
+// without " Save Game"). True if there is one: its path in path.
+static bool pok_find(char* path, size_t size) {
     if (!reload_known || !sd_card_mounted) {
-        return 0;
+        return false;
     }
-    static char base[sizeof(reload_name)];
-    static char path[BROWSE_PATH_MAX];
     size_t full = strlen(reload_name);
     size_t shorter = extras::base_name_length(reload_name);
     for (int attempt = 0; attempt < 2; attempt++) {
-        size_t n = attempt == 0 ? full : shorter;
+        int n = (int) (attempt == 0 ? full : shorter);
         if (attempt == 1 && shorter == full) {
             break;
         }
-        memcpy(base, reload_name, n);
-        base[n] = '\0';
         for (int upper = 0; upper < 2; upper++) {
-            const char* ext = upper ? "POK" : "pok";
-            snprintf(path, sizeof(path), "%s/%s.%s", POKE_LIST_DIR, base, ext);
-            FileHandle f;
-            if (f.open(Drive::EXTERNAL_SD_CARD, path, true)) {
-                int cheats = pok_file.load(f);
-                f.close();
-                LOG("%s: %d cheats\n", path, cheats);
-                return cheats;
+            snprintf(path, size, "%s/%.*s.%s", POKE_LIST_DIR, n, reload_name, upper ? "POK" : "pok");
+            if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_FILE) {
+                return true;
             }
         }
     }
-    return 0;
+    return false;
+}
+
+// Reads the game's .pok (pok_find). Returns the number of cheats.
+static int pok_load_for_last_game() {
+    pok_file.clear();
+    static char path[BROWSE_PATH_MAX];
+    if (!pok_find(path, sizeof(path))) {
+        return 0;
+    }
+    FileHandle f;
+    int cheats = 0;
+    if (f.open(Drive::EXTERNAL_SD_CARD, path, true)) {
+        cheats = pok_file.load(f);
+        f.close();
+    }
+    LOG("%s: %d cheats\n", path, cheats);
+    return cheats;
 }
 
 // ACTION_POKE_LIST: WORD param1 = the first cheat, WORD param2 = where to put the
@@ -5341,8 +5370,8 @@ static void nmi_action_poke_get() {
 // snap_load_buffer: above where a preview puts the game's screen, which is still wanted
 // when going back to the first page. A screen grab is read into GRAB_SCR_OFFSET.
 static const uint32_t INFO_SCREEN_OFFSET = 16384;
-static const uint32_t INFO_DATA_OFFSET = 24576;
-static const uint32_t GRAB_SCR_OFFSET = 32768;
+static const uint32_t INFO_DATA_OFFSET = 23296;             // (instructions up to 8 KB: gameinfo::TEXT_MAX)
+static const uint32_t GRAB_SCR_OFFSET = 34816;
 static const uint32_t PNG_SCRATCH_OFFSET = 73728;       // reading a .png grab (menushot::read_png)
 static_assert(INFO_DATA_OFFSET + sizeof(gameinfo::Info) <= GRAB_SCR_OFFSET, "no room for the game information");
 static_assert(GRAB_SCR_OFFSET + screengrab::SCR_SIZE <= SNAP_LOAD_BUFFER_SIZE, "no room for a screen grab");
@@ -5522,12 +5551,13 @@ struct WebState {
     bool changed;
     bool open;
     bool bt;                            // (the standard build) opened as B - Bluetooth tape
+    bool pok;                           // (the standard build) opened as Z on the menu or the Poke screen
     const char* problem;                // why it can't start (shown instead)
 };
 static const uint32_t WEB_STATE_AT = 6912;
 static const uint32_t WEB_ARENA_AT = 8192;
 // The end of what the radio's screens may use of snap_load_buffer: in the Pico W build its last
-// 16 KB hold the Bluetooth's (and BTstack's) variables (memmap_picomenu_w.ld)
+// 24 KB hold the radios' variables (BTstack's, the ZXDB downloads': memmap_picomenu_w.ld)
 #ifdef PICOMENU_BT_SHARED
 static const uint32_t RADIO_ARENA_END = SNAP_LOAD_BUFFER_SIZE - PICOMENU_BT_SHARED;
 #else
@@ -5535,6 +5565,23 @@ static const uint32_t RADIO_ARENA_END = SNAP_LOAD_BUFFER_SIZE;
 #endif
 static_assert(WEB_STATE_AT + sizeof(WebState) <= WEB_ARENA_AT, "the file transfer's state fits before its arena");
 static WebState& web_state() { return *reinterpret_cast<WebState*>(reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_STATE_AT); }
+
+static bool web_ini_changed = false;      // Picomenu.ini came from the browser
+
+// Picomenu.ini from the browser is used at once, as the Spectrum's own editor's save of it is:
+// the save type and theme now, Browse Games' start from the menu's next opening
+static void web_ini_apply() {
+    if (!web_ini_changed) return;
+    web_ini_changed = false;
+    walk_stop();
+    settings_load();
+    uint8_t* rom = rom_data + 16384;
+    rom[START_SAVETYPE] = cfg.save_type;
+    rom[START_THEME] = cfg.light ? 1 : 0;
+    cfg_stale = true;
+    cfg_folder_due = true;
+    LOG("Picomenu.ini from the browser: used\n");
+}
 
 static void web_event(char what, const char* path) {
     WebState& w = web_state();
@@ -5544,6 +5591,12 @@ static void web_event(char what, const char* path) {
     else w.other++;
     snprintf(w.last, sizeof(w.last), "%s %s", verb, web::base_of(path));
     w.changed = true;
+    // Picomenu.ini sent (Edit on the page, or a file put over it) or renamed to it: used as the
+    // screen closes (web_ini_apply), and read again before it is next used
+    if ((what == 'R' || what == 'N') && strcasecmp(path, settings::FILE_NAME) == 0) {
+        web_ini_changed = true;
+        cfg_stale = true;
+    }
     LOG("Web: %s %s\n", verb, path);
 }
 
@@ -5553,6 +5606,10 @@ static const web::Hooks WEB_HOOKS = { web_card_ok, web_erase, web_rename, web_ev
 // could use that memory, whatever the way the screen was left (the Spectrum reset, say)
 static bool web_on = false;
 static void web_off() {
+#if PICOMENU_NET
+    net::stop();                        // (its connection and TLS memory are lwIP's)
+    zx_live = false;
+#endif
 #ifdef WIFI_ENABLE
     if (web_on) wifi::stop();
 #endif
@@ -5584,7 +5641,7 @@ static void web_read_ini(WebState& w) {
 
 static void web_draw(uint8_t* screen) {
     WebState& w = web_state();
-    slots_banner(screen, "", w.bt ? "Bluetooth tape" : "File transfer (WiFi)");
+    slots_banner(screen, "", w.bt ? "Bluetooth tape" : w.pok ? "ZXDB: Spectrum Computing" : "File transfer (WiFi)");
     char t[48];
     int row = 2;
     auto text = [&](int r, const char* s, uint8_t attr) { help_put_text(screen, r, 1, s, (int) strlen(s), attr); };
@@ -5628,16 +5685,30 @@ static void web_draw(uint8_t* screen) {
             snprintf(t, sizeof(t), "Sent %u  Received %u", (unsigned) w.sent, (unsigned) w.received);
             text(14, t, gameinfo::ATTR_TEXT);
             if (w.last[0] != '\0') text(15, w.last, gameinfo::ATTR_DIM);
+            text(17, "Z-Search ZXDB (Spectrum", gameinfo::ATTR_KEYS);
+            text(18, "  Computing) for a game", gameinfo::ATTR_KEYS);
         }
 #endif
         text(20, "The Spectrum waits here.", gameinfo::ATTR_DIM);
     }
-    text(22, "BREAK-Stop and go back", gameinfo::ATTR_KEYS);
+    text(22, "X-Stop and go back", gameinfo::ATTR_KEYS);
     preview_screen = screen;
 }
 
+#if PICOMENU_NET
+static uint8_t zx_key(uint8_t key);
+static void zx_draw(uint8_t* screen);
+static void zx_begin(const char* game, bool pok = false, bool solo = false);
+static void zx_pok_begin();
+static bool zx_alone_live();
+static bool zx_wifi_up();
+static bool zx_typing();
+#endif
+
 // ACTION_WIFI: BYTE param1 = the key (0: opened; 255: none, has the screen changed?).
-// Status 0 as it is, 1 closed, 2 shown again
+// Status 0 as it is, 1 closed, 2 shown again. Z (once the WiFi is up): ZXDB's search, its own
+// screens until they are left. Opened with 0xFC (Z on the menu) or 0xFD (Z on the Poke
+// screen): ZXDB's screens alone, the WiFi started for them and stopped after (status 1 then)
 __attribute__((noinline)) static void nmi_action_wifi() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t key = nmi_rom_data[2];
@@ -5651,10 +5722,20 @@ __attribute__((noinline)) static void nmi_action_wifi() {
 #endif
     uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
     WebState& w = web_state();
+#if PICOMENU_NET
+    if (key == 0xFD || key == 0xFC) {   // Z on the Poke screen: ZXDB's pokes for the game; Z on the menu: its search
+        if (key == 0xFD) zx_pok_begin();
+        else zx_begin(nullptr, false, true);
+        zx_draw(screen);
+        nmi_rom_data[0] = 2;
+        return;
+    }
+#endif
 #if !PICOMENU_BT
-    if (key == 0xFE) {                  // B - Bluetooth tape: not in this build
+    if (key >= 0xFC && key <= 0xFE) {   // B - Bluetooth tape, Z (the menu, the Poke screen): not in this build
         memset(&w, 0, sizeof(w));
-        w.bt = true;
+        w.bt = key == 0xFE;
+        w.pok = key != 0xFE;
         w.problem = "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it.";
         web_draw(screen);
         nmi_rom_data[0] = 2;
@@ -5662,6 +5743,9 @@ __attribute__((noinline)) static void nmi_action_wifi() {
     }
 #endif
     if (key == 0) {
+#if PICOMENU_NET
+        zx_live = false;
+#endif
         memset(&w, 0, sizeof(w));
         w.open = true;
         walk_stop();
@@ -5674,6 +5758,9 @@ __attribute__((noinline)) static void nmi_action_wifi() {
         } else if (w.wifi.ssid[0] == '\0') {
             w.problem = "Put the WiFi's name and password\nin Picomenu.ini on the SD card:\n\n[WiFi]\nssid = MyNetwork\npassword = secret\n\nand, to ask for one on the page:\nweb_password = another";
         } else {
+#if PICOMENU_NET
+            net::stop();                // (nothing of HTTPS's is left in lwIP as it starts again)
+#endif
             web_on = true;
             const char* why = wifi::start(w.wifi.ssid, w.wifi.password, w.wifi.web_password,
                 reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_ARENA_AT, RADIO_ARENA_END - WEB_ARENA_AT, &WEB_HOOKS);
@@ -5685,9 +5772,37 @@ __attribute__((noinline)) static void nmi_action_wifi() {
         nmi_rom_data[0] = 2;
         return;
     }
+#if PICOMENU_NET
+    if (zx_live) {
+        const bool alone = zx_alone_live();
+        uint8_t r = zx_key(key == 255 ? 0 : key);
+        nmi_rom_data[START_KEYREPEAT] = zx_typing() ? 1 : 0;   // (typing: a held key repeats)
+        if (r == 1 && alone) {
+            nmi_rom_data[0] = 1;            // back to the Poke screen or the menu (the WiFi is off: zx_info_end)
+            return;
+        }
+        if (r == 1) {
+            w.changed = false;
+            web_draw(screen);               // the WiFi screen again
+            nmi_rom_data[0] = 2;
+            return;
+        }
+        if (r == 2) zx_draw(screen);
+        nmi_rom_data[0] = r;
+        return;
+    }
+    if ((key == 'z' || key == 'Z') && zx_wifi_up() && web_card_ok()) {
+        zx_begin(nullptr);
+        zx_draw(screen);
+        nmi_rom_data[START_KEYREPEAT] = 1;  // (typing the search)
+        nmi_rom_data[0] = 2;
+        return;
+    }
+#endif
     if (is_key_break(key) || key == 'x' || key == 'X') {
         web_off();
         w.open = false;
+        web_ini_apply();
         nmi_rom_data[0] = 1;
         return;
     }
@@ -5889,7 +6004,8 @@ static bool grab_folder_make() {
 
 // ---- My notes: <game>.txt in the hidden Game Notes folder (notes.h)
 // The editor and the bytes of a file are kept in snap_load_buffer above the screen grab
-static const uint32_t NOTES_EDITOR_OFFSET = 40960;
+static const uint32_t NOTES_EDITOR_OFFSET = 41984;
+static_assert(GRAB_SCR_OFFSET + screengrab::SCR_SIZE <= NOTES_EDITOR_OFFSET, "the screen grab is below the notes");
 static const uint32_t NOTES_FILE_OFFSET = NOTES_EDITOR_OFFSET + 1024;
 static_assert(sizeof(notes::Editor) <= 1024, "the notes editor does not fit");
 static_assert(NOTES_FILE_OFFSET + notes::FILE_MAX + 2 <= NOTES_EDITOR_OFFSET + 2048, "the notes file does not fit");
@@ -5898,6 +6014,7 @@ static_assert(gameinfo::TAPE_MAX + 2 <= 1024, "the tape summary is made in the n
 // kept in the buffer too (never on the stack: the first save hung the Spectrum that way)
 static const uint32_t NOTES_HANDLE_OFFSET = NOTES_EDITOR_OFFSET + 2048;
 static_assert(NOTES_HANDLE_OFFSET + sizeof(FileHandle) <= 65536, "the notes use the recent games' room");
+static_assert(INFO_DATA_OFFSET >= INFO_SCREEN_OFFSET + 6912, "the information is after its screen");
 #define NOTES_FUNC __attribute__((noinline))
 static FileHandle* notes_handle() {
     return new (snap_load_buffer + NOTES_HANDLE_OFFSET) FileHandle();
@@ -5911,22 +6028,34 @@ static const char NOTES_NO_FOLDER[] = "No Game Notes folder - add one";    // 30
 
 // ---- Details typed in on the Spectrum: <game>.info.txt in the Game Notes folder (gameinfo::Details).
 // M on the game's information opens a small menu (the hub): N the notes, H the software house,
-// Y the year, C the controls, I the instructions, R takes back what was typed in. Each of H Y C I
-// is edited in a box of its own, with a limit, and saved on its own.
+// Y the year, G the genre, S your own score (out of 10), C the controls, I the instructions, R
+// takes back what was typed in. Each of H Y G S C I is edited in a box of its own, with a limit,
+// and saved on its own.
 using DetEditorBig = notes::EditorT<96, 30>;            // the controls and the instructions
-using DetEditorOne = notes::EditorT<1, 30>;             // the software house and the year
-static const uint32_t DETAILS_OFFSET = 49152;           // the Details of the game
-static const uint32_t DET_EDITOR_OFFSET = DETAILS_OFFSET + 3584;
+using DetEditorOne = notes::EditorT<1, 30>;             // the software house, year, genre, score
+static const uint32_t DETAILS_OFFSET = 45056;           // the Details of the game
+static const uint32_t DET_EDITOR_OFFSET = DETAILS_OFFSET + 10240;
 static const uint32_t DET_FILE_OFFSET = DET_EDITOR_OFFSET + 3584;
-static const size_t DET_FILE_MAX = 3072;
-static_assert(sizeof(gameinfo::Details) <= 3584, "the details do not fit");
+static const size_t DET_FILE_MAX = 9216;
+static_assert(sizeof(gameinfo::Details) <= 10240, "the details do not fit");
 static_assert(sizeof(DetEditorBig) <= 3584, "the details editor does not fit");
 static_assert(NOTES_HANDLE_OFFSET + sizeof(FileHandle) <= DETAILS_OFFSET, "the details would cover the notes' file handle");
-static_assert(DET_FILE_OFFSET + DET_FILE_MAX <= 65536, "the details use the recent games' room");
+// (past 65536 is the recent games' list, read again each time it is used, and the .png
+// grab's working space, used only while the information is being loaded)
+static_assert(DET_FILE_OFFSET + DET_FILE_MAX <= PNG_SCRATCH_OFFSET, "the details' file fits");
 static_assert(gameinfo::TEXT_MAX + gameinfo::CONTROLS_MAX + 200 <= DET_FILE_MAX, "a details file does not fit its buffer");
 enum EditKind : uint8_t { EK_HUB, EK_NOTES, EK_FIELD };
+#if PICOMENU_NET
+static bool zx_due = false;                             // Z in the M menu: look the game up in ZXDB
+#endif
 static uint8_t edit_kind = EK_HUB;                      // which screen is up while notes_editing
-static char det_field = 0;                              // h y c or i, while EK_FIELD
+static char det_field = 0;                              // h y g s c or i, while EK_FIELD
+// The one-line fields (H Y G S): which of the details' parts (gameinfo::META_HOUSE ...), or -1
+static int det_meta(char field) {
+    static const char ONE[] = "hygs";
+    const char* p = field != 0 ? strchr(ONE, field) : nullptr;
+    return p != nullptr ? (int) (p - ONE) : -1;
+}
 static bool det_saved = false;                          // something was saved: show the first page after
 static bool det_have = false;                           // the game has a details file
 static bool det_confirm = false;                        // R was pressed: Y takes the details back
@@ -6061,21 +6190,20 @@ NOTES_FUNC static bool det_write(const char* game, const gameinfo::Details* d) {
 // ---- the details menu
 // The text of a field to edit as it is now (what the screen shows, from the information)
 NOTES_FUNC static const char* det_current(const gameinfo::Info* info, char field) {
-    switch (field) {
-        case 'h': return info->house;
-        case 'y': return info->year;
-        case 'c': return info->controls;
-        default: return info->text;
-    }
+    int f = det_meta(field);
+    if (f >= 0) return info->meta(f);
+    return field == 'c' ? info->controls : info->text;
 }
 
 // Starts the box for a field. False (with a message) if what is there does not fit it.
 NOTES_FUNC static bool det_open_field(const gameinfo::Info* info, char field) {
     const char* cur = det_current(info, field);
     char* file = det_file();
-    if (field == 'h' || field == 'y') {
+    int f = det_meta(field);
+    if (f >= 0) {
         DetEditorOne* one = new (snap_load_buffer + DET_EDITOR_OFFSET) DetEditorOne();
-        one->set_limit(field == 'y' ? gameinfo::YEAR_MAX + 2 : 0);
+        // (the house and genre: the box's 30)
+        one->set_limit(f == gameinfo::META_YEAR || f == gameinfo::META_SCORE ? gameinfo::META_MAX[f] + 2 : 0);
         if (!one->load(cur, strlen(cur))) {
             notes_message = "Too long to edit here";
             return false;
@@ -6109,22 +6237,25 @@ NOTES_FUNC static bool det_save_field(const char* game, char field, gameinfo::In
     gameinfo::Details* d = det_data();
     det_read(game, d);
     char* file = det_file();
-    size_t n;
-    if (field == 'h' || field == 'y') {
+    int f = det_meta(field);
+    if (f >= 0) {
         DetEditorOne* one = reinterpret_cast<DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET);
-        n = one->text(file, DET_FILE_MAX);
+        size_t n = one->text(file, DET_FILE_MAX);
         if (n > 0 && file[n - 1] == '\n') {
             file[--n] = '\0';
         }
+        // (0 to 10)
+        const bool digits = file[0] >= '0' && file[0] <= '9' && (n == 1 || (file[1] >= '0' && file[1] <= '9'));
+        if (f == gameinfo::META_SCORE && n > 0 && !(digits && (n == 1 || (file[0] == '1' && file[1] == '0')))) {
+            notes_message = "The score is a number, 0 to 10";
+            return false;
+        }
+        d->set_meta(f, file);
     } else {
         DetEditorBig* big = reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET);
-        n = big->text(file, DET_FILE_MAX);
-    }
-    switch (field) {
-        case 'h': d->set_house(file); break;
-        case 'y': d->set_year(file); break;
-        case 'c': d->set_controls(file); break;
-        default: d->set_text(file); break;
+        big->text(file, DET_FILE_MAX);
+        if (field == 'c') d->set_controls(file);
+        else d->set_text(file);
     }
     if (!det_write(game, d)) {
         return false;
@@ -6144,23 +6275,32 @@ NOTES_FUNC static void det_hub_draw(uint8_t* screen, const gameinfo::Info* info,
         help_put_text(screen, row, col, s, (int) strlen(s) > 30 - col + 1 ? 30 - col + 1 : (int) strlen(s), attr);
     };
     char s[40];
-    put(2, 1, "H-Software house", gameinfo::ATTR_HEADING);
-    put(3, 3, info->house[0] != '\0' ? info->house : "(none)", info->house[0] != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
-    put(4, 1, "Y-Year", gameinfo::ATTR_HEADING);
-    put(5, 3, info->year[0] != '\0' ? info->year : "(none)", info->year[0] != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
-    snprintf(s, sizeof(s), "C-Controls  %u/%u", (unsigned) info->ncontrols, (unsigned) gameinfo::CONTROLS_MAX);
-    put(6, 1, s, gameinfo::ATTR_HEADING);
-    snprintf(s, sizeof(s), "I-Instructions  %u/%u", (unsigned) info->ntext, (unsigned) gameinfo::TEXT_MAX);
-    put(7, 1, s, gameinfo::ATTR_HEADING);
-    put(8, 1, info->nnotes > 0 ? "N-My notes  (there are notes)" : "N-My notes  (none yet)", gameinfo::ATTR_HEADING);
-    if (det_have) {
-        put(10, 1, "R-Take back what you typed in", gameinfo::ATTR_HEADING);
+    // H Y G S: the key and what there is (the software house on a line of its own)
+    static const char* const ONE[] = { "H-Software house", "Y-Year", "G-Genre", "S-My score" };
+    static const uint8_t ROW[] = { 2, 4, 5, 6 };
+    for (int f = 0; f < gameinfo::META_COUNT; f++) {
+        put(ROW[f], 1, ONE[f], gameinfo::ATTR_HEADING);
+        const char* v = info->meta(f);
+        if (f == gameinfo::META_SCORE && *v != '\0') snprintf(s, sizeof(s), "%s/10", v);
+        else snprintf(s, sizeof(s), "%s", *v != '\0' ? v : "(none)");
+        put(f == 0 ? 3 : ROW[f], f == 0 ? 3 : 12, s, *v != '\0' ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
     }
-    put(12, 1, "What you type in is kept in", gameinfo::ATTR_DIM);
-    put(13, 1, "the Game Notes folder as", gameinfo::ATTR_DIM);
-    put(14, 1, "<game>.info.txt and is shown", gameinfo::ATTR_DIM);
-    put(15, 1, "instead of the same part of", gameinfo::ATTR_DIM);
-    put(16, 1, "the Instructions file.", gameinfo::ATTR_DIM);
+    snprintf(s, sizeof(s), "C-Controls  %u/%u", (unsigned) info->ncontrols, (unsigned) gameinfo::CONTROLS_MAX);
+    put(7, 1, s, gameinfo::ATTR_HEADING);
+    snprintf(s, sizeof(s), "I-Instructions  %u/%u", (unsigned) info->ntext, (unsigned) gameinfo::TEXT_MAX);
+    put(8, 1, s, gameinfo::ATTR_HEADING);
+    put(9, 1, info->nnotes > 0 ? "N-My notes  (there are notes)" : "N-My notes  (none yet)", gameinfo::ATTR_HEADING);
+    if (det_have) {
+        put(11, 1, "R-Take back what you typed in", gameinfo::ATTR_HEADING);
+    }
+    put(13, 1, "What you type in is kept in", gameinfo::ATTR_DIM);
+    put(14, 1, "the Game Notes folder as", gameinfo::ATTR_DIM);
+    put(15, 1, "<game>.info.txt and is shown", gameinfo::ATTR_DIM);
+    put(16, 1, "instead of the same part of", gameinfo::ATTR_DIM);
+    put(17, 1, "the Instructions file.", gameinfo::ATTR_DIM);
+#if PICOMENU_NET
+    put(19, 1, "Z-Look it up in ZXDB", gameinfo::ATTR_HEADING);
+#endif
     const char* keys = "X-Back";
     if (det_confirm) {
         keys = "Take back all? Y-Yes N-No";
@@ -6175,22 +6315,24 @@ NOTES_FUNC static const char* det_field_name(char field) {
     switch (field) {
         case 'h': return "Software house";
         case 'y': return "Year";
+        case 'g': return "Genre";
+        case 's': return "My score";
         case 'c': return "Controls";
         default: return "Instructions";
     }
 }
 
 template <class E>
-NOTES_FUNC static void det_field_draw_lines(uint8_t* screen, const E& ed) {
+NOTES_FUNC static void det_field_draw_lines(uint8_t* screen, const E& ed, bool count = true) {
     for (int i = 0; i < E::VIEW && ed.top() + i < ed.line_count(); i++) {
         const char* l = ed.line(ed.top() + i);
         help_put_text(screen, 2 + i, 1, l, (int) strlen(l), gameinfo::ATTR_TEXT);
     }
     screen[6144 + (2 + ed.row() - ed.top()) * 32 + 1 + ed.col()] = ui_attr(0xC7);       // bright white, flashing
-    char count[32];
-    if (ed.limit() > 0) {
-        snprintf(count, sizeof(count), "%u of %u letters", (unsigned) ed.used(), (unsigned) ed.limit());
-        help_put_text(screen, 1, 1, count, (int) strlen(count), gameinfo::ATTR_DIM);
+    char letters[32];
+    if (ed.limit() > 0 && count) {
+        snprintf(letters, sizeof(letters), "%u of %u letters", (unsigned) ed.used(), (unsigned) ed.limit());
+        help_put_text(screen, 1, 1, letters, (int) strlen(letters), gameinfo::ATTR_DIM);
     }
     const char* keys = ed.prompting() ? "Y-Save  N-Discard  other-Back" : "BREAK-Finish";
     if (notes_message != nullptr) {
@@ -6206,9 +6348,10 @@ NOTES_FUNC static void det_field_draw(uint8_t* screen, const char* game) {
     char title[48];
     snprintf(title, sizeof(title), "%s: %s", det_field_name(det_field), game);
     help_put_text(screen, 0, 1, title, (int) strlen(title) > 30 ? 30 : (int) strlen(title), gameinfo::ATTR_BANNER);
-    if (det_field == 'h' || det_field == 'y') {
-        det_field_draw_lines(screen, *reinterpret_cast<const DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET));
-        const char* hint = det_field == 'y' ? "The year, up to 8 letters" : "The name, up to 30 letters";
+    if (det_meta(det_field) >= 0) {
+        det_field_draw_lines(screen, *reinterpret_cast<const DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET), det_field != 's');
+        const char* hint = det_field == 'y' ? "The year, up to 8 letters" : det_field == 's' ? "Your score, a number 0 to 10" :
+            det_field == 'g' ? "The genre, up to 30 letters" : "The name, up to 30 letters";
         help_put_text(screen, 4, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
         help_put_text(screen, 6, 1, "ENTER finishes. DELETE deletes.", 31, gameinfo::ATTR_DIM);
         help_put_text(screen, 7, 1, "Leave it empty to show nothing.", 31, gameinfo::ATTR_DIM);
@@ -6306,7 +6449,8 @@ NOTES_FUNC static bool notes_step(int op, const char* name, uint8_t key) {
             case 'n': case 'N':
                 notes_open(name, file, editor);
                 break;
-            case 'h': case 'H': case 'y': case 'Y': case 'c': case 'C': case 'i': case 'I': {
+            case 'h': case 'H': case 'y': case 'Y': case 'g': case 'G': case 's': case 'S':
+            case 'c': case 'C': case 'i': case 'I': {
                 char f = (char) (key | 0x20);
                 if (info_loaded && det_open_field(info, f)) {
                     det_field = f;
@@ -6319,6 +6463,11 @@ NOTES_FUNC static bool notes_step(int op, const char* name, uint8_t key) {
                     det_confirm = true;
                 }
                 break;
+#if PICOMENU_NET
+            case 'z': case 'Z':
+                zx_due = true;                      // (nmi_action_game_info starts it)
+                break;
+#endif
             case 'x': case 'X': case notes::KEY_BREAK: case notes::KEY_EDIT:
                 notes_editing = false;              // back to the information
                 info_loaded = false;
@@ -6332,7 +6481,7 @@ NOTES_FUNC static bool notes_step(int op, const char* name, uint8_t key) {
         return false;
     }
     if (edit_kind == EK_FIELD) {
-        bool one = det_field == 'h' || det_field == 'y';
+        bool one = det_meta(det_field) >= 0;
         // the two editors' results are the same three numbers (CONTINUE, SAVE, DISCARD)
         int r = one ? (int) reinterpret_cast<DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET)->key(key)
                     : (int) reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET)->key(key);
@@ -6415,6 +6564,63 @@ NOTES_FUNC static void info_load(gameinfo::Info* info, const char* name, int mod
     }
 }
 
+// A software house or genre too long for its place on the first page: the ROM scrolls it there
+// (both: one, then the other). Its tables (startmenu.infoscroll, infoscroll2) are filled here;
+// the scrolling starts afresh when they change or the ROM was scrolling something else.
+static const uint32_t INFO_GENRE_TEXT = 48;            // in INFO_HOUSE, after the house
+// The ROM's scrolling from the start of the first table, if it was scrolling something else (the
+// menu's Reload line) or afresh is asked for
+static void info_scroll_start(bool afresh) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    const uint16_t cur = (uint16_t) (nmi_rom_data[INFO_SCROLL_CUR] | (nmi_rom_data[INFO_SCROLL_CUR + 1] << 8));
+    if (!afresh && (cur == INFO_SCROLL1 || cur == INFO_SCROLL2)) return;
+    nmi_rom_data[INFO_SCROLL_CUR] = (uint8_t) INFO_SCROLL1;
+    nmi_rom_data[INFO_SCROLL_CUR + 1] = (uint8_t) (INFO_SCROLL1 >> 8);
+    nmi_rom_data[INFO_SCROLL_POS] = 0;
+    nmi_rom_data[INFO_SCROLL_TIMER] = (uint8_t) INFO_SCROLL_HOLD;
+    nmi_rom_data[INFO_SCROLL_TIMER + 1] = (uint8_t) (INFO_SCROLL_HOLD >> 8);
+}
+NOTES_FUNC static void info_scroll_set(const gameinfo::Info* info, int page) {
+    static_assert(INFO_HOUSE_WIDTH == gameinfo::CTRL_WIDTH, "the ROM scrolls the software house in its column");
+    static_assert(gameinfo::HOUSE_MAX < INFO_GENRE_TEXT && INFO_GENRE_TEXT + gameinfo::GENRE_MAX < INFO_HOUSE_SIZE,
+                  "INFO_HOUSE holds the whole house and genre");
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    char* text = reinterpret_cast<char*>(nmi_rom_data) + INFO_HOUSE;
+    const bool first = page == 0 && info->any();
+    const bool house = first && strlen(info->house) > (size_t) INFO_HOUSE_WIDTH;
+    if (house) snprintf(text, INFO_GENRE_TEXT, "%s", info->house);
+    bool genre = false;
+    if (first) {
+        gameinfo::genre_shown(info->genre, text + INFO_GENRE_TEXT, gameinfo::GENRE_MAX + 1);
+        genre = strlen(text + INFO_GENRE_TEXT) > (size_t) INFO_HOUSE_WIDTH;
+    }
+    // the tables: the text, the width, the place (column, row), the colours (0: the pico's), the next
+    uint8_t t[2][8];
+    auto table = [&](uint8_t* p, uint16_t src, int row, uint16_t next) {
+        p[0] = (uint8_t) src; p[1] = (uint8_t) (src >> 8);
+        p[2] = INFO_HOUSE_WIDTH;
+        p[3] = INFO_HOUSE_COL; p[4] = (uint8_t) row;
+        p[5] = 0;
+        p[6] = (uint8_t) next; p[7] = (uint8_t) (next >> 8);
+    };
+    const uint16_t gsrc = (uint16_t) (INFO_HOUSE + INFO_GENRE_TEXT);
+    const int grow = gameinfo::genre_row(*info);
+    if (house && genre) {
+        table(t[0], INFO_HOUSE, INFO_HOUSE_ROW, INFO_SCROLL2);
+        table(t[1], gsrc, grow, INFO_SCROLL1);
+    } else if (genre) {
+        table(t[0], gsrc, grow, 0);
+        table(t[1], gsrc, grow, 0);
+    } else {
+        table(t[0], INFO_HOUSE, INFO_HOUSE_ROW, 0);         // (the house, or "": nothing scrolls)
+        table(t[1], INFO_HOUSE, INFO_HOUSE_ROW, 0);
+    }
+    const bool same = memcmp(nmi_rom_data + INFO_SCROLL1, t[0], 8) == 0 && memcmp(nmi_rom_data + INFO_SCROLL2, t[1], 8) == 0;
+    memcpy(nmi_rom_data + INFO_SCROLL1, t[0], 8);
+    memcpy(nmi_rom_data + INFO_SCROLL2, t[1], 8);
+    info_scroll_start(!same);
+}
+
 // Shows the game information (the editor's screen while the notes are edited). `ended`: the
 // notes editor has just finished, so go to the last page, where the notes are.
 NOTES_FUNC static void nmi_game_info_show(bool ended) {
@@ -6451,6 +6657,13 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
             }
         }
         preview_screen = edit_screen;
+        // typing in the notes or a box: a held key repeats (the ROM's keywait)
+        bool typing = false;
+        if (edit_kind == EK_NOTES) typing = notes_edit && !editor->prompting();
+        else if (edit_kind == EK_FIELD) typing = det_meta(det_field) >= 0 ?
+            !reinterpret_cast<DetEditorOne*>(snap_load_buffer + DET_EDITOR_OFFSET)->prompting() :
+            !reinterpret_cast<DetEditorBig*>(snap_load_buffer + DET_EDITOR_OFFSET)->prompting();
+        nmi_rom_data[START_KEYREPEAT] = typing ? 1 : 0;
         nmi_rom_data[1] = 3;
         nmi_rom_data[0] = 1;
         return;
@@ -6467,7 +6680,26 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     info_loaded = true;
     int pages = gameinfo::page_count(*info);
-    if (page >= pages) page = pages - 1;
+    // The ROM counts pages in four bits (15 at most). With more (long instructions), the page the
+    // ROM has is only which way it went: the Pico keeps the real one, and tells the ROM it is on
+    // its first page (the real first), its last (the real last) or one in the middle, so N and P
+    // go on (and round) as they would
+    static int real_page = 0;
+    static int view_page = 0;
+    if (pages > 15) {
+        const int asked = page;
+        if (ended || asked == 255) real_page = pages - 1;
+        else if (fresh && asked == 0) real_page = 0;            // (a new visit, or round from the last)
+        else if (asked == view_page) { /* the same page (a picture, a question) */ }
+        else if (asked == (view_page + 1) % 15) real_page = (real_page + 1) % pages;
+        else if (asked == (view_page + 14) % 15) real_page = (real_page + pages - 1) % pages;
+        else real_page = 0;
+        if (real_page >= pages) real_page = pages - 1;
+        view_page = real_page == 0 ? 0 : real_page == pages - 1 ? 14 : 7;
+        page = real_page;
+    } else if (page >= pages) {
+        page = pages - 1;
+    }
     // the pictures: the file's own (From File) and the grabs, in the order file's order. With
     // none, I on the menu shows the game's screen as it was when the NMI button was pressed.
     int pictures = grab_count;
@@ -6581,16 +6813,11 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     }
     int keylen = (int) strlen(keys);
     help_put_text(screen, 23, keylen >= 32 ? 0 : 1, keys, keylen, gameinfo::ATTR_KEYS);
-    // a software house too long for its place on the first page: the ROM scrolls it there
-    static_assert(INFO_HOUSE_WIDTH == gameinfo::CTRL_WIDTH, "the ROM scrolls the software house in its column");
-    static_assert(gameinfo::HOUSE_MAX < INFO_HOUSE_SIZE, "INFO_HOUSE holds the whole name");
-    if (page == 0 && info->any() && strlen(info->house) > (size_t) INFO_HOUSE_WIDTH) {
-        snprintf(reinterpret_cast<char*>(nmi_rom_data) + INFO_HOUSE, INFO_HOUSE_SIZE, "%s", info->house);
-    }
+    info_scroll_set(info, page);
     preview_screen = screen;
     nmi_rom_data[1] = asking ? 1 : 0;       // the ROM then waits for Y or N
-    nmi_rom_data[3] = (uint8_t) page;       // the page as it was kept to the pages there are
-    nmi_rom_data[0] = (uint8_t) (pages | ((pictures > 15 ? 15 : pictures) << 4));
+    nmi_rom_data[3] = (uint8_t) (pages > 15 ? view_page : page);    // the page as it was kept to the pages there are
+    nmi_rom_data[0] = (uint8_t) ((pages > 15 ? 15 : pages) | ((pictures > 15 ? 15 : pictures) << 4));
 }
 
 // ---- C on the NMI menu: set up the SD card (sdsetup.h). The ROM shows it as the game
@@ -6702,7 +6929,7 @@ NOTES_FUNC static void sd_setup_draw(uint8_t* screen, int state, bool card) {
     auto line = [&](int row, const char* text, uint8_t attr = gameinfo::ATTR_TEXT) {
         help_put_text(screen, row, 1, text, (int) strlen(text), attr);
     };
-    const char* keys = "X-Exit";
+    const char* keys = "X-Back";
     if (!card) {
         line(2, "No SD card found.");
         line(4, "Put the card in, then try");
@@ -6741,7 +6968,7 @@ NOTES_FUNC static void sd_setup_draw(uint8_t* screen, int state, bool card) {
         line(16, "An example Instructions.txt and");
         line(17, "Picomenu.ini (the settings)");
         line(18, "are added if there are none.");
-        keys = state == 1 ? "Set up this card?  Y-Yes  N-No" : "D-Set up  X-Exit";
+        keys = state == 1 ? "Set up this card?  Y-Yes  N-No" : "D-Set up  X-Back";
     }
     help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
 }
@@ -6787,6 +7014,1060 @@ NOTES_FUNC static void nmi_sd_setup(int op) {
     nmi_rom_data[0] = 1;                        // one page, no pictures
 }
 
+#if PICOMENU_NET
+// ---- Z: ZXDB, the database of Spectrum software Spectrum Computing keeps, through the ZXInfo
+// API (zxdb.h; HTTPS: net.h) ----
+// From the WiFi screen (F in Tools), once the WiFi is up: a title typed in is searched for, a
+// title picked shows its details and its tape and snapshot files, and one of those (only for a
+// title ZXDB calls "Available") is downloaded to /Downloads on the SD card and unzipped. L gets
+// the title's loading screen, saved as a screen grab ("<game> Loading Screen.scr", as the
+// others are). From the game information's M menu, Z looks the game up: its software house and
+// year go in its details, and (only if L is pressed) its loading screen is saved for it. From
+// the Poke screen (P), Z looks the game last loaded up for its pokes: the title's .pok is saved
+// as Poke List/<game>.pok, the name the Poke list looks for (never over one that is there).
+// Nothing is fetched unless a key asks for it; each request names PicoMenu (netget::USER_AGENT).
+// The state is in snap_load_buffer after the tape labels (the WiFi has the part before them);
+// a loading screen comes into the screen at its start (it is then shown as it is).
+
+enum ZxMode : uint8_t { ZX_TYPE, ZX_JOIN, ZX_ASK, ZX_RESULTS, ZX_ENTRY, ZX_UNZIP, ZX_PICTURE, ZX_PICKED, ZX_NOTE, ZX_FINISH };
+enum ZxWant : uint8_t { ZW_SEARCH, ZW_ENTRY, ZW_FILE, ZW_SCREEN, ZW_TEXT };
+
+struct ZxState {
+    zxdb::Flat flat;
+    zxdb::Search search;
+    zxdb::Entry entry;
+    unzip::Member member;
+    FileHandle file, out;
+    char url[netget::URL_MAX];
+    char path[96];                          // the file being written (removed if it fails)
+    char typed[32];
+    char name[48];                          // the file being downloaded, for the screen
+    char said[48];                          // what was done ("Saved /Downloads/GreenBeret.tzx")
+    char game[gameinfo::GAME_MAX + 1];      // the information's game (Z in its M menu)
+    char base[screengrab::NAME_MAX + 1];    // its name for its screen grabs
+    char house[gameinfo::HOUSE_MAX + 1];
+    char year[gameinfo::YEAR_MAX + 1];
+    char genre[gameinfo::GENRE_MAX + 1];
+    const char* msg;
+    uint32_t got;                           // the loading screen's bytes so far
+    uint32_t shown_kb;
+    uint32_t shown_step;                    // the stage and seconds shown while asking
+    char detail[64];                        // how far a request that failed got (net::detail)
+    char io[64];                            // and what its connection did after the request (net::io)
+    uint16_t page;
+    uint8_t mode, back, want, shown_state;
+    int8_t hit;
+    bool wifi_asked;                        // (the lookups: the WiFi started, at a poll after the first)
+    uint32_t join_ms, up_ms;                // when the lookup began, when the WiFi was up (0: not yet)
+    bool info;                              // the information's lookup
+    bool pok;                               // Z on the Poke screen: the game's .pok
+    bool solo;                              // Z on the menu: the search, with the WiFi started for it
+    uint8_t asking;                         // 1-8 or L pressed on a title: "Match search selection?" asked (the key)
+    bool match;                             // Y to it: the file or screen named after the title picked
+    bool file_open, zipped;
+    // the information's lookup: what S fetches besides the house and year (I, L), and what came
+    bool get_text, get_scr, text_done, scr_done, text_got, scr_saved;
+};
+static const uint32_t ZX_STATE_AT = 94208;      // after the tape labels (static_assert there)
+// The WiFi's work (lwIP, the TLS handshake in its callbacks, the file transfer) runs on a stack of
+// its own while the WiFi is on: core 0's is 2 KB (4 KB before it reaches core 1's), and a TLS
+// handshake checking an ECDSA signature inside lwIP's packet handling needs more
+static const uint32_t NET_STACK_SIZE = 5632;     // (the deepest seen: about 3.5 KB)
+static const uint32_t NET_STACK_AT = RADIO_ARENA_END - NET_STACK_SIZE;
+static_assert(ZX_STATE_AT + sizeof(ZxState) <= NET_STACK_AT, "ZXDB's state fits before the WiFi's stack");
+static_assert(NET_STACK_AT % 8 == 0, "the WiFi's stack is aligned");
+static const char ZX_FOLDER[] = "/Downloads";
+static const char ZX_ZIP[] = "/Downloads/~zxdb.zip";    // the download, until it is unzipped
+static const char ZX_TEXT[] = "/Game Notes/~zxdb.txt";  // a game's instructions, until they go in its details
+static const uint32_t ZX_TEXT_MAX = 9215;               // (DET_FILE_MAX: the rest is not kept)
+static const uint32_t ZX_FILE_MAX = 2u << 20;           // (a tape or snapshot is far smaller)
+
+static ZxState& zx() { return *reinterpret_cast<ZxState*>(snap_load_buffer + ZX_STATE_AT); }
+static uint32_t now_ms_zx() { return to_ms_since_boot(get_absolute_time()); }
+#ifdef WIFI_ENABLE
+static const uint32_t ZX_START_MS = 300, ZX_SETTLE_MS = 1000;   // the WiFi started, the search after it is up
+#else
+static const uint32_t ZX_START_MS = 0, ZX_SETTLE_MS = 0;        // (the simulator's pretend network: at once)
+#endif
+static bool zx_typing() { return zx_live && zx().mode == ZX_TYPE; }
+static bool zx_alone_live() { return zx_live && (zx().pok || zx().solo); }
+
+#ifdef WIFI_ENABLE
+// While a ZXDB screen is up: the main loop going round is fed to the hang watch (bt.h; a hang
+// there is kept as "Hang PC ..." for the B screen; not the watchdog, whose 8 s is less than a
+// TLS handshake's sums can take in one go), and the steps are noted
+// for the crash recorder's "Last:" line: 0x50 the lookup began, 0x51 the WiFi started, 0x52 up,
+// 0x53-0x57 a request (search, entry, file, screen, text), 0x58 + its stage (DNS, TCP, TLS,
+// waiting, getting)
+static void zx_watch() {
+    static bool watching = false;
+    static uint8_t noted = 0xFF;
+    if (zx_live != watching) {
+        watching = zx_live;
+        bt::hang_watch(watching);
+    }
+    if (!watching) return;
+    bt::hang_feed();
+    uint8_t stage = net::state() == net::BUSY ? (uint8_t) net::stage() : 0xFF;
+    if (stage != noted) {
+        noted = stage;
+        if (stage != 0xFF) bt::note((uint8_t) (0x58 + stage));
+    }
+}
+
+static void net_work() {
+    wifi::poll();
+    net::poll();
+}
+
+// fn run with the stack pointer at the top of the WiFi's stack (in snap_load_buffer, lent to the
+// WiFi while it is on), and back. r4 keeps the old one (the callee saves it).
+static void on_net_stack(void (*fn)()) {
+    uint8_t* top = reinterpret_cast<uint8_t*>(snap_load_buffer) + NET_STACK_AT + NET_STACK_SIZE;
+    asm volatile(
+        "mov r4, sp\n"
+        "mov sp, %[top]\n"
+        "blx %[fn]\n"
+        "mov sp, r4\n"
+        :
+        : [top] "l" (top), [fn] "l" (fn)
+        : "r0", "r1", "r2", "r3", "r4", "r12", "lr", "memory", "cc");
+}
+#endif
+
+// The WiFi, for the information's lookup (the WiFi screen has it on already). Null, or why not
+static const char* zx_wifi_start() {
+    if (!web_card_ok()) return "There is no SD card (or the PC\nhas it as a USB drive).";
+#ifdef WIFI_ENABLE
+    if (web_on && wifi::state() != wifi::FAILED) return nullptr;
+#if PICOMENU_BT
+    bt_off();                               // one radio at a time
+#endif
+    WebState& w = web_state();
+    memset(&w, 0, sizeof(w));
+    web_read_ini(w);
+    if (w.wifi.ssid[0] == '\0') {
+        return "Put the WiFi's name and password\nin Picomenu.ini on the SD card:\n\n[WiFi]\nssid = MyNetwork\npassword = secret";
+    }
+    net::stop();                            // (nothing of lwIP's is kept as it starts again)
+    walk_stop();                            // (as F does: no folder of the card left open)
+    web_on = true;
+    bt::note(0x51);
+    const char* why = wifi::start(w.wifi.ssid, w.wifi.password, w.wifi.web_password,
+        reinterpret_cast<uint8_t*>(snap_load_buffer) + WEB_ARENA_AT, RADIO_ARENA_END - WEB_ARENA_AT, &WEB_HOOKS);
+    return why;
+#else
+    return nullptr;                         // (the simulator's pretend network is always there)
+#endif
+}
+
+static bool zx_wifi_up() {
+#ifdef WIFI_ENABLE
+    return web_on && wifi::state() == wifi::UP;
+#else
+    return true;
+#endif
+}
+
+// Memory for unzipping: lwIP's heap (the TLS memory has been let go: net::stop)
+static void* zx_alloc(size_t n) { return net::alloc(n); }
+static void zx_free(void* p) { if (p != nullptr) net::release(p); }
+
+// The file being written is let go (and removed: it is not finished)
+static void zx_file_drop() {
+    ZxState& z = zx();
+    if (!z.file_open) return;
+    z.file.close();
+    fsops::remove_path(Drive::EXTERNAL_SD_CARD, z.path);
+    z.file_open = false;
+}
+
+// The answer's body, as it comes (from lwIP's callbacks)
+static bool zx_body(const uint8_t* p, size_t n, void*) {
+    ZxState& z = zx();
+    switch (z.want) {
+        case ZW_SEARCH:
+        case ZW_ENTRY:
+            z.flat.feed(p, n);
+            return true;
+        case ZW_FILE:
+            if (net::received() > ZX_FILE_MAX) return false;
+            return z.file.write(p, n) == (int) n;
+        case ZW_TEXT: {
+            // the start of the instructions (only that much fits the details); the rest let go
+            if (z.got >= ZX_TEXT_MAX) return true;
+            size_t take = n < ZX_TEXT_MAX - z.got ? n : (size_t) (ZX_TEXT_MAX - z.got);
+            z.got += (uint32_t) take;
+            return z.file.write(p, take) == (int) take;
+        }
+        default:
+            if (z.got + n > screengrab::SCR_SIZE) return false;    // not a .scr
+            memcpy(snap_load_buffer + z.got, p, n);                // (the screen)
+            z.got += (uint32_t) n;
+            return true;
+    }
+}
+
+// Asks for z.url; back is where to go if it fails or is stopped
+__attribute__((noinline)) static void zx_ask(ZxWant want, uint8_t back) {
+    ZxState& z = zx();
+    z.want = want;
+    z.back = back;
+    z.msg = nullptr;
+    z.detail[0] = '\0';
+    z.shown_kb = 0;
+    z.shown_step = 0;
+    if (want == ZW_SEARCH) z.flat.begin(&z.search, z.pok);
+    else if (want == ZW_ENTRY) z.flat.begin(&z.entry);
+    else if (want == ZW_SCREEN || want == ZW_TEXT) z.got = 0;
+    LOG("ZXDB: %s\n", z.url);
+#ifdef WIFI_ENABLE
+    bt::note((uint8_t) (0x53 + (want < 4 ? want : 4)));    // (0x53 search, 0x54 entry, 0x55 file, 0x56 screen, 0x57 text)
+#endif
+    const char* why = net::get(z.url, zx_body, nullptr);
+    if (why != nullptr) {
+        zx_file_drop();
+        z.msg = why;
+        snprintf(z.detail, sizeof(z.detail), "%s", net::detail());
+        z.io[0] = '\0';
+        z.mode = back;
+        return;
+    }
+    z.mode = ZX_ASK;
+}
+
+__attribute__((noinline)) static void zx_search(uint16_t page, uint8_t back) {
+    ZxState& z = zx();
+    if (!zxdb::search_url(z.typed, page, z.url, sizeof(z.url))) {
+        z.msg = "Too long to search for";
+        z.mode = back;
+        return;
+    }
+    z.page = page;
+    zx_ask(ZW_SEARCH, back);
+}
+
+// "Name (2).tzx" if "Name.tzx" is there already (to 9)
+static bool zx_free_path(const char* name, char* out, size_t size) {
+    snprintf(out, size, "%s/%s", ZX_FOLDER, name);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, out) == fsops::KIND_NONE) return true;
+    const char* dot = strrchr(name, '.');
+    int stem = dot != nullptr ? (int) (dot - name) : (int) strlen(name);
+    for (int i = 2; i <= 9; i++) {
+        snprintf(out, size, "%s/%.*s (%d)%s", ZX_FOLDER, stem, name, i, dot != nullptr ? dot : "");
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, out) == fsops::KIND_NONE) return true;
+    }
+    return false;
+}
+
+// The title picked in the search as a file's name (Y to "Match search selection?"): "Bomb Jack".
+// Letters FAT does not allow, and ? (a letter the Spectrum can't show) are left out; blanks are
+// not doubled; at most 40 letters. False if nothing is left.
+static bool zx_match_name(char* out, size_t size) {
+    ZxState& z = zx();
+    const char* t = z.search.hits[z.hit].title;
+    size_t k = 0;
+    for (; *t != '\0' && k + 1 < size && k < 40; t++) {
+        unsigned char c = (unsigned char) *t;
+        if (c < 32 || c > 126 || strchr("\\/:*?\"<>|", c) != nullptr) continue;
+        if (c == ' ' && (k == 0 || out[k - 1] == ' ')) continue;
+        out[k++] = (char) c;
+    }
+    while (k > 0 && (out[k - 1] == ' ' || out[k - 1] == '.')) k--;
+    out[k] = '\0';
+    return k > 0;
+}
+
+// A file's name, as it is (name), or after the title picked (z.match): "Bomb Jack.tap" for
+// "BOMBJAC1.TAP" (its extension, small letters)
+static void zx_file_name(const char* name, char* out, size_t size) {
+    char m[44];
+    const char* dot = strrchr(name, '.');
+    if (zx().match && dot != nullptr && zx_match_name(m, sizeof(m))) {
+        int n = snprintf(out, size, "%s%s", m, dot);
+        for (char* c = out + (n > 0 ? (int) strlen(m) : 0); *c != '\0'; c++) {
+            if (*c >= 'A' && *c <= 'Z') *c = (char) (*c + 32);
+        }
+    } else {
+        snprintf(out, size, "%s", name);
+    }
+}
+
+// "GreenBeret.tzx.zip" -> "GreenBeret" (the name a game downloaded goes by: its grabs')
+static void zx_stem(const char* file, char* out, size_t size) {
+    snprintf(out, size, "%s", file);
+    char* dot = strrchr(out, '.');
+    if (dot != nullptr && strcasecmp(dot, ".zip") == 0) { *dot = '\0'; dot = strrchr(out, '.'); }
+    if (dot != nullptr && dot != out) *dot = '\0';
+}
+
+// 1-8 on a title: its file downloaded
+__attribute__((noinline)) static void zx_download(int i) {
+    ZxState& z = zx();
+    const zxdb::File& f = z.entry.files[i];
+    if (!zxdb::file_url(f.path, z.url, sizeof(z.url))) {
+        z.msg = "PicoMenu can't get that file";
+        return;
+    }
+    uint8_t made = make_sd_folder(ZX_FOLDER);
+    if (made != fsops::OK && made != fsops::NAME_IN_USE) {
+        z.msg = "Could not make /Downloads";
+        return;
+    }
+    const char* b = zxdb::base_of(f.path);
+    size_t n = strlen(b);
+    z.zipped = n > 4 && strcasecmp(b + n - 4, ".zip") == 0;
+    char named[64];
+    zx_file_name(b, named, sizeof(named));
+    if (z.zipped) snprintf(z.path, sizeof(z.path), "%s", ZX_ZIP);
+    else if (!zx_free_path(named, z.path, sizeof(z.path))) {
+        z.msg = "Too many with that name";
+        return;
+    }
+    snprintf(z.name, sizeof(z.name), "%s", b);
+    walk_stop();
+    if (!z.file.open(Drive::EXTERNAL_SD_CARD, z.path, false)) {
+        z.msg = "Could not write to the SD card";
+        return;
+    }
+    z.file_open = true;
+    zx_ask(ZW_FILE, ZX_ENTRY);
+}
+
+// The download unzipped into /Downloads (and the zip removed)
+__attribute__((noinline)) static void zx_unzip() {
+    ZxState& z = zx();
+    net::stop();                            // (its TLS memory, lwIP's, let go: room for this)
+    unzip::Work* w = static_cast<unzip::Work*>(zx_alloc(sizeof(unzip::Work)));
+    uint8_t* window = static_cast<uint8_t*>(zx_alloc(unzip::WINDOW));
+    const char* why = nullptr;
+    walk_stop();
+    if (w == nullptr || window == nullptr) {
+        why = "Not enough memory to unzip";
+    } else if (!z.file.open(Drive::EXTERNAL_SD_CARD, ZX_ZIP, true)) {
+        why = "Could not read the download";
+    } else {
+        char named[64];
+        if (!unzip::find(z.file, z.member, w->in, sizeof(w->in))) {
+            why = "No tape or snapshot in the zip";
+        } else if (zx_file_name(z.member.name, named, sizeof(named)), !zx_free_path(named, z.path, sizeof(z.path))) {
+            why = "Too many with that name";
+        } else if (!z.out.open(Drive::EXTERNAL_SD_CARD, z.path, false)) {
+            why = "Could not write to the SD card";
+        } else {
+            bool ok = unzip::extract(z.file, z.member, z.out, *w, window);
+            ok = z.out.close() && ok;
+            if (!ok) {
+                fsops::remove_path(Drive::EXTERNAL_SD_CARD, z.path);
+                why = "The zip is damaged";
+            }
+        }
+        z.file.close();
+    }
+    zx_free(window);
+    zx_free(w);
+    fsops::remove_path(Drive::EXTERNAL_SD_CARD, ZX_ZIP);
+    if (why == nullptr) {
+        snprintf(z.said, sizeof(z.said), "Saved %s", zxdb::base_of(z.path));
+        LOG("ZXDB: saved %s\n", z.path);
+    } else {
+        snprintf(z.said, sizeof(z.said), "%s", why);
+    }
+    z.mode = ZX_ENTRY;
+}
+
+// The loading screen that came (it is in the screen) saved as a grab of the game
+__attribute__((noinline)) static void zx_save_screen() {
+    ZxState& z = zx();
+    char base[screengrab::NAME_MAX + 1];
+    char m[44];
+    if (z.info) {
+        snprintf(base, sizeof(base), "%s", z.base);
+    } else if (z.match && zx_match_name(m, sizeof(m))) {
+        if (screengrab::base_name(m, base) == 0) snprintf(base, sizeof(base), "Screen");     // (the title picked)
+    } else {
+        // the name the title's game will have when it is downloaded (its first file's)
+        char stem[64];
+        zx_stem(z.entry.nfiles > 0 ? zxdb::base_of(z.entry.files[0].path) : z.entry.info.title, stem, sizeof(stem));
+        if (screengrab::base_name(stem, base) == 0) snprintf(base, sizeof(base), "Screen");
+    }
+    int number = -1;
+    walk_stop();
+    if (!grab_folder_make()) {
+        snprintf(z.said, sizeof(z.said), "Could not make Scraper/Screen Grabs");
+    } else if ((number = grab_free_number(base, screengrab::LOADING)) < 0) {
+        snprintf(z.said, sizeof(z.said), "Too many loading screens saved");
+    } else if (!grab_write(z.out, base, screengrab::LOADING, number, reinterpret_cast<const uint8_t*>(snap_load_buffer))) {
+        snprintf(z.said, sizeof(z.said), "Could not save the screen");
+    } else {
+        screengrab::saved_message(base, screengrab::LOADING, number, z.said, sizeof(z.said));
+        z.scr_saved = true;
+        LOG("ZXDB: loading screen %s\n", grab_path);
+    }
+}
+
+// S on a title for the information: what was chosen with I and L fetched, one after the other,
+// then ZX_FINISH (the details are saved: zx_info_end)
+__attribute__((noinline)) static void zx_picked_next() {
+    ZxState& z = zx();
+    const zxdb::Hit& h = z.search.hits[z.hit];
+    if (z.get_text && !z.text_done && h.instr[0] != '\0') {
+        z.text_done = true;
+        if (!zxdb::file_url(h.instr, z.url, sizeof(z.url))) {
+            z.msg = "PicoMenu can't get its instructions";
+            z.mode = ZX_PICKED;
+            return;
+        }
+        snprintf(z.path, sizeof(z.path), "%s", ZX_TEXT);
+        walk_stop();
+        if (!z.file.open(Drive::EXTERNAL_SD_CARD, z.path, false)) {
+            z.msg = "Could not write to the SD card";
+            z.mode = ZX_PICKED;
+            return;
+        }
+        z.file_open = true;
+        zx_ask(ZW_TEXT, ZX_PICKED);
+        return;
+    }
+    if (z.get_scr && !z.scr_done && h.scr[0] != '\0') {
+        z.scr_done = true;
+        if (zxdb::file_url(h.scr, z.url, sizeof(z.url))) {
+            zx_ask(ZW_SCREEN, ZX_PICKED);
+            return;
+        }
+    }
+    z.mode = ZX_FINISH;
+}
+
+// A line of instructions that the details file would read as something else ("Controls", "Year:
+// 1984", a ; comment) is changed a little so it stays text
+static void zx_text_line(char* line) {
+    const char* t = gameinfo::skip_blanks(line);
+    const char* rest;
+    if (*t == ';') {
+        *const_cast<char*>(t) = ':';
+    } else if (gameinfo::meta_key(t, &rest) >= 0) {
+        char* colon = strchr(line, ':');
+        if (colon != nullptr) *colon = '-';
+    } else if (gameinfo::details_heading(t, "controls", &rest) || gameinfo::details_heading(t, "instructions", &rest)) {
+        size_t n = strlen(line);
+        if (n + 1 < 32) { line[n] = '.'; line[n + 1] = '\0'; }
+    }
+}
+
+// The instructions that came (ZX_TEXT) as the details' instructions: plain letters, lines of 30 at
+// most (as the I editor has them), one blank line at a time, as much as fits (TEXT_MAX: 8 KB; the
+// I editor on the Spectrum takes 96 lines, so longer ones are edited in the browser, T-F).
+// False: none.
+__attribute__((noinline)) static bool zx_import_text(gameinfo::Details* d) {
+    ZxState& z = zx();
+    char* raw = det_file();
+    int got = 0;
+    walk_stop();
+    if (z.out.open(Drive::EXTERNAL_SD_CARD, ZX_TEXT, true)) {
+        got = z.out.read(raw, DET_FILE_MAX - 1);
+        z.out.close();
+    }
+    if (got <= 0) return false;
+    // \r\n and \r as \n, tabs as spaces, nothing but plain letters, no more than one blank line
+    size_t k = 0;
+    int newlines = 2;                       // (none at the start)
+    for (int i = 0; i < got; i++) {
+        unsigned char c = (unsigned char) raw[i];
+        if (c == '\r') {
+            if (i + 1 < got && raw[i + 1] == '\n') continue;
+            c = '\n';
+        }
+        if (c == '\n') {
+            if (newlines >= 2) continue;
+            newlines++;
+            raw[k++] = '\n';
+            continue;
+        }
+        if (c == '\t') c = ' ';
+        if (c < 32) continue;
+        if (c >= 127) c = '?';
+        newlines = 0;
+        raw[k++] = (char) c;
+    }
+    while (k > 0 && raw[k - 1] == '\n') k--;
+    raw[k] = '\0';
+    if (k == 0) return false;
+    // wrapped to 30, into the .png reading's room (free now: the information is loaded again after)
+    static_assert(PNG_SCRATCH_OFFSET + gameinfo::TEXT_MAX + 8 <= 82944, "the instructions' room");
+    char* out = reinterpret_cast<char*>(snap_load_buffer + PNG_SCRATCH_OFFSET);
+    size_t n = 0;
+    gameinfo::Wrap w(raw, 30);
+    char line[32];
+    bool cut = false;
+    while (w.next(line)) {
+        zx_text_line(line);
+        size_t len = strlen(line);
+        if (n + len + 1 + 4 > gameinfo::TEXT_MAX) { cut = true; break; }
+        memcpy(out + n, line, len);
+        n += len;
+        out[n++] = '\n';
+    }
+    if (cut) { memcpy(out + n, "...\n", 4); n += 4; }
+    out[n] = '\0';
+    d->set_text(out);
+    return true;
+}
+
+// A request has finished (net::state DONE or FAILED)
+__attribute__((noinline)) static void zx_answered() {
+    ZxState& z = zx();
+    if (net::state() == net::FAILED) {
+        LOG("ZXDB: failed: %s (%s)\n", net::why(), net::detail());
+        zx_file_drop();
+        z.msg = net::why();
+        snprintf(z.detail, sizeof(z.detail), "%s", net::detail());
+        snprintf(z.io, sizeof(z.io), "%s", net::io());
+        z.mode = z.back;
+        return;
+    }
+    switch (z.want) {
+        case ZW_SEARCH:
+            z.flat.end();
+            z.mode = ZX_RESULTS;
+            if (z.search.n == 0) z.msg = "Nothing found";
+            break;
+        case ZW_ENTRY: {
+            z.flat.end();
+            zxdb::tidy_files(z.entry);
+            const zxdb::Hit& h = z.search.hits[z.hit];
+            if (z.entry.info.title[0] == '\0') snprintf(z.entry.info.title, sizeof(z.entry.info.title), "%s", h.title);
+            if (z.entry.info.scr[0] == '\0') snprintf(z.entry.info.scr, sizeof(z.entry.info.scr), "%s", h.scr);
+            if (z.entry.info.avail[0] == '\0') snprintf(z.entry.info.avail, sizeof(z.entry.info.avail), "%s", h.avail);
+            z.said[0] = '\0';
+            z.asking = 0;
+            z.mode = ZX_ENTRY;
+            break;
+        }
+        case ZW_FILE:
+            z.file_open = false;
+            if (!z.file.close()) {
+                fsops::remove_path(Drive::EXTERNAL_SD_CARD, z.path);
+                z.msg = "Could not write to the SD card";
+                z.mode = ZX_ENTRY;
+            } else if (z.pok) {
+                LOG("ZXDB: pokes saved as %s\n", z.path);
+                z.msg = "Pokes saved in Poke List:\n\nL on the Poke screen lists them";
+                z.mode = ZX_NOTE;
+            } else if (z.zipped) {
+                z.mode = ZX_UNZIP;              // (done at the next poll: the screen says so first)
+            } else {
+                snprintf(z.said, sizeof(z.said), "Saved %s", zxdb::base_of(z.path));
+                z.mode = ZX_ENTRY;
+            }
+            break;
+        case ZW_TEXT:
+            z.file_open = false;
+            z.text_got = z.file.close();
+            if (!z.text_got) {
+                z.msg = "Could not write to the SD card";
+                z.mode = ZX_PICKED;
+            } else {
+                zx_picked_next();
+            }
+            break;
+        default:
+            if (z.got != screengrab::SCR_SIZE) {
+                z.msg = "That was not a loading screen";
+                z.mode = z.back;
+            } else {
+                zx_save_screen();
+                z.mode = ZX_PICTURE;
+            }
+            break;
+    }
+}
+
+// The information's lookup has ended: the WiFi off, the house and year saved (save), the M menu
+// shown again
+__attribute__((noinline)) static void zx_info_end(bool save) {
+    ZxState& z = zx();
+    zx_live = false;
+    web_off();
+    notes_message = save ? z.said : nullptr;
+    if (save) {
+        gameinfo::Details* d = det_data();
+        det_read(z.game, d);
+        if (z.house[0] != '\0') d->set_house(z.house);
+        if (z.year[0] != '\0') d->set_year(z.year);
+        if (z.genre[0] != '\0') d->set_meta(gameinfo::META_GENRE, z.genre);
+        const bool text = z.text_got && zx_import_text(d);
+        const bool shot = z.scr_saved;
+        if (det_write(z.game, d)) {
+            det_have = det_saved = true;
+            // (the M menu's line has room for 30)
+            snprintf(z.said, sizeof(z.said), "%s", text && shot ? "Saved details, text and screen" :
+                text ? "Saved details and instructions" : shot ? "Saved details and screen" :
+                z.get_scr ? "Saved details (no screen)" : "House, year and genre saved");
+            LOG("ZXDB: details saved for %s: %s, %s, %s%s%s\n", z.game, z.house, z.year, z.genre, text ? ", instructions" : "",
+                shot ? ", screen" : "");
+        } else {
+            snprintf(z.said, sizeof(z.said), "Could not save the details");
+        }
+    }
+    fsops::remove_path(Drive::EXTERNAL_SD_CARD, ZX_TEXT);
+    info_loaded = false;                    // (its memory was the WiFi's)
+}
+
+static void zx_text(uint8_t* screen, int row, const char* s, uint8_t attr) {
+    help_put_text(screen, row, 1, s, (int) strlen(s), attr);
+}
+
+__attribute__((noinline)) static void zx_draw(uint8_t* screen) {
+    ZxState& z = zx();
+    if (z.mode == ZX_PICTURE || (z.mode == ZX_ASK && z.want == ZW_SCREEN)) {
+        preview_screen = screen;            // the loading screen, as it comes
+        return;
+    }
+    slots_banner(screen, "", z.info ? "ZXDB: look this game up" : z.pok ? "ZXDB: pokes for this game" : "ZXDB: Spectrum Computing");
+    char t[48];
+    const char* keys = "X-Back";
+    switch (z.mode) {
+        case ZX_JOIN:
+            zx_text(screen, 2, "Joining the WiFi ...", gameinfo::ATTR_TEXT);
+            keys = "X-Stop";
+            break;
+        case ZX_NOTE: {
+            int row = 2;
+            for (const char* p = z.msg != nullptr ? z.msg : ""; *p != '\0' && row < 20;) {
+                const char* nl = strchr(p, '\n');
+                size_t n = nl ? (size_t) (nl - p) : strlen(p);
+                help_put_text(screen, row, 1, p, (int) n, row == 2 ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+                row++;
+                p = nl ? nl + 1 : p + n;
+            }
+            keys = "Any key-Back";
+            break;
+        }
+        case ZX_TYPE:
+            zx_text(screen, 2, "Search for a title:", gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%s_", z.typed);
+            zx_text(screen, 4, t, gameinfo::ATTR_TEXT);
+            zx_text(screen, 6, "Type part of its name, then", gameinfo::ATTR_DIM);
+            zx_text(screen, 7, "ENTER. DELETE takes a letter", gameinfo::ATTR_DIM);
+            zx_text(screen, 8, "back.", gameinfo::ATTR_DIM);
+            zx_text(screen, 17, "Titles from ZXDB (ODbL), through", gameinfo::ATTR_DIM);
+            zx_text(screen, 18, "the ZXInfo API; files from", gameinfo::ATTR_DIM);
+            zx_text(screen, 19, "Spectrum Computing, archive.org", gameinfo::ATTR_DIM);
+            keys = "ENTER-Search  BREAK-Back";
+            break;
+        case ZX_ASK:
+            if (z.want == ZW_SEARCH) snprintf(t, sizeof(t), "Searching for %.17s ...", z.typed);
+            else if (z.want == ZW_ENTRY) snprintf(t, sizeof(t), "Asking about %.17s ...", z.search.hits[z.hit].title);
+            else if (z.want == ZW_FILE) snprintf(t, sizeof(t), "Downloading %.19s", z.name);
+            else if (z.want == ZW_TEXT) snprintf(t, sizeof(t), "Getting its instructions ...");
+            else snprintf(t, sizeof(t), "Getting the loading screen ...");
+            zx_text(screen, 2, t, gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "From %.26s", net::host());
+            zx_text(screen, 3, t, gameinfo::ATTR_DIM);
+            if (net::stage() < net::GET) {
+                static const char* const STAGE[] = { "Finding the server", "Connecting", "Securing the connection",
+                    "Waiting for the answer" };
+                snprintf(t, sizeof(t), "%s ... %us", STAGE[net::stage()], (unsigned) (net::elapsed_ms() / 1000));
+                zx_text(screen, 5, t, gameinfo::ATTR_DIM);
+                // (securing it is sums the Pico takes some seconds over, the screen standing still)
+                zx_text(screen, 7, "This can take 10 seconds or so.", gameinfo::ATTR_DIM);
+            } else if (z.want == ZW_FILE) {
+                int64_t len = net::length();
+                if (len > 0) snprintf(t, sizeof(t), "%u KB of %u KB", (unsigned) (net::received() / 1024), (unsigned) ((len + 1023) / 1024));
+                else snprintf(t, sizeof(t), "%u KB", (unsigned) (net::received() / 1024));
+                zx_text(screen, 5, t, gameinfo::ATTR_HEADING);
+            }
+            keys = "X-Stop";
+            break;
+        case ZX_UNZIP:
+            snprintf(t, sizeof(t), "Unzipping %.21s ...", z.name);
+            zx_text(screen, 2, t, gameinfo::ATTR_TEXT);
+            keys = "";
+            break;
+        case ZX_RESULTS: {
+            const zxdb::Search& s = z.search;
+            int pages = (int) ((s.total + zxdb::PAGE - 1) / zxdb::PAGE);
+            if (pages > 1) snprintf(t, sizeof(t), "%u found, page %u of %d", (unsigned) s.total, (unsigned) z.page + 1, pages);
+            else snprintf(t, sizeof(t), "%u found for %.18s", (unsigned) s.total, z.typed);
+            zx_text(screen, 2, t, gameinfo::ATTR_HEADING);
+            for (int i = 0; i < s.n; i++) {
+                snprintf(t, sizeof(t), "%d %-24.24s %.4s", (i + 1) % 10, s.hits[i].title, s.hits[i].year);
+                zx_text(screen, 4 + i, t, gameinfo::ATTR_TEXT);
+            }
+            if (z.info) zx_text(screen, 15, "Pick the game to take its", gameinfo::ATTR_DIM);
+            if (z.info) zx_text(screen, 16, "house, year and genre from.", gameinfo::ATTR_DIM);
+            if (z.pok) zx_text(screen, 15, "Pick the game to get its pokes.", gameinfo::ATTR_DIM);
+            zx_text(screen, 21, pages > 1 ? "1-0 Pick  N/P-Page  T-Type" : "1-0 Pick  T-Type again", gameinfo::ATTR_KEYS);
+            keys = "X-Back";
+            break;
+        }
+        case ZX_ENTRY:
+        case ZX_PICKED: {
+            const zxdb::Hit& h = z.mode == ZX_ENTRY ? z.entry.info : z.search.hits[z.hit];
+            zx_text(screen, 2, h.title, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%.31s", h.house[0] != '\0' ? h.house : "(no software house)");
+            zx_text(screen, 3, t, gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "%.4s  %.25s", h.year[0] != '\0' ? h.year : "----", h.genre);
+            zx_text(screen, 4, t, gameinfo::ATTR_DIM);
+            if (z.mode == ZX_PICKED && z.pok) {
+                if (h.instr[0] == '\0') {
+                    zx_text(screen, 6, "ZXDB has no pokes for it.", gameinfo::ATTR_TEXT);
+                } else {
+                    zx_text(screen, 6, "Download its pokes as", gameinfo::ATTR_TEXT);
+                    zx_text(screen, 7, "Poke List/", gameinfo::ATTR_DIM);
+                    snprintf(t, sizeof(t), "%.27s.pok?", z.game);
+                    zx_text(screen, 8, t, gameinfo::ATTR_HEADING);
+                    zx_text(screen, 21, "Y-Yes  N-No", gameinfo::ATTR_KEYS);
+                }
+                keys = "X-Back to the list";
+                break;
+            }
+            if (z.mode == ZX_PICKED) {
+                zx_text(screen, 6, "S saves its software house,", gameinfo::ATTR_DIM);
+                zx_text(screen, 7, "year and genre in its details,", gameinfo::ATTR_DIM);
+                zx_text(screen, 8, "with what is chosen below:", gameinfo::ATTR_DIM);
+                if (h.instr[0] != '\0') {
+                    snprintf(t, sizeof(t), "I-Instructions       %s", z.get_text ? "Yes" : "No");
+                    zx_text(screen, 10, t, z.get_text ? gameinfo::ATTR_TEXT : gameinfo::ATTR_HEADING);
+                } else {
+                    zx_text(screen, 10, "(no instructions in ZXDB)", gameinfo::ATTR_DIM);
+                }
+                if (h.scr[0] != '\0') {
+                    snprintf(t, sizeof(t), "L-Loading screen     %s", z.get_scr ? "Yes" : "No");
+                    zx_text(screen, 11, t, z.get_scr ? gameinfo::ATTR_TEXT : gameinfo::ATTR_HEADING);
+                } else {
+                    zx_text(screen, 11, "(no loading screen in ZXDB)", gameinfo::ATTR_DIM);
+                }
+                if (h.instr[0] != '\0') {
+                    zx_text(screen, 13, "The instructions replace what", gameinfo::ATTR_DIM);
+                    zx_text(screen, 14, "its details had (I in M).", gameinfo::ATTR_DIM);
+                }
+                zx_text(screen, 21, "S-Save", gameinfo::ATTR_KEYS);
+                keys = "X-Back to the list";
+                break;
+            }
+            const bool avail = zxdb::available(h.avail);
+            if (!avail) {
+                zx_text(screen, 6, "Not to be downloaded: ZXDB says", gameinfo::ATTR_DIM);
+                snprintf(t, sizeof(t), "\"%.28s\"", h.avail[0] != '\0' ? h.avail : "not known");
+                zx_text(screen, 7, t, gameinfo::ATTR_TEXT);
+            } else if (z.entry.nfiles == 0) {
+                zx_text(screen, 6, "No tape or snapshot to download", gameinfo::ATTR_DIM);
+            } else {
+                zx_text(screen, 6, "Download to /Downloads:", gameinfo::ATTR_DIM);
+                for (int i = 0; i < z.entry.nfiles && i < 8; i++) {
+                    const zxdb::File& f = z.entry.files[i];
+                    char kind[12];
+                    snprintf(kind, sizeof(kind), "%s", f.kind);
+                    char* sp = strchr(kind, ' ');
+                    if (sp != nullptr) *sp = '\0';          // "Tape image" -> "Tape"
+                    snprintf(t, sizeof(t), "%d %-20.20s %.8s", i + 1, zxdb::base_of(f.path), kind);
+                    zx_text(screen, 7 + i, t, gameinfo::ATTR_TEXT);
+                }
+            }
+            if (z.said[0] != '\0') zx_text(screen, 17, z.said, gameinfo::ATTR_HEADING);
+            if (z.asking != 0) {
+                // the name it would have: the title picked
+                char m[44];
+                zx_text(screen, 17, "Match search selection?", gameinfo::ATTR_HEADING);
+                if (zx_match_name(m, sizeof(m))) {
+                    snprintf(t, sizeof(t), "(\"%.27s\")", m);
+                    zx_text(screen, 18, t, gameinfo::ATTR_TEXT);
+                }
+                zx_text(screen, 21, "Y-Yes  N-No (as ZXDB names it)", gameinfo::ATTR_KEYS);
+                keys = "X-Back";
+                break;
+            }
+            snprintf(t, sizeof(t), "%s%s", avail && z.entry.nfiles > 0 ? "1-8 Download  " : "", h.scr[0] != '\0' ? "L-Loading screen" : "");
+            zx_text(screen, 21, t, gameinfo::ATTR_KEYS);
+            keys = "X-Back to the list";
+            break;
+        }
+        default:
+            break;
+    }
+    if (z.msg != nullptr && z.mode != ZX_NOTE) {
+        // (under the typing on the search screen, which has the credits at the foot)
+        const int row = z.mode == ZX_TYPE ? 10 : 18;
+        zx_text(screen, row, z.msg, gameinfo::ATTR_KEYS);
+        if (z.detail[0] != '\0') zx_text(screen, row + 1, z.detail, gameinfo::ATTR_DIM);
+        if (z.detail[0] != '\0' && z.io[0] != '\0') zx_text(screen, row + 2, z.io, gameinfo::ATTR_DIM);
+    }
+    zx_text(screen, 22, keys, gameinfo::ATTR_KEYS);
+    preview_screen = screen;
+}
+
+// Y on a title for the pokes: its .pok downloaded as Poke List/<game>.pok
+__attribute__((noinline)) static void zx_pok_download() {
+    ZxState& z = zx();
+    const zxdb::Hit& h = z.search.hits[z.hit];
+    if (!zxdb::file_url(h.instr, z.url, sizeof(z.url))) {
+        z.msg = "PicoMenu can't get its pokes";
+        return;
+    }
+    uint8_t made = make_sd_folder(POKE_LIST_DIR);
+    walk_stop();
+    if ((made != fsops::OK && made != fsops::NAME_IN_USE) ||
+            (size_t) snprintf(z.path, sizeof(z.path), "%s/%s.pok", POKE_LIST_DIR, z.game) >= sizeof(z.path) ||
+            !z.file.open(Drive::EXTERNAL_SD_CARD, z.path, false)) {
+        z.msg = "Could not write to the SD card";
+        return;
+    }
+    snprintf(z.name, sizeof(z.name), "%s", zxdb::base_of(h.instr));
+    z.file_open = true;
+    zx_ask(ZW_FILE, ZX_PICKED);
+}
+
+// Z on the Poke screen: the game last loaded looked up for its pokes; not if it has a .pok
+// already (one the Poke list would read: pok_find)
+static void zx_pok_begin() {
+    ZxState& z = zx();
+    const bool known = reload_known && reload_name[0] != '\0';
+    if (known && !pok_find(z.path, sizeof(z.path))) {
+        zx_begin(reload_name, true);
+        return;
+    }
+    zx_begin(nullptr, true);                // (no WiFi: just the note)
+    z.msg = known ? "Poke file already exists" : "Load a game first: its pokes\nare looked up by its name.";
+    z.mode = ZX_NOTE;
+}
+
+// Starts a ZXDB screen: from the WiFi screen, or for the game information (game: its name)
+static void zx_begin(const char* game, bool pok, bool solo) {
+    ZxState& z = zx();
+    memset(&z.typed, 0, sizeof(z.typed));
+    z.said[0] = z.house[0] = z.year[0] = z.genre[0] = '\0';
+    z.detail[0] = '\0';
+    z.msg = nullptr;
+    z.file_open = false;
+    z.search.n = 0;
+    z.search.total = 0;
+    z.hit = 0;
+    z.page = 0;
+    z.info = game != nullptr && !pok;
+    z.pok = pok;
+    z.solo = solo;
+    z.asking = 0;
+    z.match = false;
+    z.mode = ZX_TYPE;
+    zx_live = true;
+    if (game == nullptr && !solo) return;
+    if (game != nullptr) {
+        snprintf(z.game, sizeof(z.game), "%s", game);
+        if (screengrab::base_name(game, z.base) == 0) snprintf(z.base, sizeof(z.base), "Screen");
+        zxdb::name_to_search(game, z.typed, sizeof(z.typed));
+    }
+    // the WiFi is started at a later poll (not in the request that may have just stopped the
+    // Bluetooth), and the search waits a second after it is up
+    z.mode = ZX_JOIN;
+    z.wifi_asked = false;
+    z.join_ms = now_ms_zx();
+    z.up_ms = 0;
+#ifdef WIFI_ENABLE
+    bt::note(0x50);
+#endif
+}
+
+// A key (0: none, the screen polled): 0 as it is, 2 shown again, 1 closed
+__attribute__((noinline)) static uint8_t zx_key(uint8_t key) {
+    ZxState& z = zx();
+    const uint8_t was = z.mode;
+    bool redraw = false;
+    const bool leave = z.mode == ZX_TYPE ? is_key_break(key) : is_key_back(key);     // (X is typed in the search)
+    if (key != 0) {
+        z.msg = nullptr;
+        z.detail[0] = '\0';
+        redraw = true;
+    }
+    switch (z.mode) {
+        case ZX_JOIN: {
+            if (leave) { zx_info_end(false); return 1; }
+            const uint32_t now = now_ms_zx();
+            if (!z.wifi_asked) {
+                if (now - z.join_ms < ZX_START_MS) break;
+                z.wifi_asked = true;
+                const char* why = zx_wifi_start();
+                if (why != nullptr) {
+                    z.msg = why;
+                    z.mode = ZX_NOTE;
+                }
+                break;
+            }
+#ifdef WIFI_ENABLE
+            if (wifi::state() == wifi::FAILED) {
+                snprintf(z.said, sizeof(z.said), "%s", wifi::why());
+                z.msg = z.said;
+                z.mode = ZX_NOTE;
+                break;
+            }
+#endif
+            if (zx_wifi_up()) {
+                if (z.up_ms == 0) {
+                    z.up_ms = now | 1;
+#ifdef WIFI_ENABLE
+                    bt::note(0x52);
+#endif
+                } else if (now - z.up_ms >= ZX_SETTLE_MS) {
+                    if (z.typed[0] != '\0') zx_search(0, ZX_TYPE);
+                    else z.mode = ZX_TYPE;  // (Z on the menu: a title to type)
+                }
+            }
+            break;
+        }
+        case ZX_NOTE:
+            if (key != 0) {
+                if (z.info || z.pok || z.solo) { zx_info_end(false); return 1; }
+                z.mode = ZX_TYPE;
+            }
+            break;
+        case ZX_TYPE: {
+            size_t len = strlen(z.typed);
+            if (leave) {
+                if (z.info || z.pok || z.solo) { zx_info_end(false); return 1; }
+                zx_live = false;
+                return 1;
+            } else if (key == notes::KEY_DELETE) {
+                if (len > 0) z.typed[len - 1] = '\0';
+            } else if (key == notes::KEY_ENTER || key == 13) {
+                if (len > 0) zx_search(0, ZX_TYPE);
+            } else if (key >= ' ' && key < 127 && len + 1 < sizeof(z.typed)) {
+                z.typed[len] = (char) key;
+                z.typed[len + 1] = '\0';
+            }
+            break;
+        }
+        case ZX_ASK:
+            if (leave) {
+                net::stop();
+                zx_file_drop();
+                z.msg = "Stopped";
+                z.mode = z.back;
+                break;
+            }
+            if (net::state() == net::DONE || net::state() == net::FAILED) {
+                zx_answered();
+                redraw = true;
+            } else if (z.want == ZW_FILE && (uint32_t) (net::received() / 1024) != z.shown_kb) {
+                z.shown_kb = (uint32_t) (net::received() / 1024);
+                redraw = true;                  // (the loading screen comes into the screen: not drawn)
+            } else if (z.want != ZW_SCREEN) {
+                uint32_t step = (uint32_t) net::stage() * 10000 + net::elapsed_ms() / 1000;
+                if (step != z.shown_step) {
+                    z.shown_step = step;
+                    redraw = true;              // where it has got to, and the seconds
+                }
+            }
+            break;
+        case ZX_UNZIP:
+            zx_unzip();
+            redraw = true;
+            break;
+        case ZX_RESULTS: {
+            int pages = (int) ((z.search.total + zxdb::PAGE - 1) / zxdb::PAGE);
+            if (leave || key == 't' || key == 'T') {
+                z.mode = ZX_TYPE;
+            } else if (key >= '0' && key <= '9') {
+                int i = key == '0' ? 9 : key - '1';
+                if (i < z.search.n) {
+                    z.hit = (int8_t) i;
+                    if (z.pok) {
+                        z.mode = ZX_PICKED;     // (download its .pok? Y or N)
+                    } else if (z.info) {
+                        const zxdb::Hit& h = z.search.hits[i];
+                        snprintf(z.house, sizeof(z.house), "%s", h.house);
+                        snprintf(z.year, sizeof(z.year), "%s", h.year);
+                        snprintf(z.genre, sizeof(z.genre), "%s", h.genre);
+                        z.get_text = z.get_scr = false;
+                        z.mode = ZX_PICKED;
+                    } else if (zxdb::entry_url(z.search.hits[i].id, z.url, sizeof(z.url))) {
+                        zx_ask(ZW_ENTRY, ZX_RESULTS);
+                    }
+                }
+            } else if ((key == 'n' || key == 'N') && pages > 1) {
+                zx_search((uint16_t) ((z.page + 1) % pages), ZX_TYPE);
+            } else if ((key == 'p' || key == 'P') && pages > 1) {
+                zx_search((uint16_t) ((z.page + pages - 1) % pages), ZX_TYPE);
+            }
+            break;
+        }
+        case ZX_ENTRY:
+            if (z.asking != 0) {
+                // "Match search selection?": Y names it after the title picked, N as ZXDB has it
+                if (key == 'y' || key == 'Y' || key == 'n' || key == 'N') {
+                    z.match = key == 'y' || key == 'Y';
+                    const uint8_t k = z.asking;
+                    z.asking = 0;
+                    z.said[0] = '\0';
+                    if (k == 'l') {
+                        if (zxdb::file_url(z.entry.info.scr, z.url, sizeof(z.url))) zx_ask(ZW_SCREEN, ZX_ENTRY);
+                    } else {
+                        zx_download(k - '1');
+                    }
+                } else if (key != 0) {
+                    z.asking = 0;               // (any other key: not done)
+                }
+            } else if (leave) {
+                z.mode = ZX_RESULTS;
+            } else if (key >= '1' && key <= '8' && key - '1' < z.entry.nfiles && zxdb::available(z.entry.info.avail)) {
+                z.asking = key;
+            } else if ((key == 'l' || key == 'L') && z.entry.info.scr[0] != '\0') {
+                z.asking = 'l';
+            }
+            break;
+        case ZX_PICKED: {
+            const zxdb::Hit& h = z.search.hits[z.hit];
+            if (z.pok) {
+                if (leave || key == 'n' || key == 'N') z.mode = ZX_RESULTS;
+                else if ((key == 'y' || key == 'Y') && h.instr[0] != '\0') zx_pok_download();
+                break;
+            }
+            if (leave) {
+                z.mode = ZX_RESULTS;
+            } else if (key == 's' || key == 'S') {
+                z.said[0] = '\0';
+                z.text_done = z.scr_done = z.text_got = z.scr_saved = false;
+                zx_picked_next();               // (I and L's, then saved)
+            } else if ((key == 'i' || key == 'I') && h.instr[0] != '\0') {
+                z.get_text = !z.get_text;
+            } else if ((key == 'l' || key == 'L') && h.scr[0] != '\0') {
+                z.get_scr = !z.get_scr;
+            }
+            break;
+        }
+        case ZX_PICTURE:
+            if (key != 0) {
+                if (z.info) zx_picked_next();   // (the next chosen, or saved)
+                else z.mode = ZX_ENTRY;
+            }
+            break;
+        default:
+            break;
+    }
+    if (z.mode == ZX_FINISH) {
+        zx_info_end(true);
+        return 1;
+    }
+    if (z.mode != was) redraw = true;
+    return redraw ? 2 : 0;
+}
+
+// The information's lookup, in op 6 (the ROM sends each key, and 0 while none is pressed)
+__attribute__((noinline)) static void zx_info_step(uint8_t key) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    uint8_t r = zx_key(key);
+    if (r == 1) {
+        nmi_game_info_show(false);          // the M menu again (the ROM goes back to op 3)
+        return;
+    }
+    zx_draw(screen);                        // (the ROM shows it again each time, in op 6)
+    nmi_rom_data[START_KEYREPEAT] = zx().mode == ZX_TYPE ? 1 : 0;   // (typing: a held key repeats)
+    nmi_rom_data[1] = 6;
+    nmi_rom_data[0] = 1;
+}
+#endif
+
 // ACTION_GAME_INFO. M: edit the game's notes. op 3 starts, op 4 is a key (byte 6) for the
 // editor. While it is going byte 1 of the mailbox is 3 and the screen is the editor's.
 // The editor's step is done here, ahead of the drawing function, which has a big stack
@@ -6808,6 +8089,7 @@ static void nmi_action_game_info() {
     // keeps its scroll position and would show the rest of an old name from there (over a
     // picture shown full screen)
     memset(nmi_rom_data + INFO_HOUSE, 0, INFO_HOUSE_SIZE);
+    info_scroll_start(false);               // (every screen shown as the information: SD setup, the converter too)
     int op = nmi_rom_data[5];
     if (nmi_rom_data[2] == 2) {         // C on the menu: set up the SD card
         notes_editing = notes_edit = false;
@@ -6832,6 +8114,16 @@ static void nmi_action_game_info() {
         }
         else conv_result_shown = false;
     }
+#if PICOMENU_NET
+    if (zx_live && zx().info) {
+        if (op == 6) {
+            zx_info_step(nmi_rom_data[6]);      // Z in the M menu: the ZXDB lookup's screen
+            return;
+        }
+        zx_live = false;                        // (left some other way)
+        web_off();
+    }
+#endif
     if (op == 6) {
         // C: convert the tape. The converter shows its own screen while it runs (and says
         // 6 in byte 1, so the ROM asks again), or the normal page with a message
@@ -6852,6 +8144,14 @@ static void nmi_action_game_info() {
     if (op == 3 || op == 4) {
         const char* name = nmi_rom_data[2] == 1 ? (reload_known ? reload_name : "") : info_name;
         ended = notes_step(op, name, nmi_rom_data[6]);
+#if PICOMENU_NET
+        if (zx_due) {
+            zx_due = false;                     // Z in the M menu: the lookup starts (in op 6)
+            zx_begin(name);
+            zx_info_step(0);
+            return;
+        }
+#endif
     }
     nmi_game_info_show(ended);
 }
@@ -6942,7 +8242,7 @@ __attribute__((noinline)) static void nmi_action_grab_menu() {
             help_put_text(screen, 2 + k, 1, LINES[k], (int) strlen(LINES[k]), k == 0 ? gameinfo::ATTR_HEADING : gameinfo::ATTR_TEXT);
         }
         help_put_text(screen, 12, 1, "In /Scraper/Screen Grabs", 24, gameinfo::ATTR_DIM);
-        help_put_text(screen, 23, 1, "1-5 Save  BREAK-Back", 20, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 23, 1, menu_alone() ? "1-5 Save  X-Exit" : "1-5 Save  X-Back", 16, gameinfo::ATTR_KEYS);
     } else {
         help_put_text(screen, 3, 1, result, (int) strlen(result), gameinfo::ATTR_TEXT);
         help_put_text(screen, 23, 1, "Press any key", 13, gameinfo::ATTR_KEYS);
@@ -7408,6 +8708,7 @@ static void nmi_action_update() {
 static void nmi_action_tape_position();
 static void nmi_action_tape_insert();
 static void nmi_action_text_file();
+static void nmi_action_assets();
 static void nmi_action_snap_hide();
 static void nmi_action_waste_bin();
 static void nmi_action_bin_empty();
@@ -7537,6 +8838,9 @@ void processNmiRequest() {
         return;
     }  else if (action == ACTION_TEXT_FILE) {
         nmi_action_text_file();
+        return;
+    }  else if (action == ACTION_ASSETS) {
+        nmi_action_assets();
         return;
     }  else if (action == ACTION_SNAP_HIDE) {
         nmi_action_snap_hide();
@@ -8704,7 +10008,7 @@ NOTES_FUNC static void txt_draw(uint8_t* screen) {
         help_put_text(screen, 22, 1, txt_msg, (int) strlen(txt_msg), gameinfo::ATTR_KEYS);
         txt_msg = nullptr;
     }
-    const char* keys = txt_drive == 1 ? "N-Next P-Prev E-Edit X-Exit" : "N-Next P-Prev X-Exit";
+    const char* keys = txt_drive == 1 ? "N-Next P-Prev E-Edit X-Back" : "N-Next P-Prev X-Back";
     help_put_text(screen, 23, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
 }
 
@@ -8911,7 +10215,7 @@ static void opt_draw(uint8_t* screen) {
         const char* hint = options::ITEMS[opt_cursor[0]].hint;
         static_assert(1 + options::MAIN_COUNT <= 20, "the items above the hint");
         help_put_text(screen, 20, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
-        help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Exit", 29, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Back", 29, gameinfo::ATTR_KEYS);
 #if PICOMENU_WIFI_UI
         help_put_text(screen, 22, 1, "N-Order W-WiFi/BT D-Diagnostics", 31, gameinfo::ATTR_KEYS);
 #else
@@ -8961,7 +10265,7 @@ static void opt_draw(uint8_t* screen) {
             help_put_text(screen, 21, 1, "(CAPS SHIFT for capitals)", 25, gameinfo::ATTR_DIM);
         } else {
             help_put_text(screen, 20, 1, "Q/A-Up/Down  ENTER-Type/Change", 30, gameinfo::ATTR_KEYS);
-            help_put_text(screen, 21, 1, "N-Settings  X-Exit", 18, gameinfo::ATTR_KEYS);
+            help_put_text(screen, 21, 1, "N-Settings  X-Back", 18, gameinfo::ATTR_KEYS);
         }
 #endif
     } else {
@@ -8980,7 +10284,7 @@ static void opt_draw(uint8_t* screen) {
         if (options::order_changed(b, a)) help_put_text(screen, 12, 1, "* changed", 9, gameinfo::ATTR_HEADING);
         help_put_text(screen, 18, 1, "Q/A-Up/Down  H-Hide/Show", 24, gameinfo::ATTR_KEYS);
         help_put_text(screen, 19, 1, "U-Move up  D-Move down", 22, gameinfo::ATTR_KEYS);
-        help_put_text(screen, 20, 1, "N-Settings  X-Exit", 18, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 20, 1, "N-Settings  X-Back", 18, gameinfo::ATTR_KEYS);
     }
     if (opt_state == 1) {
         help_put_text(screen, 21, 1, "Save changes?", 13, gameinfo::ATTR_HEADING);
@@ -9164,6 +10468,8 @@ __attribute__((noinline)) static void nmi_action_text_file() {
     }
     txt_draw(screen);
     preview_screen = screen;
+    // typing in the editor: a held key repeats (the ROM's keywait)
+    nmi_rom_data[START_KEYREPEAT] = txt_editing && !txt_editor()->prompting() ? 1 : 0;
     nmi_rom_data[0] = 0;
 }
 
@@ -9435,6 +10741,9 @@ static void tape_notes_follow_folder(uint8_t drive, const char* from, const char
 static const char TAPE_LABELS_EXT[] = ".labels";
 static const char TAPE_LABELS_TITLE[] = "PicoMenu tape labels";
 static const uint32_t TAPE_LABELS_OFFSET = 90112, TAPE_LABELS_MAX = 2048;
+#if PICOMENU_NET
+static_assert(ZX_STATE_AT >= TAPE_LABELS_OFFSET + 2 * TAPE_LABELS_MAX, "ZXDB's state is after the tape labels");
+#endif
 static_assert(TAPE_LABELS_OFFSET >= 82944 + 6912 && TAPE_LABELS_OFFSET + 2 * TAPE_LABELS_MAX <= 98304,
     "the labels between the menu grab and the Help text");
 #ifdef PICOMENU_BT_SHARED
@@ -9715,6 +11024,418 @@ static void tape_note_resume(uint8_t drive, const char* snap, bool paged, uint8_
     LOG("Tape note: %s from block %u\n", tpath, (unsigned) tape_done);
 }
 
+
+// ---- E in Tools: erase all of a game's assets (ACTION_ASSETS) ----
+// (Only in the Pico W firmware, which has room for it: the standard one's program is all but
+// full, and says so.)
+// A game's name is typed (part of it), the games that have assets and match are listed (from
+// the folders assets are kept in), and one is picked. Its assets are then found, by category:
+//   1 Autosaves       /Autosave/<game> (the folder)
+//   2 Saves           /Save Games/<game> (its slots, the folder), and its quick saves,
+//                     "<game> Save Game[ n].z80" (.sna .szx) in /Save Games, the save folder and
+//                     the folder of the game last loaded
+//   3 Game Notes      /Game Notes/<game>.txt (its notes) and <game>.info.txt (its details)
+//   4 Pokes           /Poke List/<game>.pok
+//   5 Tape files      /Tape Files: the notes of where a tape had got to for its snapshots, and
+//                     the labels of its tapes
+//   6 Screen grabs    /Scraper/Screen Grabs and /Screen Grabs: <game> and its categories' grabs
+// 1-6 turn a category on or off, E erases what is on (Y to be sure): to the Waste Bin, as E in
+// Browse Games does (waste_bin = off: for good). The names listed and the assets found are kept
+// in snap_load_buffer (free while the screen is up), after the screen.
+static const int AS_CATS = 6;
+static const uint32_t AS_NAMES_AT = 16384, AS_NAMES_SIZE = 16384;           // the names, \0 after each
+static const uint32_t AS_INDEX_AT = AS_NAMES_AT + AS_NAMES_SIZE;            // where each one starts
+static const int AS_NAMES_MAX = 1024;
+static const uint32_t AS_FOUND_AT = AS_INDEX_AT + AS_NAMES_MAX * 2;          // the assets: cat, dir, path, \0
+static const uint32_t AS_FOUND_SIZE = 65536 - AS_FOUND_AT;
+static_assert(AS_FOUND_AT + 4096 <= 65536, "the assets' room");
+static const int AS_PAGE = 10;
+#if PICOMENU_ASSETS
+enum AsMode : uint8_t { AS_TYPE, AS_LIST, AS_CATS_SCREEN, AS_ASK, AS_DONE };
+struct AsState {
+    char typed[32];
+    char game[screengrab::NAME_MAX + 1];
+    char said[40];
+    uint16_t count[AS_CATS];
+    uint32_t found_used;
+    int names, page;
+    uint8_t mode, on;               // on: a bit for each category
+    bool found_full;                // there were more than fit (erase again for the rest)
+};
+// (in snap_load_buffer after the screen, as the RAM is short)
+static const uint32_t AS_STATE_AT = 6912;
+static_assert(AS_STATE_AT + sizeof(AsState) <= AS_NAMES_AT, "the assets screen's state fits");
+#define as (*reinterpret_cast<AsState*>(snap_load_buffer + AS_STATE_AT))
+static const char* const AS_CAT_NAME[AS_CATS] = { "Autosaves", "Save slots, saves", "Game Notes", "Pokes (.pok)",
+    "Tape files", "Screen grabs" };
+
+static char* as_names() { return snap_load_buffer + AS_NAMES_AT; }
+static uint16_t* as_index() { return reinterpret_cast<uint16_t*>(snap_load_buffer + AS_INDEX_AT); }
+static char* as_found() { return snap_load_buffer + AS_FOUND_AT; }
+
+// "OutRun Loading Screen2" -> "OutRun": a grab's file name (without .scr) as its game's name
+static void as_grab_base(char* s) {
+    size_t n = strlen(s), d = 0;
+    while (d < 3 && d < n && s[n - 1 - d] >= '0' && s[n - 1 - d] <= '9') d++;
+    if (d > 0 && d < n && s[n - 1 - d] != ' ') { n -= d; s[n] = '\0'; }       // (a number of its own: "Area 51")
+    for (int c = screengrab::GRAB_CATEGORIES - 1; c > 0; c--) {
+        size_t sl = strlen(screengrab::SUFFIX[c]);
+        if (n > sl && strcasecmp(s + n - sl, screengrab::SUFFIX[c]) == 0) { s[n - sl] = '\0'; return; }
+    }
+}
+
+// Whether s has part in it (capitals or not)
+static bool as_has(const char* s, const char* part) {
+    size_t n = strlen(part);
+    for (; *s != '\0'; s++) if (strncasecmp(s, part, n) == 0) return true;
+    return false;
+}
+
+// A game's name for the list, if it matches what was typed and is not there already
+static void as_name_add(const char* name) {
+    char base[screengrab::NAME_MAX + 1];
+    if (screengrab::base_name(name, base) == 0) return;
+    if (as.typed[0] != '\0' && !as_has(base, as.typed)) return;
+    char* names = as_names();
+    uint16_t* index = as_index();
+    for (int i = 0; i < as.names; i++) {
+        if (strcasecmp(names + index[i], base) == 0) return;
+    }
+    uint32_t at = as.names > 0 ? index[as.names - 1] + (uint32_t) strlen(names + index[as.names - 1]) + 1 : 0;
+    size_t n = strlen(base);
+    if (as.names >= AS_NAMES_MAX || at + n + 1 > AS_NAMES_SIZE) return;
+    memcpy(names + at, base, n + 1);
+    index[as.names++] = (uint16_t) at;
+}
+
+// A Tape Files note's (or tape labels') name as its game: "Games~OutRun.z80.tape" -> OutRun
+static bool as_tape_game(const char* fn, char* out) {
+    char p[sizeof(sd_cwd)];
+    snprintf(p, sizeof(p), "/%s", fn);
+    char* ext = strrchr(p, '.');
+    if (ext == nullptr || (strcasecmp(ext, TAPE_NOTE_EXT) != 0 && strcasecmp(ext, TAPE_LABELS_EXT) != 0)) return false;
+    *ext = '\0';                                        // "/Games~OutRun.z80"
+    for (char* c = p; *c != '\0'; c++) if (*c == '~') *c = '/';
+    char* slash = strrchr(p, '/');
+    char* dot = strrchr(slash, '.');
+    if (dot != nullptr) *dot = '\0';                    // "/Games/OutRun"
+    *slash = '\0';
+    return game_base(p[0] != '\0' ? p : "/", slash + 1, out) > 0;
+}
+
+// Each file (or folder: dirs) in folder of the SD card, to fn(name, is_dir)
+template <class Fn>
+static void as_each(const char* folder, Fn fn) {
+    char path[sizeof(sd_cwd) + 8];
+    snprintf(path, sizeof(path), "/sd%s", folder);
+    DirHandle& d = grab_dir;
+    if (!d.open(path)) return;
+    while (!d.atEnd()) {
+        char name[96];
+        snprintf(name, sizeof(name), "%s", d.fileName());
+        bool dir = d.isDirectory();
+        fn(name, dir);
+        if (!d.next()) break;
+    }
+    d.close();
+}
+
+// The games with assets that match what was typed, sorted
+__attribute__((noinline)) static void as_list() {
+    walk_stop();
+    as.names = 0;
+    as.page = 0;
+    as_each(CP_FOLDER, [](const char* n, bool dir) { if (dir) as_name_add(n); });
+    as_each(slots::FOLDER, [](const char* n, bool dir) { if (dir) as_name_add(n); });
+    as_each(notes::FOLDER, [](char* n, bool dir) {
+        size_t l = strlen(n);
+        if (dir || n[0] == '~') return;
+        if (l > 9 && strcasecmp(n + l - 9, ".info.txt") == 0) n[l - 9] = '\0';
+        else if (l > 4 && strcasecmp(n + l - 4, ".txt") == 0) n[l - 4] = '\0';
+        else return;
+        as_name_add(n);
+    });
+    as_each(POKE_LIST_DIR, [](char* n, bool dir) {
+        size_t l = strlen(n);
+        if (!dir && l > 4 && strcasecmp(n + l - 4, ".pok") == 0) { n[l - 4] = '\0'; as_name_add(n); }
+    });
+    auto grabs = [](char* n, bool dir) {
+        size_t l = strlen(n);
+        if (dir || l < 5 || (strcasecmp(n + l - 4, ".scr") != 0 && strcasecmp(n + l - 4, ".png") != 0)) return;
+        n[l - 4] = '\0';
+        as_grab_base(n);
+        as_name_add(n);
+    };
+    as_each(screengrab::SCRAPER_FOLDER, grabs);
+    as_each(screengrab::OLD_FOLDER, grabs);
+    as_each(TAPE_NOTE_DIR, [](const char* n, bool dir) {
+        char g[screengrab::NAME_MAX + 1];
+        if (!dir && as_tape_game(n, g)) as_name_add(g);
+    });
+    // in order (a few hundred at most: a simple sort)
+    char* names = as_names();
+    uint16_t* index = as_index();
+    for (int i = 1; i < as.names; i++) {
+        uint16_t v = index[i];
+        int j = i - 1;
+        while (j >= 0 && strcasecmp(names + index[j], names + v) > 0) { index[j + 1] = index[j]; j--; }
+        index[j + 1] = v;
+    }
+}
+
+// An asset found: kept (category, whether a folder, its path)
+static void as_found_add(int cat, bool dir, const char* path) {
+    size_t n = strlen(path);
+    if (as.found_used + n + 3 > AS_FOUND_SIZE) { as.found_full = true; return; }
+    char* f = as_found() + as.found_used;
+    f[0] = (char) ('0' + cat);
+    f[1] = dir ? 'd' : 'f';
+    memcpy(f + 2, path, n + 1);
+    as.found_used += (uint32_t) n + 3;
+    as.count[cat]++;
+}
+
+// Its quick saves, "<game> Save Game[ n].z80" (.sna .szx): in /Save Games (where Q puts them),
+// the folder snapshots are saved to (S), and the folder of the game last loaded. (Not the whole
+// card: a card with a big collection took minutes to look through, the Spectrum waiting.)
+static const char* as_folder = "";
+static void as_quick_in(const char* folder) {
+    as_folder = folder;
+    as_each(folder, [](char* n, bool dir) {
+        char* dot = strrchr(n, '.');
+        if (dir || dot == nullptr || (strcasecmp(dot, ".z80") != 0 && strcasecmp(dot, ".sna") != 0 && strcasecmp(dot, ".szx") != 0)) return;
+        *dot = '\0';
+        char base[screengrab::NAME_MAX + 1];
+        bool quick = screengrab::base_name(n, base) > 0 && strcasecmp(base, as.game) == 0 && strlen(base) != strlen(n);
+        *dot = '.';
+        if (!quick) return;
+        char full[sizeof(sd_cwd) + 8];
+        snprintf(full, sizeof(full), "%s/%s", strcmp(as_folder, "/") == 0 ? "" : as_folder, n);
+        // (once: the same folder may be more than one of the three)
+        for (uint32_t at = 0; at < as.found_used;) {
+            const char* f = as_found() + at;
+            if (strcasecmp(f + 2, full) == 0) return;
+            at += (uint32_t) strlen(f) + 1;
+        }
+        as_found_add(1, false, full);
+    });
+}
+
+__attribute__((noinline)) static void as_quick_saves() {
+    as_quick_in(slots::FOLDER);
+    if (save_drive == 1 && save_dir[0] != '\0') as_quick_in(save_dir);
+    if (last_game_drive == 1) as_quick_in(last_game_dir[0] != '\0' ? last_game_dir : "/");
+}
+
+// All of the game's assets, found
+__attribute__((noinline)) static void as_find() {
+    walk_stop();
+    memset(as.count, 0, sizeof(as.count));
+    as.found_used = 0;
+    as.found_full = false;
+    char path[sizeof(sd_cwd) + 8];
+    snprintf(path, sizeof(path), "%s/%s", CP_FOLDER, as.game);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_DIR) as_found_add(0, true, path);
+    snprintf(path, sizeof(path), "%s/%s", slots::FOLDER, as.game);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_DIR) as_found_add(1, true, path);
+    as_quick_saves();
+    static const char* const NOTE_EXT[] = { ".txt", ".info.txt" };
+    for (const char* e : NOTE_EXT) {
+        snprintf(path, sizeof(path), "%s/%s%s", notes::FOLDER, as.game, e);
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_FILE) as_found_add(2, false, path);
+    }
+    snprintf(path, sizeof(path), "%s/%s.pok", POKE_LIST_DIR, as.game);
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_FILE) as_found_add(3, false, path);
+    as_each(TAPE_NOTE_DIR, [](const char* n, bool dir) {
+        char g[screengrab::NAME_MAX + 1];
+        if (dir || !as_tape_game(n, g) || strcasecmp(g, as.game) != 0) return;
+        char p[sizeof(sd_cwd) + 8];
+        snprintf(p, sizeof(p), "%s/%s", TAPE_NOTE_DIR, n);
+        as_found_add(4, false, p);
+    });
+    as_each(screengrab::SCRAPER_FOLDER, [](const char* n, bool dir) {
+        screengrab::Category c;
+        int k;
+        if (dir || !screengrab::parse_name(n, as.game, &c, &k)) return;
+        char p[sizeof(sd_cwd) + 8];
+        snprintf(p, sizeof(p), "%s/%s", screengrab::SCRAPER_FOLDER, n);
+        as_found_add(5, false, p);
+    });
+    as_each(screengrab::OLD_FOLDER, [](const char* n, bool dir) {
+        screengrab::Category c;
+        int k;
+        if (dir || !screengrab::parse_name(n, as.game, &c, &k)) return;
+        char p[sizeof(sd_cwd) + 8];
+        snprintf(p, sizeof(p), "%s/%s", screengrab::OLD_FOLDER, n);
+        as_found_add(5, false, p);
+    });
+    as.on = 0;
+    for (int c = 0; c < AS_CATS; c++) if (as.count[c] > 0) as.on |= (uint8_t) (1 << c);
+}
+
+// What is on, erased (to the Waste Bin): how many, and how many could not be
+__attribute__((noinline)) static void as_erase() {
+    int done = 0, failed = 0;
+    for (uint32_t at = 0; at < as.found_used;) {
+        const char* f = as_found() + at;
+        size_t n = strlen(f);
+        at += (uint32_t) n + 1;
+        int cat = f[0] - '0';
+        if (!(as.on & (1 << cat))) continue;
+        char path[sizeof(sd_cwd) + 8];
+        snprintf(path, sizeof(path), "%s", f + 2);
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_NONE) continue;   // (gone with another)
+        if (web_erase(path, f[1] == 'd')) done++;
+        else failed++;
+        LOG("Assets of %s: %s %s\n", as.game, path, failed ? "not erased" : "erased");
+    }
+    if (failed > 0) snprintf(as.said, sizeof(as.said), "Erased %d, %d could not be", done, failed);
+    else snprintf(as.said, sizeof(as.said), "Erased %d%s", done, cfg.waste_bin ? " (to the Waste Bin)" : "");
+}
+
+static void as_draw(uint8_t* screen) {
+    slots_banner(screen, "", "Erase all assets");
+    char t[48];
+    auto text = [&](int r, const char* s, uint8_t a) { help_put_text(screen, r, 1, s, (int) strlen(s), a); };
+    const char* keys = "X-Back";
+    switch (as.mode) {
+        case AS_TYPE:
+            text(2, "The game (part of its name):", gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%s_", as.typed);
+            text(4, t, gameinfo::ATTR_TEXT);
+            text(6, "ENTER lists the games that have", gameinfo::ATTR_DIM);
+            text(7, "assets (nothing typed: all):", gameinfo::ATTR_DIM);
+            text(8, "autosaves, saves, notes, pokes,", gameinfo::ATTR_DIM);
+            text(9, "tape files and screen grabs.", gameinfo::ATTR_DIM);
+            keys = "ENTER-List  BREAK-Back";
+            break;
+        case AS_LIST: {
+            int pages = (as.names + AS_PAGE - 1) / AS_PAGE;
+            if (as.names == 0) text(2, "No games with assets match", gameinfo::ATTR_HEADING);
+            else if (pages > 1) { snprintf(t, sizeof(t), "%d games, page %d of %d", as.names, as.page + 1, pages); text(2, t, gameinfo::ATTR_HEADING); }
+            else { snprintf(t, sizeof(t), "%d game%s with assets", as.names, as.names == 1 ? "" : "s"); text(2, t, gameinfo::ATTR_HEADING); }
+            for (int i = 0; i < AS_PAGE && as.page * AS_PAGE + i < as.names; i++) {
+                snprintf(t, sizeof(t), "%d %.29s", (i + 1) % 10, as_names() + as_index()[as.page * AS_PAGE + i]);
+                text(4 + i, t, gameinfo::ATTR_TEXT);
+            }
+            text(21, pages > 1 ? "1-0 Pick  N/P-Page  T-Type" : "1-0 Pick  T-Type again", gameinfo::ATTR_KEYS);
+            break;
+        }
+        case AS_CATS_SCREEN:
+        case AS_ASK:
+        case AS_DONE: {
+            snprintf(t, sizeof(t), "%.31s", as.game);
+            text(2, t, gameinfo::ATTR_HEADING);
+            int total = 0;
+            for (int c = 0; c < AS_CATS; c++) {
+                bool on = as.on & (1 << c);
+                snprintf(t, sizeof(t), "%d %s %-17s %3u", c + 1, as.count[c] == 0 ? "   " : on ? "[x]" : "[ ]", AS_CAT_NAME[c],
+                    (unsigned) as.count[c]);
+                text(4 + c, t, as.count[c] == 0 ? gameinfo::ATTR_DIM : on ? gameinfo::ATTR_TEXT : gameinfo::ATTR_HEADING);
+                if (on) total += as.count[c];
+            }
+            text(11, cfg.waste_bin ? "They go to the Waste Bin (W in" : "waste_bin is off: they are", gameinfo::ATTR_DIM);
+            text(12, cfg.waste_bin ? "Tools gets them back)." : "erased for good.", gameinfo::ATTR_DIM);
+            if (as.found_full) text(13, "(more than fit: E again after)", gameinfo::ATTR_DIM);
+            if (as.mode == AS_ASK) {
+                snprintf(t, sizeof(t), "Erase %d? Y-Yes  other key-No", total);
+                text(21, t, gameinfo::ATTR_KEYS);
+            } else if (as.mode == AS_DONE) {
+                text(15, as.said, gameinfo::ATTR_HEADING);
+                keys = "Any key-Back";
+            } else {
+                text(21, total > 0 ? "1-6 On/off  E-Erase" : "Nothing to erase", gameinfo::ATTR_KEYS);
+                keys = "X-Back to the list";
+            }
+            break;
+        }
+    }
+    text(22, keys, gameinfo::ATTR_KEYS);
+}
+
+// ACTION_ASSETS (E in Tools): BYTE param1 = the key (0: opened). Status 0 the screen stays, 1 closed
+__attribute__((noinline)) static void nmi_action_assets() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    const bool back = as.mode == AS_TYPE ? is_key_break(key) : is_key_back(key);    // (X is typed in the name)
+    if (key == 0) {
+        memset(&as, 0, sizeof(as));
+        info_loaded = false;                // (the game information's buffers are used)
+        if (!sd_card_mounted) {
+            nmi_rom_data[0] = 1;
+            return;
+        }
+    } else {
+        switch (as.mode) {
+            case AS_TYPE: {
+                size_t len = strlen(as.typed);
+                if (back) { nmi_rom_data[0] = 1; return; }
+                if (key == notes::KEY_DELETE) { if (len > 0) as.typed[len - 1] = '\0'; }
+                else if (key == notes::KEY_ENTER || key == 13) { as_list(); as.mode = AS_LIST; }
+                else if (key >= ' ' && key < 127 && len + 1 < sizeof(as.typed)) { as.typed[len] = (char) key; as.typed[len + 1] = '\0'; }
+                break;
+            }
+            case AS_LIST: {
+                int pages = (as.names + AS_PAGE - 1) / AS_PAGE;
+                if (back || key == 't' || key == 'T') as.mode = AS_TYPE;
+                else if ((key == 'n' || key == 'N') && pages > 1) as.page = (as.page + 1) % pages;
+                else if ((key == 'p' || key == 'P') && pages > 1) as.page = (as.page + pages - 1) % pages;
+                else if (key >= '0' && key <= '9') {
+                    int i = as.page * AS_PAGE + (key == '0' ? 9 : key - '1');
+                    if (i < as.names) {
+                        snprintf(as.game, sizeof(as.game), "%s", as_names() + as_index()[i]);
+                        as_find();
+                        as.mode = AS_CATS_SCREEN;
+                    }
+                }
+                break;
+            }
+            case AS_CATS_SCREEN: {
+                int total = 0;
+                for (int c = 0; c < AS_CATS; c++) if (as.on & (1 << c)) total += as.count[c];
+                if (back) { as_list(); as.mode = AS_LIST; }       // (the list again: some may be gone)
+                else if (key >= '1' && key <= '0' + AS_CATS && as.count[key - '1'] > 0) as.on ^= (uint8_t) (1 << (key - '1'));
+                else if ((key == 'e' || key == 'E') && total > 0) as.mode = AS_ASK;
+                break;
+            }
+            case AS_ASK:
+                if (key == 'y' || key == 'Y') {
+                    as_erase();
+                    as_find();                  // (what is left)
+                    as.mode = AS_DONE;
+                } else {
+                    as.mode = AS_CATS_SCREEN;
+                }
+                break;
+            default:
+                as.mode = AS_CATS_SCREEN;
+                break;
+        }
+    }
+    as_draw(screen);
+    preview_screen = screen;
+    nmi_rom_data[START_KEYREPEAT] = as.mode == AS_TYPE ? 1 : 0;     // (typing: a held key repeats)
+    nmi_rom_data[0] = 0;
+}
+#undef as
+#else
+// The standard firmware: no room for it
+__attribute__((noinline)) static void nmi_action_assets() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    if (nmi_rom_data[2] != 0) {
+        nmi_rom_data[0] = 1;
+        return;
+    }
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    slots_banner(screen, "", "Erase all assets");
+    static const char* const LINES[] = { "This is in the Pico W firmware", "(picomenu-...-W.uf2) only: the", "standard one has no room." };
+    for (int i = 0; i < 3; i++) help_put_text(screen, 2 + i, 1, LINES[i], (int) strlen(LINES[i]), gameinfo::ATTR_TEXT);
+    help_put_text(screen, 22, 1, "Any key-Back", 12, gameinfo::ATTR_KEYS);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+#endif
 
 // ---- V on the menu: the Virtual Tape Player (the tape position) ----
 // The blocks of the tape being played (the tape trap's) by name, where it has got to, and keys
@@ -10123,7 +11844,7 @@ static uint8_t tape_position_screen(uint8_t key) {
         } else if (tape_pos_msg[0] != '\0') {
             help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
         }
-        static const char kr[] = "E-Stop recording  N P X-Exit";
+        static const char kr[] = "E-Stop recording  N P X-Back";
         help_put_text(screen, 23, 1, kr, sizeof(kr) - 1, KEYS);
         return 0;
     }
@@ -10167,7 +11888,7 @@ static uint8_t tape_position_screen(uint8_t key) {
         help_put_text(screen, 16 + k, 0, help[k], strlen(help[k]), DONE);
     }
     if (tape_pos_msg[0] != '\0') help_put_text(screen, 22, 0, tape_pos_msg, strlen(tape_pos_msg), HEADING);
-    static const char k1[] = "1-0 L-Label E-Eject N P X-Exit";
+    static const char k1[] = "1-0 L-Label E-Eject N P X-Back";
     help_put_text(screen, 23, 1, k1, sizeof(k1) - 1, KEYS);
     return 0;
 }
@@ -10192,7 +11913,7 @@ static void nmi_action_tape_position() {
 // receiver plays on a moment): the tape goes back to the start of its line, for the next load.
 // A few seconds after the tape ends it switches off (auto_off), so autosave can go on.
 //
-// Memory: the Bluetooth's variables are in the last 16 KB of snap_load_buffer (the Pico W
+// Memory: the Bluetooth's variables are in the last 24 KB of snap_load_buffer (the Pico W
 // build's memmap_picomenu_w.ld). It stays on only while nothing else can use that: its own
 // screen, the menu being opened and closed (the screen's stash and restore), and the game
 // running. Anything else the menu does (bt_keeps), autosaving and the level loader scan wait or
@@ -10520,7 +12241,7 @@ static void bt_draw(uint8_t* screen) {
         text(21, bt::saved_name()[0] != '\0' ? (n > 0 ? "S-Search 1-8 C-Connect F-Forget" : "S-Search C-Connect F-Forget") :
             (n > 0 ? "S-Search again 1-8 Pair" : "S-Search"), gameinfo::ATTR_KEYS);
     }
-    text(22, st == bt::CONNECTED ? "D-Disconnect O-Off BREAK-Back" : "T-Tape player O-Off BREAK-Back", gameinfo::ATTR_KEYS);
+    text(22, st == bt::CONNECTED ? "D-Disconnect O-Off X-Back" : "T-Tape player O-Off X-Back", gameinfo::ATTR_KEYS);
     preview_screen = screen;
 }
 
@@ -11396,7 +13117,7 @@ static bool conv_op(uint8_t mode, uint8_t key, uint8_t& keep) {
     if (pct > 99) pct = 99;
     uint32_t secs = (uint32_t) ((time_us_64() - conv_started) / 1000000);
     char t[40];
-    int tn = snprintf(t, sizeof(t), "%u:%02u S-Screen BREAK-Stop", (unsigned) (secs / 60), (unsigned) (secs % 60));
+    int tn = snprintf(t, sizeof(t), "%u:%02u S-Screen X-Stop", (unsigned) (secs / 60), (unsigned) (secs % 60));
     int cells = 31 - tn;                        // the bar fills the rest (8 cells, 7 from 10 minutes)
     conv_row(1, gameinfo::ATTR_KEYS, cells + 1, t);
     ConvScratch& cs = conv_scratch();
@@ -11611,7 +13332,7 @@ __attribute__((noinline)) static void nmi_action_batch() {
     batch_put(screen, 18, "1-0 Open a folder  U-Up", gameinfo::ATTR_KEYS);
     batch_put(screen, 19, "C-Tapes here to .z80", gameinfo::ATTR_KEYS);
     batch_put(screen, 20, "T-.z80 here to tapes", gameinfo::ATTR_KEYS);
-    batch_put(screen, 21, "X-Exit", gameinfo::ATTR_KEYS);
+    batch_put(screen, 21, "X-Back", gameinfo::ATTR_KEYS);
     batch_put(screen, 22, "Into Converted/ or Tapes/ here", gameinfo::ATTR_DIM);
     if (batch_msg != nullptr) batch_put(screen, 23, batch_msg, gameinfo::ATTR_HEADING);
     preview_screen = screen;
@@ -11694,7 +13415,7 @@ static void batch_summary(uint8_t* screen) {
         batch_put(screen, 14, batch_end_msg, gameinfo::ATTR_HEADING);
         if (strncmp(batch_end_msg, "Stopped", 7) == 0) batch_put(screen, 15, batch_kind == 1 ? "T there again carries on." : "C there again carries on.", gameinfo::ATTR_DIM);
     }
-    batch_put(screen, 23, "X-Exit", gameinfo::ATTR_KEYS);
+    batch_put(screen, 23, "X-Back", gameinfo::ATTR_KEYS);
 }
 
 // A tape is over (conv_msg says how): counted and written down
@@ -11807,7 +13528,7 @@ __attribute__((noinline)) static bool batch_tap_step() {
         snprintf(t, sizeof(t), "Not converted %u", (unsigned) batch_failed);
         batch_put(screen, 7, t, gameinfo::ATTR_HEADING);
     }
-    batch_put(screen, 23, "BREAK-Stop", gameinfo::ATTR_KEYS);
+    batch_put(screen, 23, "X-Stop", gameinfo::ATTR_KEYS);
     preview_screen = screen;
     conv_overlay_on = false;
     nmi_rom_data[1] = 6;                            // the ROM asks again
@@ -11892,10 +13613,8 @@ __attribute__((noinline)) static void nmi_batch_info(int op, uint8_t key) {
 static const uint32_t MENU_SHOT_OFFSET = 82944;
 static_assert(MENU_SHOT_OFFSET + menushot::SCR_SIZE <= SNAP_LOAD_BUFFER_SIZE, "the menu grab fits");
 
-struct ShotSink {
-    FileHandle* f;
-    bool write(const void* p, size_t n) { return f->write(p, n) == (int) n; }
-};
+// (the screen grabs' sink: one write_png for both)
+using ShotSink = GrabSink;
 
 __attribute__((noinline)) static bool menu_shot_save(const uint8_t* scr) {
     if (!sd_card_mounted || sna_in_buffer) return false;
@@ -12076,7 +13795,9 @@ int main() {
     while (true) {
         #ifdef WIFI_ENABLE
         if (web_on && !rom_state.nmi_active) web_off();     // the menu went (a reset): WiFi off
-        wifi::poll();           // F - File transfer (only while it is open)
+        if (web_on) on_net_stack(net_work);     // F - File transfer, ZXDB (on the WiFi's own stack)
+        else wifi::poll();
+        zx_watch();                             // (a ZXDB lookup: its steps noted, a hang caught)
         bt_poll();              // B - Bluetooth tape (while it is on)
         #endif
         usb_msc_task();

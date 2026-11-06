@@ -51,7 +51,7 @@ if pool & 7:
 # it (fwupdate.h APP_MAX): a bigger one would be refused by Update PicoMenu ("Too big") and,
 # put on with BOOTSEL, would write over the start of the file system. A test build was
 # 252 KB.
-fs_kb = int(sys.argv[3]) if len(sys.argv) > 3 else 1800     # (the Pico W build: 1400)
+fs_kb = int(sys.argv[3]) if len(sys.argv) > 3 else 1800     # (the Pico W build: 1280)
 reserve_kb = int(sys.argv[4]) if len(sys.argv) > 4 else 0  # (the Pico W build: 8 KB for the Bluetooth pairing)
 APP_MAX = 2 * 1024 * 1024 - fs_kb * 1024 - reserve_kb * 1024
 end = syms.get('__flash_binary_end')

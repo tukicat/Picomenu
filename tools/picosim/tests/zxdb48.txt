@@ -1,0 +1,156 @@
+# Z on the WiFi screen (F in Tools): ZXDB's search through the pretend network (net_host.cpp,
+# the answers made by make_zxdb.py). Nothing is asked for until a key asks: a title typed in is
+# searched for (N/P: its pages), one picked shows its files, 1 downloads its tape from
+# archive.org (a redirection to another of its servers), which is unzipped into /Downloads (the
+# zip removed); a second download is "GreenBeret (2).tap". L gets the loading screen only when
+# pressed, saved as GreenBeret Loading Screen.scr. Each asks "Match search selection?" first: Y names
+# the file after the title picked (Green Beret.tap, Green Beret Loading Screen.scr), N as ZXDB has it.
+# A title not "Available" offers no download.
+sd /48.rom {ROM48}
+sd /Games/tapein.tap {HERE}/tapein.tap
+net https://api.zxinfo.dk/v5/search/titles/green?mode=tiny&size=10&offset=0* {OUT}/search.http
+net https://api.zxinfo.dk/v5/search/titles/green?mode=tiny&size=10&offset=1* {OUT}/search2.http
+net https://api.zxinfo.dk/v5/entries/0002259* {OUT}/entry.http
+net https://api.zxinfo.dk/v5/entries/0030088* {OUT}/entry2.http
+net https://archive.org/download/* {OUT}/redirect.http
+net https://ia800100.us.archive.org/* {OUT}/file.http
+net https://spectrumcomputing.co.uk/zxdb/sinclair/entries/0002259/GreenBeret.scr {OUT}/scr.http
+boot
+nmi
+wait 30
+key t
+wait 30
+key f
+wait 30
+key z
+wait 30
+expect Search for a title
+expectnet 0
+# a failure says so under the typing, with how far it got, and the credits stay
+key z
+key z
+key ENTER
+wait 60
+expectnet 1
+expect The server's name was not found
+expect DNS0.0 TCP0.0
+expect Spectrum Computing, archive.org
+key DELETE
+wait 10
+key DELETE
+wait 10
+expectnot DNS0.0
+key g
+key r
+key e
+key e
+key n
+key x
+key DELETE
+wait 10
+expect green_
+key ENTER
+wait 60
+expectnet 2
+expect 12 found, page 1 of 2
+expect 1 Green Beret
+expect 2 Green Beret 2
+expect 0 Greenery 9
+key n
+wait 60
+expect page 2 of 2
+expect 1 Greener Pastures
+key p
+wait 60
+expectnet 4
+expect 1 Green Beret
+key 1
+wait 60
+expectnet 5
+expect Imagine Software Ltd
+expect 1986  Arcade Game: Action
+expect 1 GreenBeret.tap.zip
+expect 2 GreenBeret.z80.zip
+expectnot GreenBeret.txt
+expect L-Loading screen
+# 1-8 and L ask whether to name the file after the title picked: N, as ZXDB names it
+key 1
+wait 20
+expect Match search selection?
+expect ("Green Beret")
+expectnet 5
+key n
+wait 150
+expectnet 7
+expect Saved GreenBeret.tap
+expectbyte sd /Downloads/GreenBeret.tap|0|0x13
+expectbyte sd /Downloads/GreenBeret.tap|132|255
+expectbyte sd /Downloads/GreenBeret.tap|133|256
+nofile sd /Downloads/~zxdb.zip
+nofile sd /Scraper/Screen Grabs/GreenBeret Loading Screen.scr
+key 1
+wait 20
+key n
+wait 150
+expect Saved GreenBeret (2).tap
+expectnet 9
+# the loading screen, only now
+key l
+wait 20
+key n
+wait 60
+expectnet 10
+expectbyte sd /Scraper/Screen Grabs/GreenBeret Loading Screen.scr|0|0x55
+expectbyte sd /Scraper/Screen Grabs/GreenBeret Loading Screen.scr|6912|256
+key a
+wait 30
+expect Saved as ...eret Loading Screen
+# Y: named after the title picked, so the game and its screen match ("Green Beret")
+key 1
+wait 20
+key y
+wait 150
+expectnet 12
+expect Saved Green Beret.tap
+expectbyte sd /Downloads/Green Beret.tap|0|0x13
+key l
+wait 20
+key y
+wait 60
+expectnet 13
+expectbyte sd /Scraper/Screen Grabs/Green Beret Loading Screen.scr|0|0x55
+key a
+wait 30
+# any other key than Y or N: nothing done
+key 1
+wait 20
+expect Match search selection?
+key x
+wait 20
+expectnot Match search selection?
+expect 1-8 Download
+expectnet 13
+key BREAK
+wait 30
+expect 1 Green Beret
+# not available: no download
+key 2
+wait 60
+expectnet 14
+expect Not to be downloaded: ZXDB says
+expect "Never released"
+expectnot 1-8 Download
+key 1
+wait 30
+expectnet 14
+key BREAK
+wait 20
+key BREAK
+wait 20
+expect Search for a title
+key BREAK
+wait 30
+expectnot Search for a title
+key BREAK
+wait 30
+expectnet 14

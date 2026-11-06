@@ -2,6 +2,114 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.5.0 (2026-11-05)
+Changes since Rev 2.4.0. There are two firmware files, as for 2.4.0:
+- `picomenu-Rev2.5.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.5.0 (tapeloader v250)`;
+- `picomenu-Rev2.5.0-W.uf2` for a Pico W: `Rev 2.5.0 W (tapeloader v250)`.
+
+Diagnostics shows "Rev 2.5.0" or "Rev 2.5.0 W". The new ZXDB features are in the Pico W firmware; the standard firmware shows their keys and says they need a Pico W and the Pico W firmware. **Going from 2.4.0 to the 2.5.0 Pico W firmware clears the internal flash** and the Bluetooth receiver has to be paired again (see "The Pico W firmware").
+
+### ZXDB: Spectrum Computing (Pico W)
+PicoMenu can look games up in ZXDB, the database of Spectrum software that Spectrum Computing keeps, through the ZXInfo API (HTTPS), using the WiFi set up for T-F. Nothing is fetched unless a key asks for it.
+- **Z on the NMI menu: Search ZXDB.** It joins the WiFi (`Joining the WiFi ...`) and asks for a title. (Z on the T-F screen does the same, once T-F is on the network.)
+  - Type part of a title and ENTER: the titles found are listed ten to a page (N/P for the pages, T to type another), each with its year; **1-0** picks one.
+  - **A title** shows its software house, year, genre and its tapes and snapshots. **1-8** downloads one to `/Downloads` on the SD card and unzips it (the zip is removed; `Name (2).tzx` if the name is taken), showing its KB as it comes; X stops it (the part is removed). Only a title ZXDB calls `Available` offers downloads: the others say what ZXDB says (`Never released` ...).
+  - **L** gets the title's loading screen, saved in `/Scraper/Screen Grabs` as `<game> Loading Screen.scr` (then `...1.scr`), as `grab_format` says. The picture shows until a key.
+  - **"Match search selection?"** 1-8 and L ask first. **Y** names what is saved after the title picked from the list, so the game and its screens match: searching "Bomb J" and picking "Bomb Jack", file 1 is saved as `/Downloads/Bomb Jack.tap` (not `BOMBJAC1.tap`) and L as `Bomb Jack Loading Screen.scr`, the name the game information looks for with `Bomb Jack.tap`. **N** saves it as ZXDB names it. Any other key does nothing. The name is the title without the letters a file name can't have, at most 40 letters, with the file's own extension.
+  - BREAK from the typing goes back to the menu, and the WiFi goes off.
+- **Z in the game information's M menu (`Z-Look it up in ZXDB`):** the WiFi starts and ZXDB is searched for the game's name (`Green_Beret_1986Imagine` searches for `Green Beret`; T types another). Pick the title, then choose what else to fetch:
+  - **I - Instructions:** World of Spectrum's text for the game. Its text goes into the game's details (`Game Notes/<game>.info.txt`, under `Instructions`, as I in M would put it), so V shows it; no separate file is kept. It is made plain (line ends, tabs, letters outside ASCII as `?`, one blank line at a time) and wrapped at 30 letters; up to 8 KB is kept, then `...`. A line the details file would read as something else (`Controls`, `Year: 1985 ...`, a `;` comment) is changed a little (`CONTROLS.`, `Year- 1985`, `:`).
+  - **L - Loading screen:** saved for this game, under its own name.
+  - **S** saves the software house, year and genre in the game's details (as H, Y and G would) and fetches what was chosen; the message says what was saved (`House, year and genre saved`, `Saved details and instructions`, `Saved details, text and screen` ...). BREAK leaves without saving. The WiFi goes off again when it is done.
+- **Z on the Poke screen (`Z-Look it up in ZXDB`):** the same search for the game last loaded. Pick a title and, if ZXDB has pokes for it, **Y** downloads its `.pok` into `/Poke List` under the exact name of the game loaded (`/Poke List/Green_Beret_1986Imagine.pok`, the name L - Poke list looks for); **N** goes back to the list. If the game has a `.pok` already, nothing is fetched: `Poke file already exists`. With no game loaded it says to load one first.
+- **While it asks** the screen says how far it has got and for how long (`Finding the server`, `Connecting`, `Securing the connection`, `Waiting for the answer`, then the KB), and `This can take 10 seconds or so.`: securing the connection is sums the Pico takes a few seconds over, with the screen standing still. A failure says which stage it stopped at (`Timed out securing it (TLS)` ...) and, on two more lines, how long each stage took and what the connection did (bytes sent and received, the window, what TLS held), so a photo says what went wrong.
+- **Each request says it comes from PicoMenu** (`User-Agent: PicoMenu/2.5.0 (Picoface for the ZX Spectrum)`), one at a time, `Connection: close`, as ZXInfo asks of programs that use it. ZXDB's data is under the Open Database License (ODbL); the screens credit ZXDB, the ZXInfo API and Spectrum Computing. The files come from Spectrum Computing, or from archive.org's copy of World of Spectrum for the older ones, as ZXInfo's own pages get them.
+- **How:**
+  - HTTPS (`pico/net.cxx`): lwIP's DNS and altcp_tls with Mbed TLS 2.28 from the Pico SDK (`pico/mbedtls_config.h`: TLS 1.2, ECDHE with RSA or ECDSA, AES-GCM, SHA-256/384; X25519, then P-256, then P-384 offered, quickest first). Redirects are followed (archive.org sends one). The certificate is checked against nine root certificates from Mozilla's store (`pico/netroots.h`, made by `tools/make_netroots.py`), "optional", as the Pico has no clock to check dates by. mbedtls's clock is PicoMenu's own (the C library's `time()` would have brought in 40 KB).
+  - HTTP/1.1 with chunks (`pico/netget.h`), ZXInfo's `output=flat` answers (`pico/zxdb.h`), and unzipping with miniz's inflater (`pico/unzip.h`, `pico/miniz_tinfl.c`).
+  - Its memory is lent from the snapshot buffer, as the WiFi's is: lwIP's heap, the lookup's state, and **a stack of its own** (5.5 KB) for the WiFi's work, switched to in the main loop: a TLS handshake checking an ECDSA certificate inside a received packet needs about 3.5 KB, more than core 0's own stack has room for. A request is started from that stack too.
+  - The TCP window is 17,520 bytes (12 x 1460): a whole TLS record (ZXInfo sends records of up to 16 KB) has to fit before lwIP's TLS layer opens the window again.
+  - When the WiFi stops, nothing of HTTPS is kept: the TLS settings and altcp_tls's random number generator are let go (`altcp_tls_free_entropy`), and the connection's pointer is in the ordinary RAM, not in the snapshot buffer. Either, left in memory that other screens and games use meanwhile, made a later lookup crash.
+  - The WiFi is started at a poll after the request that opened the screen (which may have just stopped the Bluetooth), and the search waits a second after the WiFi is up.
+
+### The game information
+- **Genre and your own score,** in both firmwares. They go in the right-hand column under the software house and year: the genre (`Arcade Game: Action`; one too long for the column loses its ` Game`: `Arcade: Action`), then `Score: 8/10`.
+  - **M** has two new boxes: **G - Genre** (up to 30 letters) and **S - My score**, a number from 0 to 10 (anything else says `The score is a number, 0 to 10`). Left empty, a box shows nothing.
+  - They are kept in the game's details file (`Game Notes/<game>.info.txt`) as `Genre: ...` and `Score: 8`, next to `Software house:` and `Year:`, so Erase all assets' Game Notes and R in M cover them too.
+  - An entry of `Instructions.txt` can have them after its name, with `Software house:` and `Year:` (`My score:` works too). `Docs/Instructions-example.txt` and the example T-D writes show them.
+- **A software house or genre too long for its place scrolls there.** When both are too long the house scrolls to its end and back to its start, then the genre, and round again.
+- **Instructions up to 8 KB** (were 2 KB), in `Instructions.txt`, in a game's details and from ZXDB. The V screen pages through them all; with more than 15 pages the title row says `Pg 17/18`, and N and P go through all of them and round. M then I on instructions longer than its box (96 lines of 30) says `Too long for this screen`: they can be edited in the browser (T-F) or on a PC.
+
+### File transfer (Pico W)
+- **Edit text files in the browser.** On the T-F page a `.txt` or `.ini` file (up to 256 KB) has an **Edit** button: it opens in a box filling the page, in the Spectrum's font, and **Save** writes it back over the file on the SD card; **Close** asks first if there are changes not saved, and so does leaving the page. A faint line after the 30th column shows where the Spectrum's own editor's lines end. The file's bytes and its line ends (`\r\n` or `\n`) are kept as they were.
+- **Picomenu.ini saved from the browser is used as T-F closes,** as a save in the Spectrum's editor is: the save type and theme at once, Browse Games' start folder from the menu's next opening (an upload over it, or a rename to it, counts too).
+
+### Erase all assets (Pico W)
+- **E in Tools.** Type part of a game's name and ENTER: the games that have assets and match are listed, ten to a page (nothing typed lists them all). Pick one with 1-0, and its assets are shown by category, with how many of each:
+  1. **Autosaves:** `/Autosave/<game>`
+  2. **Save slots, saves:** `/Save Games/<game>` and its quick saves (`<game> Save Game[ n]`, in /Save Games, the save folder and the last game's folder)
+  3. **Game Notes:** `<game>.txt` and `<game>.info.txt`
+  4. **Pokes:** `/Poke List/<game>.pok`
+  5. **Tape files:** the notes of where a tape had got to, and the labels of its tapes
+  6. **Screen grabs:** `/Scraper/Screen Grabs` and `/Screen Grabs`, every category and number
+- The categories that have something start ticked; **1-6** tick or untick one. **E**, then **Y**, erases the ticked ones **to the Waste Bin** (W in Tools gets them back; with `waste_bin = off`, for good) and says how many. The game file itself is never touched, nor another game whose name only starts the same (`Exolonia` is not `Exolon`).
+- The standard firmware has the key but no room for the screen: it says it is in the Pico W firmware only.
+
+### Keys
+- **BREAK always goes back; X does too where nothing is being typed.**
+  - BREAK in the menus the NMI ROM draws (the NMI menu, Tools, Browse Games, the Poke screen, Change ROM, Save snapshot, the test ROM choice) is the menu's X item, or in a Yes/No menu (`Overwrite this file?`, `Autosave this game?`) its N.
+  - X also goes back on ZXDB's and Erase all assets' screens, except where a title or name is typed (X is a letter there).
+  - The same words everywhere: `BREAK-Back` where X is typed; `X-Back` (back a step) or `X-Exit` (out of the menu, back to the game: the NMI menu's own X, and the save slots or the screen grab question when the button opened them alone) elsewhere; `X-Stop` for something under way (joining the WiFi, a download, the converter). Many screens that said `X-Exit` or `BREAK-Back` now say `X-Back`.
+- **Held keys repeat where you type,** as the Spectrum's own keys do (the first repeat after about 0.7 s, then about ten a second): the menu's own boxes (Find, Rename, New folder, a file name to save as, a poke), a text file's editor, a game's notes and details, and the ZXDB search. Holding DELETE rubs out, holding a cursor key moves. ENTER and BREAK never repeat, and nothing repeats on the other screens, so a held number or letter can't do something twice.
+
+### The crash recorder (Pico W)
+- **ZXDB's steps are noted** for the `Last:` line on B: 50 a lookup began, 51 the WiFi started, 52 it is up, 53 a search asked for (54 an entry, 55 a file, 56 a screen, 57 instructions), then 58-5C each stage of the request (finding the server, connecting, securing, waiting, getting).
+- **A hang watch while a ZXDB screen is up:** a timer interrupt of its own checks once a second that the main loop is going round. If it has stopped for 20 seconds, where it was is kept and the Pico restarts; B then shows `Hang PC ... LR ...` (TLS's sums can keep the loop for about 7 seconds, so it waits longer than that).
+
+### The Pico W firmware
+- **About 730 KB** (747,108 bytes of program): HTTPS for ZXDB is about 60 KB of it.
+- **The internal flash's file system is 1280 KB** (was 1400 KB) to make room. **Going from 2.4.0 to 2.5.0 clears the internal flash:** copy anything wanted from it to the SD card first. T-U can't make the change: put the 2.5.0 Pico W firmware on with BOOTSEL. The Bluetooth receiver's pairing is kept just before the file system, so it moves too: pair it again (S on B).
+
+### The standard firmware
+- **More room:** the text editors (the notes, the details, a text file's) were three copies of the same code, one for each size, and the two screen grab writers two copies of the same PNG code; each is now one. The program is 251,792 bytes (2,160 left; it was 876).
+
+### NMI ROM
+- **The NMI menu has Z - Search ZXDB** (X - Exit moves down a row); **Tools has E - Erase all assets**; **the Poke screen has Z - Look it up in ZXDB**.
+- **The WiFi screen's loop is a routine** (`wifiscreen`) that T-F, B, Z on the menu and Z on the Poke screen share, opened with 0, 0xFE, 0xFC and 0xFD.
+- **Its menu handler takes BREAK** as the menu's X item (or N): one change for all the menus it draws.
+- **A second "wait for the key" routine,** `waitforkeyrepeat`, for typing; the Pico's screens use `keywait`, which repeats only while the Pico's last answer said so (`key_repeat`).
+- **The scroller takes a next text** (a table of eight bytes, which the Pico fills for the game information), so the software house and the genre scroll in turn.
+- **Pages beyond 15:** the Pico tells the ROM it is on the first, the last or a middle page.
+- To make room these messages are shorter, saying the same: `V shows games only`, `Already in this folder`, `A folder, not a file`, `Already in Favourites`, `Name already in use`, `Snapshot not saved`, `Folder not made`, `ROM, then Internal Rom.`, `(need another 128K bank)`, `Not erased: no ok typed`, `Not done: no ok typed`, `No .pok in Poke List`, `1-0 Poke N/P-Page X-Back`, `A .pok: Poke, then L`, `Shift 9 changes where it goes`, `Could not move it`, `Y-Yes  N-No` (when resetting), `The game will be lost.`, `Game not found`, `File already exists`, `Yes, overwrite it`, `Made in this folder`; and `Change ROM`, `Exit`, `Poke` and `Back` are the ends of longer messages.
+- 2 bytes free.
+
+### Licences
+- **The standard build:** no change.
+- **The Pico W build** adds Mbed TLS (Apache 2.0), miniz's inflater (MIT) and root certificates from Mozilla's root store (MPL 2.0), all compatible with the GPL v3; their notices are in THIRD-PARTY-NOTICES.txt (sections 14-16).
+- **The additional permission** for the cyw43 driver and BTstack (at the top of LICENSE) is unchanged, and still covers passing the Pico W `.uf2` on.
+- **ZXDB's data** is not in the firmware or the source: it is fetched when a key asks, under the ODbL, and credited on the screens. Downloaded games, screens and files keep their own rights; only those ZXDB calls `Available` are offered.
+
+### Tools
+- **`tools/nettest`** tests the HTTP, ZXDB and unzip code on a PC (answers in pieces, chunked, stored and deflated zips, a bad CRC).
+- **`tools/make_netroots.py`** makes `pico/netroots.h` from the root certificates.
+
+### Tests
+- **A pretend network** for the simulator (`tools/picosim/net_host.cpp`): `net <url> <file>` answers a URL with a file (a whole HTTP answer, made by `tests/make_zxdb.py`), `expectnet n` counts the requests.
+- **Shifted keys:** a key's CAPS or SYMBOL SHIFT goes down a frame before it and up a frame after it, as fingers do (a keyboard scan that spanned the change read BREAK as SPACE).
+- **New scripts:**
+  - `zxdb48`: the search, pages, a title, downloads through a redirect, the loading screen only on L, "Match search selection?" (N, Y and another key), a title not available, a failure's message;
+  - `zxdbinfo48`: Z in M, I and L chosen, then S only, then BREAK; the genre saved, the score box (11 refused, 8 saved) and the V screen;
+  - `zxdblong48`: 7 KB of instructions from ZXDB, kept whole;
+  - `zxdbmenu48`: Z on the menu, a title searched for and picked, BREAK back to the menu;
+  - `zxdbpok48`: Z on the Poke screen, a title with no pokes, one with them downloaded and listed by L, then `Poke file already exists`;
+  - `longinfo48`: 8 KB of instructions, 17 pages and round;
+  - `keyrepeat48`: held keys in Find, a text file and a game's details;
+  - `webedit48`: the page's editor, and a Picomenu.ini sent from the browser used as T-F closes (the editor itself was tried in a headless Chromium against a pretend server, byte for byte);
+  - `assets48`: Erase all assets, every category, another game whose name starts the same kept;
+  - `breakback48`: BREAK in Tools, Browse Games and the Poke screen, X on ZXDB's titles.
+- **Updated:** `viewscroll` (a long genre scrolls after the long software house, both read from `Instructions.txt`), and the scripts whose key lines changed.
+- 82 scripts, all passing; `tools/nettest` passes. Pico W program 747,108 bytes (heap 5,660); standard 251,792 bytes (heap 5,964).
+
 ## Rev 2.4.0 (2026-10-30)
 Changes since Rev 2.3.0. The first PicoMenu with a firmware for the Pico W. There are two firmware files now:
 - `picomenu-Rev2.4.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.4.0 (tapeloader v240)`;

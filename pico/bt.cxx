@@ -34,6 +34,9 @@ not, see <https://www.gnu.org/licenses/>.
 #include "btstack.h"
 #include "btstack_tlv.h"
 #include "hardware/watchdog.h"
+#include "hardware/timer.h"
+#include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "bt.h"
 #include "wifi.h"
 
@@ -66,6 +69,7 @@ struct Trace {
     uint32_t check;
 };
 Trace __uninitialized_ram(trace);
+const uint32_t HANG_CORE = 2;               // (trace.core of a hang the hang watch caught)
 struct Crash {
     bool hang;
     uint32_t pc, lr, core;
@@ -117,6 +121,8 @@ void crash_text(int line, char* out, size_t size) {
         out[0] = '\0';
     } else if (line == 0) {
         if (last_crash.hang) snprintf(out, size, "Last restart: a hang");
+        else if (last_crash.core == HANG_CORE) snprintf(out, size, "Hang PC %08lX LR %08lX",
+            (unsigned long) last_crash.pc, (unsigned long) last_crash.lr);
         else snprintf(out, size, "Crash %lu PC %08lX LR %08lX", (unsigned long) last_crash.core,
             (unsigned long) last_crash.pc, (unsigned long) last_crash.lr);
     } else {
@@ -139,6 +145,58 @@ extern "C" void __no_inline_not_in_flash_func(picomenu_fault)(uint32_t* frame) {
     watchdog_reboot(0, 0, 0);
     while (true) {}
 }
+// The hang watch: a hardware alarm of its own, its interrupt handled here (the interrupted
+// code's frame, as for a fault); once a second it looks at when the main loop last went round
+namespace {
+int hang_alarm = -1;
+volatile bool hang_on = false;
+volatile uint32_t hang_fed = 0;
+const uint32_t HANG_US = 20 * 1000 * 1000;     // (a TLS handshake's sums can keep the loop for about 7 s)
+}
+extern "C" void __no_inline_not_in_flash_func(picomenu_hang_check)(uint32_t* frame) {
+    using namespace bt;
+    timer_hw->intr = 1u << hang_alarm;
+    if (!hang_on) return;
+    if (timer_hw->timerawl - hang_fed > HANG_US) {
+        trace.magic = TRACE_FAULT;
+        trace.pc = frame[6];
+        trace.lr = frame[5];
+        trace.core = HANG_CORE;
+        trace.check = trace_sum(trace);
+        watchdog_reboot(0, 0, 0);
+        while (true) {}
+    }
+    timer_hw->alarm[hang_alarm] = timer_hw->timerawl + 1000000;
+}
+extern "C" __attribute__((naked)) void picomenu_hang_isr(void) {
+    __asm volatile(
+        "movs r0, #4\n"
+        "mov r1, lr\n"
+        "tst r0, r1\n"
+        "beq 1f\n"
+        "mrs r0, psp\n"
+        "b 2f\n"
+        "1: mrs r0, msp\n"
+        "2: ldr r1, =picomenu_hang_check\n"
+        "bx r1\n");
+}
+
+namespace bt {
+void hang_feed() { hang_fed = timer_hw->timerawl; }
+void hang_watch(bool on) {
+    if (hang_alarm < 0) {
+        hang_alarm = hardware_alarm_claim_unused(false);
+        if (hang_alarm < 0) return;
+        irq_set_exclusive_handler(TIMER_IRQ_0 + hang_alarm, picomenu_hang_isr);
+        hw_set_bits(&timer_hw->inte, 1u << hang_alarm);
+        irq_set_enabled(TIMER_IRQ_0 + hang_alarm, true);
+    }
+    hang_feed();
+    hang_on = on;
+    if (on) timer_hw->alarm[hang_alarm] = timer_hw->timerawl + 1000000;
+}
+}   // namespace bt
+
 extern "C" __attribute__((naked)) void isr_hardfault(void) {
     __asm volatile(
         "movs r0, #4\n"

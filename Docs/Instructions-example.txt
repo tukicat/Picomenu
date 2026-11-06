@@ -1,6 +1,8 @@
 Skool Daze
 Software house: Microsphere
 Year: 1985
+Genre: Arcade Game: Action
+Score: 9
 Controls
 O or Cursor Left: Go left
 P or Cursor Right: Go right

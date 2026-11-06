@@ -20,6 +20,10 @@ not, see <https://www.gnu.org/licenses/>.
 // Spectrum's bright blue: a 124 x 14 picture, drawn twice the size. All the page's text is in
 // that font too (webfont.inc, made from the menu's own font by tools/make_webfont.py: square
 // pixels, 8 to the em), at 16px, twice its size, so it is as sharp as the title.
+// A .txt or .ini (up to 256 KB) has Edit: the file opens in a box on the page, in the same
+// font, and Save sends it back over it (/api/put, o=1). Its bytes are kept as they are (read
+// and written a byte to a letter, as Latin-1), and so are its line ends (\r\n if it had them).
+// A faint line after the 30th column shows where the lines of the Spectrum's own editor end.
 
 #include "webfiles.h"
 
@@ -50,6 +54,10 @@ a.f{color:var(--fg);text-decoration:none}a.d{color:var(--acc2);text-decoration:n
 .hid{opacity:.55}#msg{min-height:1.4em;color:var(--dim);margin:6px 0}
 #drop{display:none;position:fixed;inset:0;background:rgba(0,103,177,.15);border:3px dashed var(--acc2);z-index:9}
 body.over #drop{display:block}
+#ed{display:none;position:fixed;inset:0;background:var(--bg);z-index:8;flex-direction:column;padding:12px 16px;gap:8px}
+body.editing #ed{display:flex}body.editing main{display:none}
+#ed .bar{margin:0}#edn{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+#edt{flex:1 1 auto;width:100%;resize:none;font:16px/24px PicoMenu,monospace;background:linear-gradient(90deg,transparent 488px,var(--line) 488px,var(--line) 490px,transparent 490px) var(--card);background-attachment:local;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre;overflow:auto;tab-size:8}
 @media (max-width:600px){table,tbody{display:block}tr{display:flex;flex-wrap:wrap;align-items:center;border-top:1px solid var(--line)}tr:first-child{border-top:0}
 td{border-top:0;padding:6px 8px}td.a button{padding:2px 5px}main{padding-left:10px;padding-right:10px}td.n{flex:1 1 100%;padding-bottom:0}td.s{flex:1 1 auto;text-align:left}td.a{flex:0 0 auto}}
 </style></head><body>
@@ -61,6 +69,9 @@ td{border-top:0;padding:6px 8px}td.a button{padding:2px 5px}main{padding-left:10
 <div id="msg">Drop files on the page to put them in this folder.</div>
 <table id="list"></table>
 </main><div id="drop"></div>
+<div id="ed"><div class="bar"><span id="edn"></span><span id="edc" style="color:var(--dim)"></span>
+<button id="eds">Save</button><button id="edx">Close</button></div>
+<textarea id="edt" spellcheck="false" autocomplete="off"></textarea></div>
 <script>
 let cur='/',items=[];
 const $=id=>document.getElementById(id);
@@ -80,14 +91,33 @@ async function load(p){
  if(cur!='/')h+='<tr><td class="n" colspan="3"><a class="d" href="#" data-p="'+esc(cur.replace(/\/[^/]*$/,'')||'/')+'">.. up</a></td></tr>';
  for(const it of items){const p=join(cur,it.n);
   h+='<tr class="'+(it.h?'hid':'')+'"><td class="n">'+(it.d?'<a class="d" href="#" data-p="'+esc(p)+'">'+esc(it.n)+'/</a>':'<a class="f" href="/api/get?p='+enc(p)+'" download>'+esc(it.n)+'</a>')+
-  '</td><td class="s">'+(it.d?'':size(it.s))+'</td><td class="a"><button data-r="'+esc(it.n)+'">Rename</button> <button data-e="'+esc(it.n)+'">Erase</button></td></tr>'}
+  '</td><td class="s">'+(it.d?'':size(it.s))+'</td><td class="a">'+(!it.d&&/\.(txt|ini)$/i.test(it.n)&&it.s<=262144?'<button data-t="'+esc(it.n)+'">Edit</button> ':'')+
+  '<button data-r="'+esc(it.n)+'">Rename</button> <button data-e="'+esc(it.n)+'">Erase</button></td></tr>'}
  if(!items.length)h+='<tr><td class="n" style="color:var(--dim)">Empty</td></tr>';
  $('list').innerHTML=h}
 function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 document.addEventListener('click',async e=>{const t=e.target;
  if(t.dataset.p){e.preventDefault();load(t.dataset.p);return}
+ if(t.dataset.t){edit(join(cur,t.dataset.t));return}
  if(t.dataset.e){if(!confirm('Erase '+t.dataset.e+'?'))return;const r=await fetch('/api/del?p='+enc(join(cur,t.dataset.e)),{method:'POST'});say(await r.text());load(cur)}
  if(t.dataset.r){const n=prompt('New name',t.dataset.r);if(!n||n==t.dataset.r)return;const r=await fetch('/api/ren?p='+enc(join(cur,t.dataset.r))+'&to='+enc(n),{method:'POST'});say(await r.text());load(cur)}});
+// the editor: a byte to a letter both ways (Latin-1), \r\n kept if the file had it
+let ed=null;
+async function edit(p){
+ const r=await fetch('/api/get?p='+enc(p));if(!r.ok){say(await r.text());return}
+ const b=new Uint8Array(await r.arrayBuffer());let s='';
+ for(let i=0;i<b.length;i+=8192)s+=String.fromCharCode.apply(null,b.subarray(i,i+8192));
+ const crlf=s.includes('\r\n');
+ ed={p,crlf};$('edn').textContent=p;$('edt').value=s.replace(/\r\n/g,'\n');ed.was=$('edt').value;
+ $('edc').textContent=crlf?'(\\r\\n)':'';document.body.classList.add('editing');$('edt').focus()}
+function shut(){if(ed&&$('edt').value!=ed.was&&!confirm('Close without saving?'))return;ed=null;document.body.classList.remove('editing');load(cur)}
+$('edx').onclick=shut;
+$('edt').oninput=()=>{if($('edc').textContent=='Saved')$('edc').textContent=''};
+$('eds').onclick=async()=>{if(!ed)return;let s=$('edt').value;if(ed.crlf)s=s.replace(/\n/g,'\r\n');
+ const b=new Uint8Array(s.length);for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);b[i]=c<256?c:63}
+ $('eds').disabled=true;const r=await fetch('/api/put?p='+enc(ed.p)+'&o=1',{method:'PUT',body:b});$('eds').disabled=false;
+ const t=await r.text();if(r.ok){ed.was=$('edt').value;$('edc').textContent='Saved'}else alert(ed.p+': '+t)};
+addEventListener('beforeunload',e=>{if(ed&&$('edt').value!=ed.was){e.preventDefault();e.returnValue=''}});
 $('mk').onclick=async()=>{const n=prompt('Folder name');if(!n)return;const r=await fetch('/api/mkdir?p='+enc(join(cur,n)),{method:'POST'});say(await r.text());load(cur)};
 async function upload(files){
  let done=0;

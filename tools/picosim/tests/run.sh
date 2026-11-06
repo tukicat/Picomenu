@@ -20,8 +20,9 @@ mkdir -p "$O"; cat "$R/128-0.rom" "$R/128-1.rom" > "$O/128.rom"
 head -c 6912 /dev/zero | tr "\\000" "U" > "$O/dummy.scr"    # a scraper screen already there (convertscr48)
 { head -c 6144 /dev/zero; head -c 768 /dev/zero | tr "\\000" "8"; } > "$O/blank.scr"    # an empty picture (viewscroll)
 python3 "$H/make_levelloader.py" "$O" > /dev/null     # levelloader48's made-up game and tape
+python3 "$H/make_zxdb.py" "$O" "$H/tapein.tap"    # the zxdb scripts' pretend network's answers
 printf 'Infinite lives\r\nM 1000 0 0\r\nZ 1000 0 0\r\n' > "$O/test.pok"    # listall
-printf 'Green\r\nSoftware house: Imagine Software (Ocean Software Ltd)\r\nYear: 1986\r\nControls\r\nQ up\r\nInstructions\r\nRescue the prisoners.\r\n' > "$O/Instructions.txt"    # viewscroll
+printf 'Green\r\nSoftware house: Imagine Software (Ocean Software Ltd)\r\nYear: 1986\r\nGenre: Arcade Game: Shoot-em-up\r\nMy score: 9\r\nControls\r\nQ up\r\nInstructions\r\nRescue the prisoners.\r\n' > "$O/Instructions.txt"    # viewscroll
 fails=0
 for s in "$H"/*.txt; do
     n=$(basename "$s" .txt)

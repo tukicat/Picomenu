@@ -20,7 +20,7 @@ key d
 key o
 key ENTER
 wait 100
-expect A file with this name exists
+expect File already exists
 expect Overwrite this file?
 key n
 wait 60

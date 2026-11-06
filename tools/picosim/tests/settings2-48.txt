@@ -98,7 +98,7 @@ key c
 wait 10
 key a
 wait 10
-expect S-Screen BREAK-Stop
+expect S-Screen X-Stop
 slice 0
 wait 1500
 expect Saved g.z80

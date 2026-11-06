@@ -24,7 +24,7 @@ wait 50
 expect long.txt
 expect Pg 1
 expect Line 1: 
-expect N-Next P-Prev E-Edit X-Exit
+expect N-Next P-Prev E-Edit X-Back
 key n
 wait 30
 expect Pg 2
@@ -79,7 +79,7 @@ expect readme
 key 1
 wait 50
 expect Second line
-expect N-Next P-Prev X-Exit
+expect N-Next P-Prev X-Back
 key e
 wait 30
 expect Only files on the SD card

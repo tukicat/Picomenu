@@ -37,13 +37,16 @@ not, see <https://www.gnu.org/licenses/>.
 // * Right after the game's name (or its [Name] lines) there can be the lines
 //     Software house: Ocean Software
 //     Year: 1984
-//   (also Publisher: and Year released:). They are shown above Controls, next to the
+//   (also Publisher: and Year released:), and
+//     Genre: Arcade Game: Action
+//     Score: 8
+//   (your own score, out of 10; also My score:). They are shown above Controls, next to the
 //   picture. Use the name line, then these, then Controls or Instructions. For a game
 //   with only these use the [Name] form.
 // * Your own notes are not in this file: they are kept per game in the hidden folder
 //   "Game Notes" (see notes.h) and shown as the last section, My notes. So are details
-//   typed in on the Spectrum (M, then H, Y, C or I; see Details below): they replace the
-//   same parts of the entry here.
+//   typed in on the Spectrum (M, then H, Y, G, S, C or I; see Details below): they replace
+//   the same parts of the entry here.
 // * Each line of the file is a line on the screen (too long lines wrap at a space).
 //   A blank line is kept (one at a time). Lines starting with ; are ignored. A line is
 //   kept up to 700 letters.
@@ -59,10 +62,12 @@ not, see <https://www.gnu.org/licenses/>.
 namespace gameinfo {
 
 static const size_t CONTROLS_MAX = 512;         // letters kept of the controls
-static const size_t TEXT_MAX = 2048;            // letters kept of the instructions
+static const size_t TEXT_MAX = 8192;            // letters kept of the instructions (2048 up to 2.5.0 test 11)
 static const size_t GAME_MAX = 64;
 static const size_t HOUSE_MAX = 40;             // letters kept of the software house
 static const size_t YEAR_MAX = 8;               // and of the year
+static const size_t GENRE_MAX = 30;             // and of the genre ("Arcade Game: Action")
+static const size_t SCORE_MAX = 2;              // and of your own score (out of 10)
 static const size_t NOTES_SHOW_MAX = 1024;      // letters kept of the notes to show
 static const size_t TAPE_MAX = 640;             // letters kept of the tape summary
 static const size_t VERDICT_MAX = 15;           // and of what the Picoface says about loading it
@@ -171,9 +176,27 @@ private:
 // Only what was edited is in it. A part that is in it (even an empty one, which hides what
 // the Instructions file says) replaces that part of the game's entry; the rest still comes
 // from the Instructions file. A PC can read and change this file too.
-inline bool details_key(const char* t, const char** value, bool* year) {
-    static const struct { const char* key; bool year; } KEYS[] = {
-        { "software house", false }, { "publisher", false }, { "year released", true }, { "year", true } };
+// The one-line parts: "Software house: X" (or "Publisher:"), "Year: X" ("Year released:"),
+// "Genre: X", "Score: X" ("My score:"). Which (META_HOUSE ...), and its text; -1 if none.
+enum { META_HOUSE, META_YEAR, META_GENRE, META_SCORE, META_COUNT };
+static const size_t META_MAX[META_COUNT] = { HOUSE_MAX, YEAR_MAX, GENRE_MAX, SCORE_MAX };
+// The four, one after the other (Details and Info have them)
+struct MetaText {
+    char house[HOUSE_MAX + 1];          // "Software house:", "" if not given
+    char year[YEAR_MAX + 1];            // "Year:"
+    char genre[GENRE_MAX + 1];          // "Genre:"
+    char score[SCORE_MAX + 1];          // "Score:" (your own, out of 10)
+    char* meta(int f) { return reinterpret_cast<char*>(this) + AT[f]; }
+    const char* meta(int f) const { return reinterpret_cast<const char*>(this) + AT[f]; }
+    static constexpr uint8_t AT[META_COUNT] = { 0, HOUSE_MAX + 1, HOUSE_MAX + YEAR_MAX + 2, HOUSE_MAX + YEAR_MAX + GENRE_MAX + 3 };
+    void meta_clear() { house[0] = year[0] = genre[0] = score[0] = '\0'; }
+};
+static_assert(offsetof(MetaText, year) == MetaText::AT[META_YEAR] && offsetof(MetaText, genre) == MetaText::AT[META_GENRE] &&
+              offsetof(MetaText, score) == MetaText::AT[META_SCORE], "MetaText::AT is where they are");
+inline int meta_key(const char* t, const char** value) {
+    static const struct { const char* key; uint8_t field; } KEYS[] = {
+        { "software house", META_HOUSE }, { "publisher", META_HOUSE }, { "year released", META_YEAR },
+        { "year", META_YEAR }, { "genre", META_GENRE }, { "my score", META_SCORE }, { "score", META_SCORE } };
     for (const auto& k : KEYS) {
         size_t n = strlen(k.key);
         if (strncasecmp(t, k.key, n) != 0) {
@@ -184,10 +207,22 @@ inline bool details_key(const char* t, const char** value, bool* year) {
             continue;
         }
         *value = skip_blanks(p + 1);
-        *year = k.year;
-        return true;
+        return k.field;
     }
-    return false;
+    return -1;
+}
+
+// A one-line part's text as kept: plain letters, at most cap, no blanks at the end
+inline void meta_copy(char* dest, size_t cap, const char* s) {
+    size_t k = 0;
+    for (; s[k] != '\0' && s[k] != '\n' && k < cap; k++) {
+        unsigned char ch = (unsigned char) s[k];
+        dest[k] = (ch >= 32 && ch < 127) ? (char) ch : '?';
+    }
+    while (k > 0 && dest[k - 1] == ' ') {
+        k--;
+    }
+    dest[k] = '\0';
 }
 
 inline bool details_heading(const char* t, const char* word, const char** rest) {
@@ -211,29 +246,32 @@ inline bool details_heading(const char* t, const char* word, const char** rest) 
 inline bool details_special(const char* line) {
     const char* t = skip_blanks(line);
     const char* v;
-    bool y;
-    return *t == ';' || *t == '[' || details_key(t, &v, &y) || details_heading(t, "controls", &v) ||
+    return *t == ';' || *t == '[' || meta_key(t, &v) >= 0 || details_heading(t, "controls", &v) ||
            details_heading(t, "instructions", &v);
 }
 
-class Details {
+class Details : public MetaText {
 public:
-    char house[HOUSE_MAX + 1];
-    char year[YEAR_MAX + 1];
     char controls[CONTROLS_MAX + 2];
     char text[TEXT_MAX + 2];
     size_t ncontrols = 0, ntext = 0;
-    bool has_house = false, has_year = false, has_controls = false, has_text = false;
+    bool has_meta[META_COUNT];              // (house, year, genre, score)
+    bool has_controls = false, has_text = false;
 
     Details() { clear(); }
 
     void clear() {
-        house[0] = year[0] = controls[0] = text[0] = '\0';
+        meta_clear();
+        controls[0] = text[0] = '\0';
         ncontrols = ntext = 0;
-        has_house = has_year = has_controls = has_text = false;
+        memset(has_meta, 0, sizeof(has_meta));
+        has_controls = has_text = false;
     }
 
-    bool any() const { return has_house || has_year || has_controls || has_text; }
+    bool any() const {
+        for (bool h : has_meta) if (h) return true;
+        return has_controls || has_text;
+    }
 
     // The bytes of a file (lines ending in \n, \r\n or \r)
     void parse(const char* data, size_t n) {
@@ -268,20 +306,9 @@ public:
                 continue;
             }
             const char* rest;
-            bool is_year;
-            if (details_key(t, &rest, &is_year)) {
-                char* dest = is_year ? year : house;
-                size_t cap = is_year ? YEAR_MAX : HOUSE_MAX;
-                size_t k = 0;
-                for (; rest[k] != '\0' && k < cap; k++) {
-                    unsigned char ch = (unsigned char) rest[k];
-                    dest[k] = (ch >= 32 && ch < 127) ? (char) ch : '?';
-                }
-                while (k > 0 && dest[k - 1] == ' ') {
-                    k--;
-                }
-                dest[k] = '\0';
-                (is_year ? has_year : has_house) = true;
+            int f = meta_key(t, &rest);
+            if (f >= 0) {
+                set_meta(f, rest);
                 continue;
             }
             if (details_heading(t, "controls", &rest)) {
@@ -342,8 +369,10 @@ public:
             put(b, strlen(b));
             put("\n", 1);
         };
-        if (has_house) line("Software house: ", house);
-        if (has_year) line("Year: ", year);
+        static const char* const KEY[META_COUNT] = { "Software house: ", "Year: ", "Genre: ", "Score: " };
+        for (int f = 0; f < META_COUNT; f++) {
+            if (has_meta[f]) line(KEY[f], meta(f));
+        }
         auto body = [&](const char* heading, const char* s) {
             line(heading, "");
             while (*s != '\0') {
@@ -364,25 +393,14 @@ public:
     }
 
     // Replaces a part with text of lines ending in \n (an empty text keeps the part, empty)
-    void set_house(const char* s) { set_line(house, HOUSE_MAX, s); has_house = true; }
-    void set_year(const char* s) { set_line(year, YEAR_MAX, s); has_year = true; }
+    void set_meta(int f, const char* s) { meta_copy(meta(f), META_MAX[f], s); has_meta[f] = true; }
+    void set_house(const char* s) { set_meta(META_HOUSE, s); }
+    void set_year(const char* s) { set_meta(META_YEAR, s); }
     void set_controls(const char* s) { ncontrols = copy(controls, CONTROLS_MAX, s); has_controls = true; }
     void set_text(const char* s) { ntext = copy(text, TEXT_MAX, s); has_text = true; }
 
 private:
     char line_[LINE_MAX + 1];           // parse()'s line
-
-    static void set_line(char* dest, size_t cap, const char* s) {
-        size_t k = 0;
-        for (; s[k] != '\0' && s[k] != '\n' && k < cap; k++) {
-            unsigned char ch = (unsigned char) s[k];
-            dest[k] = (ch >= 32 && ch < 127) ? (char) ch : '?';
-        }
-        while (k > 0 && dest[k - 1] == ' ') {
-            k--;
-        }
-        dest[k] = '\0';
-    }
 
     static size_t copy(char* dest, size_t cap, const char* s) {
         size_t n = 0;
@@ -419,12 +437,10 @@ private:
 
 // ---------------------------------------------------------------------------
 // The entry of one game
-class Info {
+class Info : public MetaText {         // (the software house, year, genre, score)
 public:
     char controls[CONTROLS_MAX + 2];
     char text[TEXT_MAX + 2];
-    char house[HOUSE_MAX + 1];          // "Software house:", "" if not given
-    char year[YEAR_MAX + 1];            // "Year:"
     char notes[NOTES_SHOW_MAX + 2];     // the game's notes (set_notes), lines ending in \n
     char tape[TAPE_MAX + 2];            // the summary of a .tap or .tzx (set_tape), lines ending in \n
     char verdict[VERDICT_MAX + 1];      // can the Picoface load it: Yes, Maybe, Probably not, No
@@ -435,15 +451,21 @@ public:
     bool found = false;                 // the game has an entry
 
     // True if there is something to show from the Instructions file
-    bool any() const { return found && (ncontrols > 0 || ntext > 0 || house[0] != '\0' || year[0] != '\0'); }
+    bool any() const { return found && (ncontrols > 0 || ntext > 0 || meta_rows_() > 0); }
+
+    // how many of the one-line parts there are
+    int meta_rows_() const {
+        int n = 0;
+        for (int f = 0; f < META_COUNT; f++) n += meta(f)[0] != '\0' ? 1 : 0;
+        return n;
+    }
 
     // The details typed in on the Spectrum (Details): each part they have replaces the entry's
     void apply(const Details& d) {
-        if (d.has_house) {
-            memcpy(house, d.house, sizeof(house));
-        }
-        if (d.has_year) {
-            memcpy(year, d.year, sizeof(year));
+        for (int f = 0; f < META_COUNT; f++) {
+            if (d.has_meta[f]) {
+                memcpy(meta(f), d.meta(f), META_MAX[f] + 1);
+            }
         }
         if (d.has_controls) {
             memcpy(controls, d.controls, d.ncontrols + 1);
@@ -569,50 +591,28 @@ private:
     bool has_pend_ = false;
     int blanks_ = 0;                    // blank lines after it (at most 1 matters)
     int bom_ = 0;
-    char pm_house_[HOUSE_MAX + 1];      // lines after a name that may start the wanted entry
-    char pm_year_[YEAR_MAX + 1];
+    MetaText pm_;                       // lines after a name that may start the wanted entry
 
-    // "Software house: X", "Publisher: X", "Year: X", "Year released: X". Returns true if
-    // the line was one (its text is kept for the entry the name above it starts).
+    // "Software house: X", "Year: X", "Genre: X", "Score: X" (meta_key). Returns true if the
+    // line was one (its text is kept for the entry the name above it starts).
     bool meta_line(const char* t) {
-        static const struct { const char* key; bool year; } KEYS[] = {
-            { "software house", false }, { "publisher", false }, { "year released", true }, { "year", true } };
-        for (const auto& k : KEYS) {
-            size_t n = strlen(k.key);
-            if (strncasecmp(t, k.key, n) != 0) {
-                continue;
-            }
-            const char* p = skip_blanks(t + n);
-            if (*p != ':') {
-                continue;
-            }
-            p = skip_blanks(p + 1);
-            if (!(bracket_ || has_pend_)) {
-                return false;           // not after a name: an ordinary line
-            }
-            char* dest = bracket_ ? (k.year ? year : house) : (k.year ? pm_year_ : pm_house_);
-            size_t cap = k.year ? YEAR_MAX : HOUSE_MAX;
-            if (bracket_ && !matches_) {
-                return true;            // some other game's
-            }
-            size_t len = 0;
-            for (; p[len] != '\0' && len < cap; len++) {
-                unsigned char ch = (unsigned char) p[len];
-                dest[len] = (ch >= 32 && ch < 127) ? (char) ch : '?';
-            }
-            while (len > 0 && dest[len - 1] == ' ') {
-                len--;
-            }
-            dest[len] = '\0';
-            return true;
+        const char* p;
+        int f = meta_key(t, &p);
+        if (f < 0 || !(bracket_ || has_pend_)) {
+            return false;               // not one, or not after a name: an ordinary line
         }
-        return false;
+        if (bracket_ && !matches_) {
+            return true;                // some other game's
+        }
+        meta_copy(bracket_ ? meta(f) : pm_.meta(f), META_MAX[f], p);
+        return true;
     }
 
     void reset(const char* game) {
         set_name(game);
         controls[0] = text[0] = '\0';
-        house[0] = year[0] = pm_house_[0] = pm_year_[0] = '\0';
+        meta_clear();
+        pm_.meta_clear();
         ncontrols = ntext = nnotes = 0;
         notes[0] = '\0';
         found = false;
@@ -728,8 +728,9 @@ private:
         matches_ = name_matches(name, len);
         if (matches_) {
             found = true;
-            memcpy(house, pm_house_, sizeof(house));
-            memcpy(year, pm_year_, sizeof(year));
+            for (int f = 0; f < META_COUNT; f++) {
+                memcpy(meta(f), pm_.meta(f), META_MAX[f] + 1);
+            }
         }
         section_ = NONE;
         have_ctrl_ = have_text_ = false;
@@ -783,7 +784,7 @@ private:
             if (close != nullptr) {
                 if (!bracket_) {
                     flush_pending();
-                    if (matches_ && (ncontrols > 0 || ntext > 0 || house[0] != '\0' || year[0] != '\0')) {
+                    if (matches_ && (ncontrols > 0 || ntext > 0 || meta_rows_() > 0)) {
                         return true;    // the next entry
                     }
                     matches_ = false;
@@ -824,7 +825,7 @@ private:
         memcpy(pend_, line, n);
         pend_[n] = '\0';
         has_pend_ = true;
-        pm_house_[0] = pm_year_[0] = '\0';
+        pm_.meta_clear();
         return false;
     }
 
@@ -909,8 +910,20 @@ inline void draw_thumbnail(const uint8_t* src, uint8_t* dst, int row0, int col0)
 // ---------------------------------------------------------------------------
 // The text of the screen
 
-// The software house and the year take the first rows of the controls' column
-inline int meta_rows(const Info& info) { return (info.house[0] != '\0' ? 1 : 0) + (info.year[0] != '\0' ? 1 : 0); }
+// The genre as the screen shows it: a long one without its " Game" ("Arcade Game: Action" as
+// "Arcade: Action"). out holds GENRE_MAX + 1 (what is longer than the column is the ROM's to scroll)
+inline void genre_shown(const char* v, char* out, size_t size) {
+    const char* c = strlen(v) > CTRL_WIDTH ? strchr(v, ':') : nullptr;
+    int k = c != nullptr && c - v >= 5 && strncmp(c - 5, " Game", 5) == 0 ? (int) (c - v) - 5 : -1;
+    if (k >= 0) snprintf(out, size, "%.*s%s", k, v, c);
+    else snprintf(out, size, "%s", v);
+}
+
+// The row of the genre on the first page (under the software house and the year)
+inline int genre_row(const Info& info) { return CTRL_HEAD_ROW + (info.house[0] != '\0' ? 1 : 0) + (info.year[0] != '\0' ? 1 : 0); }
+
+// The software house, the year, the genre and your score take the first rows of the controls' column
+inline int meta_rows(const Info& info) { return info.meta_rows_(); }
 inline int ctrl_rows(const Info& info) { return CTRL_ROWS - meta_rows(info); }
 
 // What is left of a section after the lines of its place on the first page
@@ -970,19 +983,20 @@ void draw_text(const Info& info, int page, Put put) {
             return;
         }
         int row = CTRL_HEAD_ROW;
-        if (info.house[0] != '\0') {
+        static const uint8_t META_ATTR[META_COUNT] = { ATTR_HEADING, ATTR_TEXT, ATTR_TEXT, ATTR_KEYS };
+        for (int f = 0; f < META_COUNT; f++) {
+            const char* v = info.meta(f);
+            if (*v == '\0') {
+                continue;
+            }
             char shown[CTRL_WIDTH + 1];
-            size_t n = strnlen(info.house, CTRL_WIDTH);
-            memcpy(shown, info.house, n);
-            shown[n] = '\0';
-            emit(row++, CTRL_COL, shown, ATTR_HEADING);
-        }
-        if (info.year[0] != '\0') {
-            char shown[CTRL_WIDTH + 1];
-            size_t n = strnlen(info.year, YEAR_MAX);
-            memcpy(shown, info.year, n);
-            shown[n] = '\0';
-            emit(row++, CTRL_COL, shown, ATTR_TEXT);
+            if (f == META_SCORE) {
+                snprintf(shown, sizeof(shown), "Score: %s/10", v);
+            } else {
+                if (f == META_GENRE) genre_shown(v, shown, sizeof(shown));
+                else snprintf(shown, sizeof(shown), "%s", v);
+            }
+            emit(row++, CTRL_COL, shown, META_ATTR[f]);
         }
         if (info.ncontrols > 0) {
             emit(row, CTRL_COL, "Controls", ATTR_HEADING);
@@ -1062,8 +1076,8 @@ inline bool screen_is_blank(const uint8_t* screen) {
 inline void key_help(bool from_menu, int pages, char* out, bool can_delete = false, bool can_full = false) {
     const bool pg = pages > 1;
     if (from_menu) {
-        if (can_full) snprintf(out, 40, "%s", pg ? "N/P-Page F-Full M-Edit X-Exit" : "F-Full  M-Edit  X-Exit");
-        else snprintf(out, 40, "%s", pg ? "N/P-Page  M-Edit  X-Exit" : "M-Edit  X-Exit");
+        if (can_full) snprintf(out, 40, "%s", pg ? "N/P-Page F-Full M-Edit X-Back" : "F-Full  M-Edit  X-Back");
+        else snprintf(out, 40, "%s", pg ? "N/P-Page  M-Edit  X-Back" : "M-Edit  X-Back");
         return;
     }
     if (can_delete) {

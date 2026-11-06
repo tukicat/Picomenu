@@ -1,0 +1,37 @@
+# Edit on the file transfer's page (a .txt or .ini): the page has the editor, and Save sends the
+# file over the old one (/api/put, o=1). Picomenu.ini sent that way is used as T-F closes, as a
+# save of it in the Spectrum's own editor is: here the theme goes from dark to light.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/options-a.ini
+sd /Docs/short.txt {HERE}/short.txt
+boot
+http GET /
+expecthttp data-t=
+expecthttp Close without saving?
+expecthttp /api/put?p='+enc(ed.p)+'&o=1
+http GET /api/get?p=%2FDocs%2Fshort.txt
+expecthttp 200 OK
+nmi
+wait 30
+key o
+wait 40
+expect theme
+expect dark
+key x
+wait 30
+key t
+wait 30
+key f
+wait 30
+http PUT /api/put?p=%2FPicomenu.ini&o=1 {HERE}/light.ini
+expecthttp Saved
+key BREAK
+wait 30
+key x
+wait 30
+key o
+wait 40
+expect theme
+expect theme         light
+key x
+wait 30

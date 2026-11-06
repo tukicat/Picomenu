@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.4.0
+THIRD-PARTY NOTICES - PicoMenu Rev 2.5.0
 ========================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
@@ -62,7 +62,10 @@ tools/z80tap), the settings and Options (pico/settings.h, options.h) and the sim
 files (tools/picosim/tests, including the made-up game of make_levelloader.py), and the
 file transfer's web server and page (pico/webfiles.h, webpage.cxx, wifi.cxx). No new
 third-party code was added for Rev 2.0 to Rev 2.3.0; Rev 2.4.0 adds the Pico W build
-(below). The old picoFace web server (http_server.cxx), which only that build used,
+(below), and Rev 2.5.0 adds to it Mbed TLS, miniz's inflater and Mozilla's root
+certificates (ZXDB downloads), and PicoMenu's own HTTP, ZXDB and unzip code (pico/net.h,
+net.cxx, netget.h, zxdb.h, unzip.h, tools/nettest, tools/make_netroots.py,
+tools/picosim/net_host.cpp). The old picoFace web server (http_server.cxx), which only that build used,
 is gone.
 
 The Spectrum ROM images and any games or snapshots you use with the
@@ -110,6 +113,16 @@ The Pico W build
  SBC encoder (Broadcom,     linked into the Pico W       Apache 2.0
    in BTstack's 3rd-party/  firmware, from the Pico SDK  (pico/FatFs_SPI/
    bluedroid)               (lib/btstack)                LICENSE-Apache-2.0.txt)
+ Mbed TLS 2.28 (Arm and     linked into the Pico W       Apache 2.0
+   contributors): HTTPS     firmware, from the Pico SDK  (section 14)
+   for ZXDB                 (lib/mbedtls); settings in
+                            pico/mbedtls_config.h
+ miniz's inflater (Rich     pico/miniz_tinfl.c, .h,      MIT (section 15)
+   Geldreich, RAD Game        miniz_common.h; PicoMenu's
+   Tools, Valve)              pico/miniz_export.h
+ Root certificates from     pico/netroots.h (made by     MPL 2.0
+   Mozilla's root store     tools/make_netroots.py)      (section 16)
+   (certifi's cacert.pem)
 
 lwIP's licence is like the others above. The cyw43 driver's is not: it lets it
 be used and passed on only with Raspberry Pi's chips (the Pico W is one), and
@@ -143,8 +156,20 @@ own terms still apply (the Pico W only, and not for commercial use).
 Its SBC encoder (Broadcom, Apache 2.0) is compatible with the GPL v3. The
 source zip has none of BTstack: it comes from the Pico SDK.
 
+Mbed TLS (Apache 2.0) and miniz (MIT) are compatible with the GPL v3, as is the
+MPL 2.0 of the root certificates (its section 3.3). None of them changes what
+is said above about passing the Pico W .uf2 on.
 
-================================================================
+ZXDB's data (the titles, software houses, years and file lists that ZXDB lookups
+show) is not in the firmware or the source: it is fetched from the ZXInfo API
+when a key asks for it, and is (c) ZXDB, under the Open Database License (ODbL
+1.0, https://opendatacommons.org/licenses/odbl/1-0/); the screens credit it. The
+games, screens and other files downloaded keep their own rights: PicoMenu only
+offers to download those ZXDB calls "Available". The simulator's test answers
+(tools/picosim/tests/make_zxdb.py) are made up.
+
+
+=================================================================
 1. FatFs - Copyright (C) ChaN
 ================================================================
 
@@ -713,3 +738,72 @@ SUCH DAMAGE.
 
 Please inquire about commercial licensing options at 
 contact@bluekitchen-gmbh.com
+
+
+================================================================
+14. Mbed TLS - Copyright The Mbed TLS Contributors (Pico W build only)
+================================================================
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License. You may obtain a copy of
+the License at http://www.apache.org/licenses/LICENSE-2.0 (the text is in
+pico/FatFs_SPI/LICENSE-Apache-2.0.txt).
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations under
+the License.
+
+Linked from the Pico SDK's lib/mbedtls (v2.28), not changed; PicoMenu's
+settings for it are pico/mbedtls_config.h.
+
+
+================================================================
+15. miniz - inflater (tinfl) (Pico W build only)
+================================================================
+
+Copyright 2013-2014 RAD Game Tools and Valve Software
+Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+From https://github.com/richgel999/miniz (miniz_tinfl.c, miniz_tinfl.h,
+miniz_common.h). Changed in PicoMenu: miniz_tinfl.c includes miniz_tinfl.h, not
+miniz.h (only the inflater is used); pico/miniz_export.h is PicoMenu's.
+
+
+================================================================
+16. Root certificates - Mozilla's CA root store (Pico W build only)
+================================================================
+
+pico/netroots.h holds nine root certificates (ISRG Root X1 and X2, GTS Root R1
+and R4, DigiCert Global Root G2, USERTrust RSA and ECC Certification
+Authority, Amazon Root CA 1, GlobalSign Root CA - R3) as DER, taken by
+tools/make_netroots.py from cacert.pem of the certifi project
+(https://github.com/certifi/python-certifi), which is Mozilla's root store:
+
+  This Source Code Form is subject to the terms of the Mozilla Public License,
+  v. 2.0. If a copy of the MPL was not distributed with this file, You can
+  obtain one at https://mozilla.org/MPL/2.0/.
+
+The source form of these certificates is cacert.pem (and pico/netroots.h in
+the source zip).
+

@@ -83,6 +83,11 @@ void crash_boot();
 bool crashed();                         // the last restart was a crash or a hang
 void crash_text(int line, char* out, size_t size);  // line 0: what and where, 1: the last events
 void crash_clear();
+// The hang watch (the ZXDB lookups): while on, a main loop that has not gone round (hang_feed)
+// for 20 s is taken for a hang: where core 0 was is kept, as for a crash ("Hang PC ... LR ..."),
+// and the Pico restarts. A timer interrupt of its own looks once a second.
+void hang_watch(bool on);
+void hang_feed();
 
 }   // namespace bt
 

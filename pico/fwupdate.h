@@ -49,7 +49,7 @@ static const uint32_t FLASH_BASE = 0x10000000;
 #ifndef PICOMENU_RESERVE_KB
 #define PICOMENU_RESERVE_KB 0
 #endif
-// the file system starts here: 2 MB - 1800 KB (the Pico W build: - 1400 KB, and the program
+// the file system starts here: 2 MB - 1800 KB (the Pico W build: - 1280 KB, and the program
 // ends 8 KB before it, where the Bluetooth pairing is kept)
 static const uint32_t APP_MAX = 2 * 1024 * 1024 - PICOMENU_FS_KB * 1024 - PICOMENU_RESERVE_KB * 1024;
 static const uint32_t APP_MIN = 0x10000;            // a Picoface image is far bigger than this

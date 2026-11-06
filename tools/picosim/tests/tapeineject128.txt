@@ -47,7 +47,7 @@ nmi
 wait 30
 key 1
 wait 30
-expect The running game is lost
+expect The game will be lost
 key y
 wait 200
 key ENTER

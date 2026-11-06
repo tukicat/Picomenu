@@ -1,0 +1,71 @@
+# Z on the Poke screen (P on the menu): the game last loaded looked up in ZXDB by its name (the
+# pretend network, net_host.cpp). The titles found are listed; one picked asks whether to download
+# its pokes (a title with none says so), and Y saves them as /Poke List/<game>.pok, which L then
+# lists. With a .pok there already nothing is fetched: "Poke file already exists".
+sd /48.rom {ROM48}
+sd /Games/Green_Beret_1986Imagine.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+net https://api.zxinfo.dk/v5/search/titles/Green%20Beret?mode=tiny&size=10&offset=0* {OUT}/search.http
+net https://spectrumcomputing.co.uk/zxdb/sinclair/pokes/g/Green%20Beret%20%281986%29%28Imagine%20Software%29.pok {OUT}/pok.http
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 300
+nmi
+wait 30
+key p
+wait 30
+expect Apply Poke
+expect L-Poke list
+expect Z-Look it up in ZXDB
+key l
+wait 30
+expect No .pok in Poke List
+key 1
+wait 30
+expectnet 0
+key z
+wait 80
+expectnet 1
+expect ZXDB: pokes for this game
+expect 1 Green Beret
+expect Pick the game to get its pokes.
+# a title with no pokes
+key 2
+wait 30
+expect ZXDB has no pokes for it.
+key n
+wait 30
+expect 1 Green Beret
+key 1
+wait 30
+expect Download its pokes as
+expect Green_Beret_1986Imagine.pok?
+expect Y-Yes  N-No
+expectnet 1
+key y
+wait 80
+expectnet 2
+expect Pokes saved in Poke List
+expectfile sd /Poke List/Green_Beret_1986Imagine.pok|NInfinite lives
+key x
+wait 40
+expect Apply Poke
+key l
+wait 30
+expect Infinite lives
+expect Start on level 3
+key x
+wait 30
+# again: the .pok is there, nothing is asked for
+key z
+wait 40
+expect Poke file already exists
+expectnet 2
+key x
+wait 30
+expect Apply Poke

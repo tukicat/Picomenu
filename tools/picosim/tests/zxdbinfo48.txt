@@ -1,0 +1,128 @@
+# Z in the game information's M menu: the game looked up in ZXDB by its name (the pretend
+# network, net_host.cpp): picked from the titles found, its software house, year and genre go in its
+# details (Game Notes/<game>.info.txt). L saves them and gets its loading screen too, saved for
+# this game ("<game> Loading Screen.scr"); S saves only them. Only what a key asks for is fetched.
+sd /48.rom {ROM48}
+sd /Games/Green_Beret_1986Imagine.tap {HERE}/tapein.tap
+sd /Game Notes/readme.txt {HERE}/short.txt
+net https://api.zxinfo.dk/v5/search/titles/Green%20Beret?mode=tiny&size=10&offset=0* {OUT}/search.http
+net https://spectrumcomputing.co.uk/zxdb/sinclair/entries/0002259/GreenBeret.scr {OUT}/scr.http
+net https://archive.org/download/World_of_Spectrum_June_2017_Mirror/World%20of%20Spectrum%20June%202017%20Mirror.zip/World%20of%20Spectrum%20June%202017%20Mirror/sinclair/games-info/* {OUT}/instr.http
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key v
+wait 10
+key 1
+wait 50
+key m
+wait 30
+expect Z-Look it up in ZXDB
+expect (none)
+expectnet 0
+key z
+wait 80
+expectnet 1
+expect 1 Green Beret
+expect Pick the game to take its
+key 1
+wait 30
+expect Imagine Software Ltd
+expect I-Instructions       No
+expect L-Loading screen     No
+key i
+key l
+wait 20
+expect I-Instructions       Yes
+expect L-Loading screen     Yes
+expectnet 1
+key s
+wait 120
+expectnet 3
+key a
+wait 60
+expect H-Software house
+expect Imagine Software Ltd
+expect 1986
+expect Saved details, text and screen
+expect G-Genre
+expect Arcade Game: Action
+expect I-Instructions  
+expectnot I-Instructions  0/
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Instructions
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Rescue the prisoners from the
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|CONTROLS.
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Year- 1985 in Europe
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|:not a comment
+nofile sd /Game Notes/~zxdb.txt
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Software house: Imagine Software Ltd
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Year: 1986
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Genre: Arcade Game: Action
+expectbyte sd /Scraper/Screen Grabs/Green_Beret_1986Imagine Loading Screen.scr|0|0x55
+# again, S only: no loading screen asked for
+key z
+wait 80
+expectnet 4
+key 2
+wait 30
+expect Somebody Else
+expect (no instructions in ZXDB)
+expect (no loading screen in ZXDB)
+key s
+wait 60
+expectnet 4
+expect Somebody Else
+expect 1991
+expect House, year and genre saved
+expect Arcade Game: Action
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Software house: Somebody Else
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Rescue the prisoners from the
+nofile sd /Scraper/Screen Grabs/Green_Beret_1986Imagine Loading Screen1.scr
+# BREAK leaves it, nothing saved
+key z
+wait 80
+expectnet 5
+key BREAK
+wait 20
+expect Search for a title
+key BREAK
+wait 40
+expect H-Software house
+expect Somebody Else
+# S: your own score, out of 10 (11 is not one)
+expect S-My score (none)
+key s
+wait 20
+expect Your score, a number 0 to 10
+key 1
+key 1
+key ENTER
+wait 20
+key y
+wait 30
+expect The score is a number, 0 to 10
+key BREAK
+wait 20
+key n
+wait 30
+expect S-My score (none)
+key s
+wait 20
+key 8
+key ENTER
+wait 20
+key y
+wait 30
+expect S-My score 8/10
+expectfile sd /Game Notes/Green_Beret_1986Imagine.info.txt|Score: 8
+key x
+wait 40
+expectnet 5
+# the information: the genre (without its " Game") and the score beside the picture
+expect Somebody Else
+expect Arcade: Action
+expect Score: 8/10

@@ -35,7 +35,7 @@ key v
 wait 10
 key 2
 wait 50
-expect Only .tap .tzx .sna .z80 .szx
+expect V shows games only
 key ENTER
 wait 50
 expect 2-Picture

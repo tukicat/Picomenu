@@ -34,7 +34,10 @@ extern unsigned char* picomenu_lwip_heap;
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
-#define TCP_WND                     (6 * TCP_MSS)
+// (ZXDB's HTTPS, net.cxx: a TLS record, up to 16 KB, is only read once all of it has come, and
+// altcp_tls opens the window again only then, so the window must hold a whole record: with 6
+// MSS, 8760 bytes, the answer stopped half way. The file transfer frees each piece at once.)
+#define TCP_WND                     (12 * TCP_MSS)
 #define TCP_MSS                     1460
 #define TCP_SND_BUF                 (6 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
@@ -52,7 +55,13 @@ extern unsigned char* picomenu_lwip_heap;
 #define LWIP_IPV4                   1
 #define LWIP_TCP                    1
 #define LWIP_UDP                    1
-#define LWIP_DNS                    0
+#define LWIP_DNS                    1       // ZXDB downloads (net.cxx): the servers' names
+#define DNS_TABLE_SIZE              2
+#define DNS_MAX_NAME_LENGTH         64      // (the RAM is short: api.zxinfo.dk, archive.org's servers fit)
+// HTTPS for the ZXDB downloads: lwIP's altcp layer with TLS by mbedtls (mbedtls_config.h)
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0

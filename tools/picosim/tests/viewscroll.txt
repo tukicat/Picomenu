@@ -1,5 +1,6 @@
-# The game information: a software house longer than its 15 letters scrolls in its place; F (the
-# picture on the whole screen, here an empty one) shows no part of it
+# The game information: a software house longer than its 15 letters scrolls in its place (the
+# genre and score are under it; a long genre scrolls after it, in turn); F (the picture on the whole screen, here an empty one) shows
+# no part of it
 sd /48.rom {ROM48}
 sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
 sd /Scraper/Instructions.txt {OUT}/Instructions.txt
@@ -16,10 +17,23 @@ wait 10
 key 1
 wait 5
 expect Rescue the prisoners
+# the genre (without its " Game") and the score from the Instructions file
+expect Arcade: Shoot-e
+expect Score: 9/10
 wait 160
 expect Software (
 wait 160
 expect Software Ltd
+expect Arcade: Shoot-e
+# a genre too long scrolls too, after the software house (which is back at its start)
+wait 200
+expect de: Shoot-em-up
+expect Imagine Softwar
+expectnot Software Ltd
+# and then the house again
+wait 400
+expect Software Ltd
+expect Arcade: Shoot-e
 key f
 wait 200
 expectnot Software

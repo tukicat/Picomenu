@@ -1,0 +1,41 @@
+# Z on the menu: ZXDB's search, the WiFi started for it (the pretend network, net_host.cpp). It
+# joins, then asks for a title; one searched for and picked shows its files and downloads them as
+# T-F's search does. BREAK back from the typing goes back to the menu, the WiFi off.
+sd /48.rom {ROM48}
+net https://api.zxinfo.dk/v5/search/titles/green?mode=tiny&size=10&offset=0* {OUT}/search.http
+net https://api.zxinfo.dk/v5/entries/0002259* {OUT}/entry.http
+boot
+nmi
+wait 30
+expect Z-Search ZXDB
+expect X-Exit
+key z
+wait 40
+expect ZXDB: Spectrum Computing
+expect Search for a title
+expectnet 0
+key g
+key r
+key e
+key e
+key n
+key ENTER
+wait 60
+expectnet 1
+expect 1 Green Beret
+key 1
+wait 60
+expectnet 2
+expect Download to /Downloads:
+key BREAK
+wait 30
+expect 1 Green Beret
+key BREAK
+wait 30
+expect Search for a title
+wait 20
+key BREAK
+wait 40
+expect B-Browse Games
+expect Z-Search ZXDB
+expectnet 2

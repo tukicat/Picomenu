@@ -1,0 +1,16 @@
+title=Green Beret
+originalYearOfRelease=1986
+availability=Available
+remarks=A first line
+that ran on to a second
+publishers.0.name=Imagine Software Ltd
+releases.0.releaseSeq=0
+releases.0.files.0.path=/pub/sinclair/games/g/GreenBeret.tzx.zip
+releases.0.files.0.type=Tape image
+releases.0.files.0.format=Perfect tape (TZX)
+releases.0.files.1.type=Instructions
+releases.0.files.1.path=/pub/sinclair/games-info/g/GreenBeret.txt
+releases.1.files.0.type=Snapshot image
+releases.1.files.0.path=/zxdb/sinclair/entries/0002259/GreenBeret.z80.zip
+releases.1.files.1.path=/zxdb/sinclair/entries/0002259/GreenBeret.dsk.zip
+releases.1.files.1.type=Disk image

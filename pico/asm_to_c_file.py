@@ -128,6 +128,7 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define START_SAVETYPE 0x{symbols['savesnapshotscreen.savedefault']:x}\n")
     fp.write(f"#define START_THEME 0x{symbols['theme_light']:x}\n")
     fp.write(f"#define START_MENUSHOT 0x{symbols['menu_shot']:x}\n")
+    fp.write(f"#define START_KEYREPEAT 0x{symbols['key_repeat']:x}\n")    # the pico's screen is one for typing: a held key repeats
     fp.write(f"#define NMI_CHARBANK 0x{symbols['charbank']:x}\n")
     # the game's sound chip volumes, kept while the menu is up, and where they go in a 128K save
     fp.write(f"#define NMI_AYVOLS 0x{symbols['ayvols']:x}\n")
@@ -135,6 +136,15 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define INFO_HOUSE 0x{symbols['INFO_HOUSE']:x}\n")
     fp.write(f"#define INFO_HOUSE_SIZE {symbols['INFO_HOUSE_SIZE']}\n")
     fp.write(f"#define INFO_HOUSE_WIDTH {symbols['INFO_HOUSE_WIDTH']}\n")
+    # the game information's scrolling (the software house, the genre): the tables the pico fills
+    fp.write(f"#define INFO_SCROLL1 0x{symbols['startmenu.infoscroll']:x}\n")
+    fp.write(f"#define INFO_SCROLL2 0x{symbols['startmenu.infoscroll2']:x}\n")
+    fp.write(f"#define INFO_SCROLL_CUR 0x{symbols['startmenu.scrollcur']:x}\n")
+    fp.write(f"#define INFO_SCROLL_POS 0x{symbols['startmenu.scrollpos']:x}\n")
+    fp.write(f"#define INFO_SCROLL_TIMER 0x{symbols['startmenu.scrolltimer']:x}\n")
+    fp.write(f"#define INFO_SCROLL_HOLD {symbols['SCROLL_HOLD']}\n")
+    fp.write(f"#define INFO_HOUSE_ROW {symbols['INFO_HOUSE_ROW']}\n")
+    fp.write(f"#define INFO_HOUSE_COL {symbols['INFO_HOUSE_COL']}\n")
 
     for k, v in symbols.items():
         if k.startswith("STARTUP_ACTION_"):

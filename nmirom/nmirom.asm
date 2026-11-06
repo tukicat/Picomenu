@@ -393,7 +393,11 @@ ACTION_SNA_HASH equ 0x30
 // F in Tools: file transfer over WiFi (a Pico W). The pico draws the screen and runs the
 // connection. BYTE param1 = the key (0: opened, 255: none pressed, just asking whether the
 // screen has changed). Status 0 stays as it is, 1 closed, 2 shown again (it changed)
+// (opened with 0xFE: B - Bluetooth tape; 0xFD: Z on the Poke screen; 0xFC: Z on the menu, ZXDB's search)
 ACTION_WIFI equ 0x31
+// E in Tools: erase a game's assets (its autosaves, save slots and saves, notes, pokes, tape
+// notes, screen grabs). The pico draws the screen and works it (picoscreen)
+ACTION_ASSETS equ 0x32
 // Saves the game's screen (the pico has it from when the menu opened) in the folder
 // Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
@@ -476,7 +480,7 @@ PICTURE_DELAY equ 5000
 // there as the Reload item does. In spare_space above a list page (at most about 860 bytes)
 // and below MOVE_INFO, where the screen comes through (see the ASSERTs at the end).
 INFO_HOUSE equ spare_space + 880
-INFO_HOUSE_SIZE equ 64
+INFO_HOUSE_SIZE equ 80          // (the software house and the genre: 41 + 31)
 INFO_HOUSE_WIDTH equ 15
 INFO_HOUSE_ROW equ 1
 INFO_HOUSE_COL equ 17
@@ -865,9 +869,12 @@ startmenu:
 // "R-", so then the text scrolls: it waits at the start, moves one letter at a time to the end,
 // waits there and starts again. SCROLL_WINDOW holds the 28 letters shown now.
 
-// The scrolling is shared with the software house on the game information (.infoshow): the
-// text, the width shown, the place (row * 256 + column) and the colours (0: keep them) are
-// in .scrollsrc ... .scrollattr, set from a 6-byte table by .scrollparams.
+// The scrolling is shared with the software house and the genre on the game information
+// (.infoshow): the text, the width shown, the place (row * 256 + column), the colours (0: keep
+// them) and the table of the next text to scroll (0: none) are in .scrollsrc ... .scrollnext,
+// set from an 8-byte table by .scrollparams. With a next one, each text scrolls to its end in
+// turn and is put back to its start. The game information's tables are the pico's to fill
+// (startmenu.infoscroll, infoscroll2), and it sets .scrollcur, the one to start with.
 .scrollinit:
     ld hl, .menuscroll
     call .scrollparams
@@ -880,8 +887,9 @@ startmenu:
 // hl = the table: the text's address, the width, the place, the colours. Also finds the
 // text's length (at most 64).
 .scrollparams:
+    ld (.scrollcur), hl
     ld de, .scrollsrc
-    ld bc, 6
+    ld bc, 8
     ldir
     ld hl, (.scrollsrc)
     ld b, 0
@@ -939,6 +947,13 @@ startmenu:
     cp b
     jr c, 1F
     xor a                       // at the end: round to the start
+    ld (.scrollpos), a
+    call .scrollshow
+    ld hl, (.scrollnext)        // and the next text (if any) scrolls
+    ld a, h
+    or l
+    call nz, .scrollparams
+    xor a
     ld hl, SCROLL_HOLD
     jr 2F
 1:  inc a                       // one letter on
@@ -964,14 +979,19 @@ startmenu:
     BYTE SCROLL_WIDTH
     WORD SCROLL_ROW * 256 + SCROLL_COL
     BYTE OPTION_ATTR
+    WORD 0
 .infoscroll: WORD INFO_HOUSE
     BYTE INFO_HOUSE_WIDTH
     WORD INFO_HOUSE_ROW * 256 + INFO_HOUSE_COL
     BYTE 0                      // the colours the pico drew
+    WORD 0
+.infoscroll2: BLOCK 8           // (the genre, when both are too long)
 .scrollsrc WORD 0
 .scrollw BYTE 0
 .scrollat WORD 0
 .scrollattr BYTE 0
+.scrollnext WORD 0
+.scrollcur WORD .infoscroll
 .scrollpos BYTE 0
 .scrolllen BYTE 0
 .scrolltimer WORD 0
@@ -1180,6 +1200,17 @@ startmenu:
     call picoscreen
     jr .helpexit
 
+// E in Tools: a game's assets erased (the pico's screen)
+.handle_assets:
+    ld c, ACTION_ASSETS
+    jr .picoscreenexit
+
+// Z: ZXDB's search (a Pico W): the pico's screens start the WiFi, search, download
+.handle_zxdb:
+    ld a, 0xFC
+    call wifiscreen
+    jr .helpexit
+
 // O: Options, the pico draws it (as the tape player); D there shows the Diagnostics page
 .handle_options:
     ld c, ACTION_OPTIONS
@@ -1202,33 +1233,9 @@ startmenu:
     jr 1F
 .handle_wifi:
     xor a
-1:  ld ix, 0
-    ld (ix + 2), a
-    ld (ix + 1), ACTION_WIFI
-    call waitpico
-    cp 1
-    jr z, .helpexit         // closed
+1:  call wifiscreen
     cp 3
-    jr z, .btexit           // leave the menu
-    cp 2
-    call z, previewfrompico // changed: shown again
-    ld b, 20                // about 0.2 s, looking at the keys
-2:  push bc
-    ld de, 100
-    call pause
-    call getkeypress
-    pop bc
-    or a
-    jr z, 3F
-    cp 255
-    jr nz, 4F
-3:  djnz 2B
-    ld a, 255               // no key
-    jr 1B
-4:  push af
-    call waitforkeyrelease
-    pop af
-    jr 1B
+    jr nz, .helpexit        // closed
 .btexit:
     xor a
     ld (.intools), a        // the next NMI opens the menu itself
@@ -1653,7 +1660,8 @@ startmenu:
     MENU_ITEM 'v', 13, 2, .tapemsg, .handle_tape
     MENU_ITEM 'a', 14, 2, .checkpointsmsg, .handle_checkpoints
     MENU_ITEM 't', 15, 2, .toolsmsg, .handle_tools
-    MENU_ITEM 'x', 16, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'z', 16, 2, .zxdbmsg, .handle_zxdb
+    MENU_ITEM 'x', 17, 2, .exitmsg,  .handle_exit
     MENU_END
 // T: Tools, the things used now and then. Each goes back to this menu when it is done
 // (.showtopscreen comes here while .intools is set); X goes back to the NMI menu.
@@ -1666,14 +1674,17 @@ startmenu:
     MENU_ITEM 'c', 7, 2, .batchmsg, .handle_batch
     MENU_ITEM 'f', 8, 2, .wifimsg, .handle_wifi
     MENU_ITEM 'b', 9, 2, .btmsg, .handle_bt
+    MENU_ITEM 'e', 10, 2, .assetsmsg, .handle_assets
     MENU_ITEM 'x', 11, 2, .backmsg, .handle_toolsback
     MENU_END
 .toolsmsg: DZ "Tools"
-.backmsg: DZ "Back"
+.zxdbmsg: DZ "Search ZXDB"
+.exitmsg: DZ "Exit"                 // (X on the menu: leave it, back to the game)
 .optionsmsg: DZ "Options"
 .batchmsg: DZ "Batch convert"
 .wifimsg: DZ "File transfer (WiFi)"
 .btmsg: DZ "Bluetooth tape"
+.assetsmsg: DZ "Erase all assets"
 .intools: BYTE 0
 .testromshow: DZ "Test ROM (diagnostics)"
 .tapemsg: DZ "Virtual Tape Player"
@@ -1689,7 +1700,7 @@ startmenu:
 .baddiagmsg: DZ "DiagROM.rom is too short"
 .testexit1: DZ "To exit the test ROM press"
 .testexit2: DZ "the NMI button, choose Change"
-.testexit3: DZ "ROM, then choose Internal Rom."
+.testexit3: DZ "ROM, then Internal Rom."
 .notestmsg: DZ "testrom.rom: flash or SD /ROMS"
 .badtestmsg: DZ "testrom.rom is too short"
 .reset48menumsg: DZ "Reset to 48K"
@@ -1698,8 +1709,8 @@ startmenu:
 .resettitle: DZ "Reset the Spectrum"
 .reset48msg: DZ "into 48K mode (48 BASIC)?"
 .reset128msg: DZ "into 128K mode (the menu)?"
-.resetlost: DZ "The running game is lost."
-.resetask: DZ "Y-Yes, reset it   N-No"
+.resetlost: DZ "The game will be lost."
+.resetask: DZ "Y-Yes  N-No"
 .infomsg: DZ "Game Instructions"
 .recentmsg: DZ "Recently played"
 .updatemsg: DZ "Update PicoMenu"
@@ -1713,13 +1724,11 @@ startmenu:
 .updatefailmsg: DZ "Update failed"
 .updatefail2: DZ "Hold BOOTSEL, plug in USB,"
 .updatefail3: DZ "copy the .uf2 to RPI-RP2."
-.norecentmsg: DZ "Cannot find that game"
+.norecentmsg: DZ "Game not found"
 .grabanykey: DZ "Press any key"
 .savemsg: DZ "Save snapshot"
 .loadmsg: DZ "Browse Games"
-.chamgemsg: DZ "Change ROM"
-.exitmsg: DZ "Exit"
-.pokemsg: DZ "Poke"
+// (.chamgemsg, .exitmsg, .pokemsg: the ends of longer messages, at the end of the file)
 
 
 
@@ -1846,6 +1855,15 @@ menuhandler_with_idle:
     jr .checkitems
 
 .checkdone
+    // BREAK, if the menu has no item for it, is its X item (back), or else its N (no)
+    ld a, c
+    cp 0x18
+    ld c, 'x'
+    jr z, .rescan
+    cp 'x'
+    ld c, 'n'
+    jr z, .rescan
+    ld c, a
     ld hl, (.keydown_handler)
     ld a, l
     or h
@@ -1855,6 +1873,10 @@ menuhandler_with_idle:
     pop hl
     jr .scan_next_key
 .jp_hl jp (hl)
+.rescan
+    pop hl
+    push hl
+    jr .checkitems
 
 .foundmatch
     push bc    // we want to restore c because that holds the keypressed
@@ -2054,7 +2076,7 @@ changeromscreen:
 .startpos WORD 0
 .titlemsg DZ "Change Rom"
 .snap0 BYTE 0
-.exit equ startmenu.exitmsg         // the same text
+.exit equ pokescreen.listkeys + 20     // "Back" (the end of the poke list's keys)
 .next DZ "Next"
 .prev DZ "Previous"
 .writablemsg DZ "Writable [ ]"
@@ -2785,7 +2807,7 @@ loadscreen:
 .inputdelete
     call delete_edit_char
 .inputrelease
-    call waitforkeyrelease
+    call waitforkeyrepeat   // (held, a letter or DELETE repeats)
     jr .inputnextkey
 
 .inputcancel
@@ -3584,7 +3606,7 @@ loadscreen:
 .emptymsg DZ "Empty"
 .hidewhich DZ "Hide or show which? 1-0"
 .snap0 BYTE 0
-.exit equ startmenu.exitmsg         // the same text
+.exit equ pokescreen.listkeys + 20     // "Back" (the end of the poke list's keys)
 .next equ changeromscreen.next         // the same text
 .prev DZ "Prev"
 .sdcard DZ "SD Card"
@@ -3628,8 +3650,8 @@ loadscreen:
 .eraseerror DZ "Could not erase it"
 .eraseinput WORD 0, 0, 0, 0
     BYTE 2, 0
-.erasedirnot DZ "Not erased: ok was not typed"
-.movedirnot DZ "Not done: ok was not typed"
+.erasedirnot DZ "Not erased: no ok typed"
+.movedirnot DZ "Not done: no ok typed"
 .copybarmsg DZ "Copying the folder..."
 .copybarmsg2 DZ "BREAK stops it"
 .copystopped DZ "Copy stopped"
@@ -3638,8 +3660,8 @@ loadscreen:
 .textextra2 WORD 0
 .pickdirs BYTE 0
 .romnotice DZ "A ROM: use C-Change ROM"
-.viewnotgame DZ "Only .tap .tzx .sna .z80 .szx"
-.poknotice DZ "A poke list: use Poke, then L"
+.viewnotgame DZ "V shows games only"
+.poknotice DZ "A .pok: Poke, then L"
 .scrnotice DZ "A screen picture"
 .notgames BYTE "rom"
     WORD .romnotice
@@ -3674,15 +3696,15 @@ loadscreen:
     or c
     pop hl
     ret
-.onlyfiles DZ "That is a folder, not a file"
+.onlyfiles DZ "A folder, not a file"
 .picked WORD 0
 .inputkeep BYTE 0
 .foldertitle DZ "New folder"
 .folderlabel DZ "Name:"
 .folderhelp1 DZ "ENTER makes it, BREAK exits"
-.folderhelp2 DZ "It goes in this folder"
-.nameinuse DZ "That name is already in use"
-.foldererror DZ "Could not make that folder"
+.folderhelp2 DZ "Made in this folder"
+.nameinuse DZ "Name already in use"
+.foldererror DZ "Folder not made"
 .newfolder equ .foldertitle         // the same text
 .movemsg DZ "Move"
 .moveheremsg DZ "Move here"
@@ -3697,7 +3719,7 @@ loadscreen:
 .tapeinmsg DZ "Tape"
 .tapeinwhich DZ "Put in which tape? 1-0"
 .favouritedone DZ "Copied to Favourites"
-.favouritethere DZ "It is in Favourites already"
+.favouritethere DZ "Already in Favourites"
 .copywhich DZ "Copy which file? 1-0"
 .copymsg DZ "Copy"
 .copyheremsg DZ "Copy here"
@@ -3705,8 +3727,8 @@ loadscreen:
 .movefrom DZ "From:"
 .moveto DZ "To:"
 .moveask DZ "Y-Yes, move it   N-No"
-.movesame DZ "It is already in this folder"
-.moveerror DZ "Could not move the file"
+.movesame DZ "Already in this folder"
+.moveerror DZ "Could not move it"
 .anykey equ startmenu.grabanykey         // the same text
 .moving BYTE 0                      // non-zero once a file to move is picked
 .inputmax BYTE 0
@@ -4089,7 +4111,7 @@ savesnapshotscreen:
 .help1 DZ "ENTER saves, BREAK exits"
 .help2 DZ "Shift 1-8 to change saved"
 .help3 DZ "border colour"
-.help4 DZ "Shift 9 to change where it goes"
+.help4 DZ "Shift 9 changes where it goes"
 .help5 DZ "Sym Shift R or T changes the"
 .help6 DZ "file type (.sna .z80 .szx)"
 .typeauto DZ "Type: auto"      // each 11 bytes
@@ -4098,7 +4120,7 @@ savesnapshotscreen:
 .typeszx DZ "Type: .szx"
 .typesame DZ "Type: same"
 .savetolabel DZ "Save to:"
-.saveerror DZ "Could not save the snapshot"
+.saveerror DZ "Snapshot not saved"
 .namelabel equ loadscreen.folderlabel         // the same text
 .borderlabel DZ "Border: "
 .border0 DZ "Black  "
@@ -4133,9 +4155,9 @@ overwritescreen:
     MENU_ITEM 'y', 4, 2, .yes, .handle_yes
     MENU_ITEM 'n', 5, 2, .no, .handle_no
     MENU_END
-.title1 DZ "A file with this name exists"
+.title1 DZ "File already exists"
 .title2 DZ "Overwrite this file?"
-.yes: DZ "Yes, overwrite this file"
+.yes: DZ "Yes, overwrite it"
 .no: DZ "No, cancel"
 
 // "Autosave this game?" (loadsnapshot)
@@ -4425,6 +4447,13 @@ pokescreen:
 
 .handle_exit:
     ret
+
+// Z: ZXDB's pokes for the game (a Pico W): the pico's screens look it up and save its .pok in
+// Poke List
+.handle_zxdb:
+    ld a, 0xFD
+    call wifiscreen
+    jp .showtopscreen
 
 // L: the cheats in the .pok file of the game last loaded, ten to a page. 1-0 makes the
 // pokes of that cheat, N and P turn the pages.
@@ -4803,8 +4832,8 @@ pokescreen:
 .skipcount BYTE 0
 .askvalue BYTE 0
 .listtitle DZ "Poke list"
-.listkeys DZ "1-0 Poke N-Next P-Prev X-Exit"
-.nopoklist DZ "No .pok for it in Poke List"
+.listkeys DZ "1-0 Poke N/P-Page X-Back"
+.nopoklist DZ "No .pok in Poke List"
 .askinput WORD .asktitle, .asklabel, .askhelp1, .askhelp2
     BYTE 3, 0
 .asktitle DZ "Poke value"
@@ -4814,7 +4843,7 @@ pokescreen:
 .badvalue DZ "That is not 0 to 255"
 .pokedtext DZ "Pokes made: "
 .skippedtext DZ "Not made: "
-.skippedwhy DZ "(they need another 128K bank)"
+.skippedwhy DZ "(need another 128K bank)"
 
 .active_edit: byte 0  ; 1 is address, 2 is value
 .address_input: block 8
@@ -4827,14 +4856,16 @@ pokescreen:
     MENU_ITEM 'v', 5, 2, .valuemsg, .handle_value
     MENU_ITEM 'p', 7, 2, .pokemsg, .handle_poke
     MENU_ITEM 'l', 9, 2, .listmsg, .handle_list
-    MENU_ITEM 'x', 11, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'z', 11, 2, .zxdbmsg, .handle_zxdb
+    MENU_ITEM 'x', 13, 2, .exitmsg,  .handle_exit
     MENU_END
-.listmsg: DZ "Poke list (.pok file)"
+.listmsg equ .listtitle             // "Poke list"
+.zxdbmsg DZ "Look it up in ZXDB"
 .title DZ "Apply Poke"
 .addressmsg: DZ "Address: "
 .valuemsg: DZ "Value: "
-.pokemsg equ startmenu.pokemsg         // the same text
-.exitmsg equ startmenu.exitmsg         // the same text
+.pokemsg equ .title + 6                // "Poke", of "Apply Poke"
+.exitmsg equ .listkeys + 20            // "Back", of "1-0 Poke N/P-Page X-Back"
 
 
 
@@ -5155,8 +5186,8 @@ showgameinfo:
     ld a, (ix + 3)          // the page, as the pico kept it
     ld (.infopage), a
     call previewfrompico
-    ld hl, startmenu.infoscroll     // a long software house scrolls (at the place it
-    call startmenu.scrollparams     // had, as the pictures change)
+    ld hl, (startmenu.scrollcur)    // a long software house or genre scrolls (at the place
+    call startmenu.scrollparams     // it had, as the pictures change)
     call startmenu.scrollshow
     ld hl, PICTURE_DELAY
     ld (.infotimer), hl
@@ -5167,7 +5198,7 @@ showgameinfo:
     cp 255
     jp z, .infoidle
     push af
-    call waitforkeyrelease
+    call keywait            // (typing in the editor, a held key repeats)
     pop af
     ld b, a
     ld hl, .infoop
@@ -5297,6 +5328,40 @@ showgameinfo:
 .infotimer: WORD 0
 .infopics: BYTE 0
 
+// The WiFi's screens (ACTION_WIFI, opened with a = 0, 0xFE the Bluetooth tape, 0xFD ZXDB's pokes,
+// 0xFC ZXDB's search from the menu):
+// the pico draws them and works the connection; about five times a second it is asked whether
+// the screen has changed (the address, what was sent). Returns the status that closed it: 1
+// closed, 3 leave the menu (the Bluetooth tape playing)
+wifiscreen:
+1:  ld ix, 0
+    ld (ix + 2), a
+    ld (ix + 1), ACTION_WIFI
+    call waitpico
+    cp 1
+    ret z                   // closed
+    cp 3
+    ret z                   // leave the menu
+    cp 2
+    call z, previewfrompico // changed: shown again
+    ld b, 20                // about 0.2 s, looking at the keys
+2:  push bc
+    ld de, 100
+    call pause
+    call getkeypress
+    pop bc
+    or a
+    jr z, 3F
+    cp 255
+    jr nz, 4F
+3:  djnz 2B
+    ld a, 255               // no key
+    jr 1B
+4:  push af
+    call keywait            // (typing a ZXDB search, a held key repeats)
+    pop af
+    jr 1B
+
 // Sends the screen to the pico (screentopico) or brings it back
 // (screenfrompico), SCREEN_PIECE bytes at a time through spare_space + MOVE_INFO,
 // which is above the list, so a list survives a preview.
@@ -5323,7 +5388,7 @@ picoscreen:
     call previewfrompico
     call waitforkeypress
     push af
-    call waitforkeyrelease
+    call keywait            // (in a text file's editor, a held key repeats)
     pop af
     pop bc
     jr picoscreen
@@ -6122,6 +6187,41 @@ waitforkeypress:
     jr nz, waitforkeypress
     ret
 
+// The keys of the pico's screens (picoscreen, T-F, the game information): held, a key repeats
+// if the pico said with its last answer that the screen is one for typing (key_repeat, read once)
+keywait:
+    ld hl, key_repeat
+    ld a, (hl)
+    ld (hl), 0
+    or a
+    jr z, keynorepeat
+// The key let go; but held, it repeats as the Spectrum's own keys do: the first time after
+// about 0.7 s, then every 0.1 s. ENTER and BREAK never repeat.
+waitforkeyrepeat:
+    ld a, (key_repwait)
+    ld b, a
+1:  push bc
+    ld de, 1000             // (0.1 s)
+    call pause
+    call getkeypress
+    pop bc
+    or a
+    jr z, 2F                // let go
+    cp 0x13
+    jr z, keynorepeat
+    cp 0x18
+    jr z, keynorepeat
+    djnz 1B
+    ld a, 1                 // still held: it goes again, and from now on every 0.1 s
+    jr 3F
+keynorepeat:
+    call waitforkeyrelease
+2:  ld a, 7
+3:  ld (key_repwait), a
+    ret
+key_repwait: BYTE 7       // tenths of a second before a held key repeats: 7, then 1
+key_repeat: BYTE 0          // set by the pico with an answer: its screen is one for typing
+
 waitforkeyrelease:
     ld de, 1000
     call pause
@@ -6389,6 +6489,11 @@ stack_top:
 // The z80 header of the snapshot being loaded, and for a 128K snapshot some
 // more fields
 sna_header: BLOCK Z80X_SIZE
+
+// Messages that are the ends of longer ones (defined after those, so their places are known)
+startmenu.chamgemsg equ loadscreen.romnotice + 13   // "Change ROM", of "A ROM: use C-Change ROM"
+startmenu.backmsg equ pokescreen.listkeys + 20      // "Back", of "1-0 Poke N/P-Page X-Back"
+startmenu.pokemsg equ pokescreen.title + 6          // "Poke", of "Apply Poke"
 
 // What is left of the 16K before spare_space (see SPARE_SPACE at the top)
 ROM_FREE equ SPARE_SPACE - $

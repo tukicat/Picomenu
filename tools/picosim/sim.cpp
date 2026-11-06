@@ -184,6 +184,9 @@ static uint8_t kempston = 0;            // the joystick: bit 0 right, 1 left, 2 
 static uint8_t ay_reg[16], ay_sel = 0;  // the 128's sound chip (registers only)
 // B - Bluetooth tape: the pretend receiver's sound at the EAR input (bt_host.cpp)
 int host_bt_ear(uint64_t t);
+void host_net_answer(const char* url, const char* file);  // net_host.cpp: the file that answers url
+int host_net_requests();
+namespace net { void poll(); }
 void host_bt_poll();                    // the firmware's main loop's Bluetooth step (it polls bt.h)
 void host_bt_drop();                    // the pretend receiver goes away
 static zuint8 in(void*, zuint16 port) {
@@ -217,6 +220,7 @@ static void run_frames(uint32_t n) {
         for (int k = 0; k < 70; k++) {
             tstates += z80_run(&cpu, 1000);
             host_bt_poll();                             // (the firmware's main loop does)
+            net::poll();
             if (rom_data[16384] == 255) { requests++; processNmiRequest(); }
             // the tape trap's mailbox (as the firmware's main loop polls it)
             if (!nmi && (rom_state.flags & 1) && rom_data[TAPE_MBOX] == 1) {
@@ -254,10 +258,16 @@ static void press(const std::string& k) {
     int row, bit, shift;
     if (!keypos(k, row, bit, shift)) { printf("unknown key %s\n", k.c_str()); exit(2); }
     memset(rows, 0xFF, 8);
-    rows[row] &= ~(1 << bit);
+    // the shift goes down a frame before the key and up a frame after it, as fingers do: a scan
+    // of the keyboard (which may span the change) never sees the key without its shift (BREAK
+    // read as SPACE, DELETE as 0)
     if (shift == 1) rows[0] &= ~1;
     if (shift == 2) rows[7] &= ~2;
+    if (shift != 0) run_frames(1);
+    rows[row] &= ~(1 << bit);
     run_frames(5);
+    rows[row] |= (uint8_t) (1 << bit);
+    if (shift != 0) run_frames(1);
     memset(rows, 0xFF, 8);
     run_frames(5);
 }
@@ -493,6 +503,11 @@ int main(int argc, char** argv) {
         } else if (c == "expecttapemax") {  // expecttapemax <n>: fail if the tape trap gave more than n blocks
             if (tape_requests <= atoi(p1)) printf("PASS expecttapemax %s (%d)\n", p1, tape_requests);
             else { printf("FAIL expecttapemax %s (%d)\n", p1, tape_requests); failures++; }
+        } else if (c == "net") {            // net <url> <file>: the whole HTTP answer to url (a URL ending in * starts others)
+            host_net_answer(p1, p2);
+        } else if (c == "expectnet") {      // expectnet <n>: exactly n requests have been made
+            if (host_net_requests() == atoi(p1)) printf("PASS expectnet %s\n", p1);
+            else { printf("FAIL expectnet %s (%d)\n", p1, host_net_requests()); failures++; }
         } else if (c == "btdrop") {         // btdrop: the pretend receiver goes away (bt_host.cpp)
             host_bt_drop();
         } else if (c == "expectear") {      // expectear n: at least n loads were told to load from EAR
