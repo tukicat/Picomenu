@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.5.0
+THIRD-PARTY NOTICES - PicoMenu Rev 2.6.0
 ========================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
@@ -66,7 +66,8 @@ third-party code was added for Rev 2.0 to Rev 2.3.0; Rev 2.4.0 adds the Pico W b
 certificates (ZXDB downloads), and PicoMenu's own HTTP, ZXDB and unzip code (pico/net.h,
 net.cxx, netget.h, zxdb.h, unzip.h, tools/nettest, tools/make_netroots.py,
 tools/picosim/net_host.cpp). The old picoFace web server (http_server.cxx), which only that build used,
-is gone.
+is gone. No new third-party code was added for Rev 2.6.0: its high score finder (pico/hiscore.h),
+hotkeys and faster autosave copy (in nmirom/nmirom.asm and pico/picoface.cxx) are PicoMenu's own.
 
 The Spectrum ROM images and any games or snapshots you use with the
 Picoface are not covered by any licence here. None are in this source: the

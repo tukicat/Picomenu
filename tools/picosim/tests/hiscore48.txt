@@ -1,0 +1,239 @@
+# High score tables (Pico W, T on A - Autosave, or the hotkey T): found from a name or a score in
+# the game's table, saved to /High Scores/<game>.txt and .bin, saved again each time the menu is
+# opened, and put back into the game when it is loaded (a snapshot: before it starts; a tape: when
+# the menu is first opened). R puts it back, C forgets it.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/hotkeys.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Games/tapein.tap {HERE}/tapein.tap
+sd /High Scores/tapein.txt {HERE}/hs-tapein.txt
+sd /High Scores/tapein.bin {HERE}/hs-tapein.bin
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 300
+# a table of 5 entries of 14 bytes, as a game might keep it
+pokestr 0xE800 SCOTT   012345ANDY    010000BEN     008000CLAIRE  006000DAVE    004000
+# (and a snapshot of the game with its table: Browse Games' 1 from here on)
+snapsave {OUT}/alpha-table.sna
+sd /Games/Alpha.sna {OUT}/alpha-table.sna
+nmi
+wait 30
+key a
+wait 40
+expect High score table
+key t
+wait 30
+expect High scores: Alpha
+expect Not found yet
+key f
+wait 20
+expect Type a name or a score
+key s
+key c
+key o
+key t
+key t
+wait 10
+expect > SCOTT_
+key ENTER
+wait 200
+expect "SCOTT": 1 found
+expect 59392
+key 1
+wait 30
+expect 70 bytes at 59392, 5 entries
+expect SCOTT   012345
+expect DAVE    004000
+key s
+wait 40
+expect Saved: it is kept from now on
+expect Its table: 70 bytes at 59392
+expectfile sd /High Scores/Alpha.txt|address = 59392
+expectfile sd /High Scores/Alpha.txt|length = 70
+expectbyte sd /High Scores/Alpha.bin|0|0x53
+expectbyte sd /High Scores/Alpha.bin|69|0x30
+# X back to the autosaves, X to the menu, X to the game
+key x
+wait 30
+expect High score table
+key x
+wait 30
+key x
+wait 40
+# a new name in the table: not saved when the menu is opened (only when asked)
+poke 0xE800 0x5A
+nmi
+wait 40
+expectbyte sd /High Scores/Alpha.bin|0|0x53
+# leaving the game (Browse Games, the same game again): asked; BREAK goes back to the game
+key b
+wait 50
+key 1
+wait 60
+expect Save the high scores before
+expect BREAK  Back to the game
+key BREAK
+wait 60
+expectnot Save the high scores
+expectmem 0xE800 0x5A
+expectbyte sd /High Scores/Alpha.bin|0|0x53
+expectnot Browse Games
+# again: N leaves without saving (the saved table goes into the game loaded)
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 60
+expect Save the high scores before
+key n
+wait 300
+expectbyte sd /High Scores/Alpha.bin|0|0x53
+expectmem 0xE800 0x53
+# a new score again: Y saves it (the one before kept as the .bak), and it goes into the game loaded
+poke 0xE800 0x5A
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 60
+expect Save the high scores before
+key y
+wait 300
+expectbyte sd /High Scores/Alpha.bin|0|0x5A
+expectbyte sd /High Scores/Alpha.bak|0|0x53
+expectmem 0xE800 0x5A
+expectmem 0xE801 0x43
+expectmem 0xE845 0x30
+# the table as saved: no question
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 60
+expectnot Save the high scores
+wait 240
+# S on the high score screen saves it there and then
+nmi
+wait 30
+poke 0xE801 0x51
+key a
+wait 40
+key t
+wait 30
+key s
+wait 40
+expect Saved (the old one: its .bak)
+expectbyte sd /High Scores/Alpha.bin|1|0x51
+expectbyte sd /High Scores/Alpha.bak|1|0x43
+key x
+wait 30
+key x
+wait 30
+key x
+wait 40
+# a reset (4): asked too, with no BREAK (the reset is made ready first)
+poke 0xE801 0x52
+nmi
+wait 30
+key 4
+wait 30
+key y
+wait 60
+expect Save the high scores before
+expectnot BREAK  Back to the game
+key y
+wait 300
+expectbyte sd /High Scores/Alpha.bin|1|0x52
+# Alpha again (the reset is no game: nothing asked)
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 300
+expectmem 0xE801 0x52
+# found from a score too; R puts the saved table back
+nmi
+wait 30
+poke 0xE800 0x51
+key a
+wait 40
+key t
+wait 30
+key r
+wait 40
+expect The saved table is back in it
+expectmem 0xE800 0x5A
+key f
+wait 20
+key 1
+key 2
+key 3
+key 4
+key 5
+key ENTER
+wait 200
+expect 1 59401 12345ANDY
+key 1
+wait 30
+expect 70 bytes at 59392, 5 entries
+key x
+wait 20
+key x
+wait 20
+key BREAK
+wait 20
+# C forgets it (Y)
+key c
+wait 20
+expect Forget where the table is?
+key y
+wait 30
+expect Forgotten
+expect Not found yet
+nofile sd /High Scores/Alpha.txt
+nofile sd /High Scores/Alpha.bin
+key x
+wait 30
+key x
+wait 30
+key x
+wait 40
+# the hotkey T opens it straight away, and X goes back to the game
+hkbutton 1
+wait 20
+key t
+wait 40
+hkbutton 0
+expect High scores: Alpha
+key x
+wait 40
+expectnot High scores
+expectnot Search ZXDB
+# a tape: its table put back by itself, 5 s after the tape last gave the game a block, if what
+# is there looks like the table (here nothing is: not put back; then the menu tries again)
+nmi
+wait 30
+key b
+wait 50
+key 3
+wait 400
+clock 6000
+wait 20
+expectmem 0xF000 0x00
+pokestr 0xF000 PICOFAKE
+nmi
+wait 40
+expectmem 0xF000 0x50
+expectmem 0xF006 0x43
+key x
+wait 40

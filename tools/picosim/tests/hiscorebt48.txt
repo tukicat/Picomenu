@@ -1,0 +1,55 @@
+# High scores with a tape played by Bluetooth (B - Bluetooth tape, P: the Spectrum's own ROM
+# loads it from the EAR socket): the tape's name is the game; its table is put back by itself 5 s
+# after the Bluetooth stops (the radio still on), as the memory there looks like it
+flash /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/bt-manual.ini
+sd /Tapes/tapestop.tzx {HERE}/tapestop.tzx
+sd /High Scores/tapestop.txt {HERE}/hs-tapestop.txt
+sd /High Scores/tapestop.bin {HERE}/hs-tapein.bin
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+key s
+wait 60
+key 1
+wait 30
+expect On Speccy BT receiver
+key p
+wait 30
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 1100
+expectmem 30000 0x55
+# the game sets up its table; the tape has stopped itself
+pokestr 0xF000 PICOFAKE
+clock 6000
+wait 20
+expectmem 0xF000 0x50
+expectmem 0xF006 0x43
+# the Bluetooth is still on and connected (putting the table back doesn't switch it off)
+nmi
+wait 30
+key t
+wait 30
+key b
+wait 30
+expect On Speccy BT receiver
+expect stopped by the tape

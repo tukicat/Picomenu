@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
     CHECK(!u.parse("ftp://x/y"));
     char req[600];
     CHECK(u.parse("https://spectrumcomputing.co.uk/zxdb/a.zip") && netget::request(u, req, sizeof(req)) > 0);
-    CHECK(strstr(req, "GET /zxdb/a.zip HTTP/1.1\r\nHost: spectrumcomputing.co.uk\r\nUser-Agent: PicoMenu/2.5.0") == req);
+    CHECK(strstr(req, "GET /zxdb/a.zip HTTP/1.1\r\nHost: spectrumcomputing.co.uk\r\nUser-Agent: PicoMenu/2.6.0") == req);
     char out[600];
     CHECK(netget::resolve(u, "/x/y", out, sizeof(out)) && strcmp(out, "https://spectrumcomputing.co.uk/x/y") == 0);
     CHECK(netget::encode("Manic Miner&co", out, sizeof(out), false) && strcmp(out, "Manic%20Miner%26co") == 0);

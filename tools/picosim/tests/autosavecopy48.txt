@@ -1,0 +1,33 @@
+# The autosave's quick copy (cpsave) on a 48K game: the .sna has the RAM as the game had it
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+checkpoint stay
+memkeep
+wait 5
+expectsnap /Autosave/Alpha/Autosave 1.sna
+wait 100
+checkpoint stay
+memkeep
+wait 5
+expectsnap /Autosave/Alpha/Autosave 2.sna
+nmi
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Last autosave pause
+expect 48K:

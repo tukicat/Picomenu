@@ -1,7 +1,7 @@
 # E in Tools: Erase all assets. Part of a name typed lists the games with assets (from the
 # folders they are kept in); one picked shows its assets by category, with how many: its
 # autosaves, save slots and quick saves (in /Save Games, the save folder, the last game's), notes and details, pokes, tape
-# notes and labels, screen grabs. 1-6 turn categories off and on; E, then Y, erases what is on
+# notes and labels, screen grabs, high scores (the Pico W). 1-7 turn categories off and on; E, then Y, erases what is on
 # (to the Waste Bin). Another game's whose name starts the same is not touched.
 sd /48.rom {ROM48}
 sd /Games/Exolon.z80 {OUT}/dummy.scr
@@ -20,6 +20,11 @@ sd /Scraper/Screen Grabs/Exolon Loading Screen.scr {OUT}/dummy.scr
 sd /Scraper/Screen Grabs/Exolon1.scr {OUT}/dummy.scr
 sd /Scraper/Screen Grabs/Exolon Game Screen2.scr {OUT}/dummy.scr
 sd /Scraper/Screen Grabs/Exolonia.scr {OUT}/dummy.scr
+sd /High Scores/Exolon.txt {HERE}/hs-alpha.txt
+sd /High Scores/Exolon.bin {OUT}/dummy.scr
+sd /High Scores/Exolon.bak {OUT}/dummy.scr
+sd /High Scores/Exolonia.bin {OUT}/dummy.scr
+sd /High Scores/Exoscores.txt {HERE}/hs-alpha.txt
 boot
 nmi
 wait 30
@@ -36,9 +41,10 @@ wait 10
 expect exo_
 key ENTER
 wait 60
-expect 2 games with assets
+expect 3 games with assets
 expect 1 Exolon
 expect 2 Exolonia
+expect 3 Exoscores
 key 1
 wait 60
 expect 1 [x] Autosaves
@@ -47,15 +53,20 @@ expect 3 [x] Game Notes          2
 expect 4 [x] Pokes (.pok)        1
 expect 5 [x] Tape files          2
 expect 6 [x] Screen grabs        3
+expect 7 [x] High scores         3
 key 6
 wait 20
 expect 6 [ ] Screen grabs        3
 key e
 wait 20
-expect Erase 9? Y-Yes
+expect Erase 12? Y-Yes
 key y
 wait 100
-expect Erased 9 (to the Waste Bin)
+expect Erased 12 (to the Waste Bin)
+nofile sd /High Scores/Exolon.txt
+nofile sd /High Scores/Exolon.bin
+nofile sd /High Scores/Exolon.bak
+expectbyte sd /High Scores/Exolonia.bin|0|0x55
 nofile sd /Autosave/Exolon
 nofile sd /Save Games/Exolon
 nofile sd /Save Games/Exolon Save Game.z80
@@ -85,8 +96,9 @@ wait 20
 expect Nothing to erase
 key BREAK
 wait 40
-expect 1 game with assets
+expect 2 games with assets
 expect 1 Exolonia
+expect 2 Exoscores
 key BREAK
 wait 20
 key BREAK

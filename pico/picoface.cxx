@@ -61,15 +61,14 @@ not, see <https://www.gnu.org/licenses/>.
 // tools/picosim/net_host.cpp, answering with files its script names)
 #if defined(WIFI_ENABLE) || defined(PICOFACE_HOST)
 #define PICOMENU_NET 1
-#define PICOMENU_ASSETS 1           // E in Tools, Erase all assets (the standard firmware has no room)
 #include "net.h"
 #include "zxdb.h"
 #include "unzip.h"
 static bool zx_live = false;                // a ZXDB screen is up (zx(), further on, holds its state)
 #else
 #define PICOMENU_NET 0
-#define PICOMENU_ASSETS 0
 #endif
+#define PICOMENU_ASSETS 1           // E in Tools, Erase all assets: both firmwares
 #if PICOMENU_BT
 // The Bluetooth (B - Bluetooth tape, further on): on, and its screen open
 static bool bt_on = false;
@@ -271,11 +270,16 @@ static uint8_t snap_io_buffer[512];
 // snap_load_buffer holds a 128K snapshot, as built by snapload.h.  Only
 // meaningful between loading a snapshot file and sending it to the NMI rom.
 static bool snap_is_paged = false;
+static bool sna_in_buffer = false;          // a snapshot sent to be saved is in snap_load_buffer
 
 // ACTION_SNA_BEGIN_WRITE128 was the last way a snapshot was sent for saving: it is
 // a 128K one, which is saved as a .z80 file.  save128_info is the header it sent.
 static bool save_is_128k = false;
 static uint8_t save128_info[snapload::SAVE128_HEADER];
+// The pause the game had for its last autosave (Help > Diagnostics): from the NMI to the save
+static uint32_t cp_pause_us = 0, cp_pause_max_us = 0;
+static bool cp_pause_128 = false;
+static uint64_t cp_nmi_at = 0;              // time_us_64() at the autosave's NMI
 static bool nmi_menu_open = false;      // the NMI menu (not a grab, a load ...): see ayswap in nmirom.asm
 static_assert(SAVE128_AY_AT + 16 <= snapload::SAVE128_HEADER, "the sound chip registers are in the save header");
 
@@ -343,6 +347,24 @@ static uint32_t sd_remounts = 0;
 // A colour of the pico's own screens (not of a picture) as Picomenu.ini's theme shows it
 static inline uint8_t ui_attr(uint8_t a) { return settings::theme_attr(a, cfg.light); }
 static size_t slot_game_now(char* out);     // save slots: the game being played
+// High score tables (hiscore.h, further on): the Pico W build (and the simulator, unless
+// PICOMENU_NO_HISCORE: the standard build's screens)
+#if (defined(WIFI_ENABLE) || defined(PICOFACE_HOST)) && !defined(PICOMENU_NO_HISCORE)
+#define PICOMENU_HISCORE 1
+static void hs_commit();
+static bool hs_leave(uint8_t* nmi_rom_data, uint8_t key);
+static bool hs_leaving();
+static bool hs_auto_poll();
+static bool hs_copied();
+static void hs_tape_game(const char* tape);
+// The game load_snapshot_file has ready (its table goes into it when it is sent: hs_commit)
+static struct { char name[96]; bool valid, tape; } hs_next;
+static size_t game_base(const char* dir, const char* name, char* out);
+#else
+#define PICOMENU_HISCORE 0
+#endif
+static uint32_t tape_block_ms = 0;  // when the tape trap last gave the game a block
+static bool hs_bt_played = false;   // the Bluetooth has played the tape put in (the trap gives it no blocks)
 
 // Big enough for sd_cwd, a slash and the longest file name
 static const size_t BROWSE_PATH_MAX = sizeof(sd_cwd) + 260;
@@ -844,9 +866,9 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
 // " W" after the number: the Pico W build (Update PicoMenu only takes the same kind: fwupdate.h)
 #ifdef WIFI_ENABLE
-static const char FIRMWARE_ID[] = "Rev 2.5.0 W (tapeloader v250)";
+static const char FIRMWARE_ID[] = "Rev 2.6.0 W (tapeloader v260)";
 #else
-static const char FIRMWARE_ID[] = "Rev 2.5.0 (tapeloader v250)";
+static const char FIRMWARE_ID[] = "Rev 2.6.0 (tapeloader v260)";
 #endif
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
@@ -1071,7 +1093,15 @@ void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt, 
         recent_note(drive, dir, fileAndExt, ext);
     }
 
+#if PICOMENU_HISCORE
+    game_base(dir, fileAndExt, hs_next.name);
+    hs_next.valid = true;
+    hs_next.tape = false;
+#endif
     if (strcasecmp(ext, "tap") == 0 || strcasecmp(ext, "tzx") == 0) {
+#if PICOMENU_HISCORE
+        hs_next.tape = true;            // (its table is put back at the menu, once it is set up)
+#endif
         // First try to convert the tape into a 48K snapshot in snap_load_buffer;
         // the normal snapshot loading path then sends it to the Spectrum.
         bool clean = build_snapshot_from_tap(drive, filename);
@@ -3346,8 +3376,17 @@ void nmi_action_sna_save() {
     bool quick = nmi_rom_data[5] == 2;
     bool slot_save = nmi_rom_data[5] == 3;
     uint8_t type = nmi_rom_data[6];
+#if PICOMENU_HISCORE
+    if (nmi_rom_data[5] == 4 && hs_copied()) {
+        nmi_rom_data[0] = FILEOP_OK;    // (not an autosave: the game's memory, for its high scores)
+        return;
+    }
+#endif
     if (nmi_rom_data[5] == 4) {
         // a checkpoint: written to /Checkpoints/<game> as soon as the game carries on (checkpoint_flush)
+        cp_pause_us = (uint32_t) (time_us_64() - cp_nmi_at);
+        cp_pause_128 = save_is_128k;
+        if (cp_pause_us > cp_pause_max_us) cp_pause_max_us = cp_pause_us;
         checkpoint_took();
         nmi_rom_data[0] = FILEOP_OK;
         return;
@@ -3804,6 +3843,9 @@ void nmi_action_begin_snap_read() {
         current_snap_data = snap_load_buffer;
     }
     snap_prepared = false;
+#if PICOMENU_HISCORE
+    hs_commit();                    // the game going in now: its high score table put in it
+#endif
 
     running_48k = !snap_is_paged && !reset_to_128k_pending;
     loaded_paging.valid = snap_is_paged;
@@ -4845,23 +4887,36 @@ static void checkpoint_poll() {
 #ifdef PICOFACE_HOST
 // The simulator: the main loop's part; take: a checkpoint now (checkpoints on). True if one was sent.
 bool host_checkpoint_poll(bool take) {
+#if PICOMENU_HISCORE
+    if (!take && hs_auto_poll()) return true;   // (a high score table put back: the Bluetooth on too)
+#endif
     if (bt_on) return false;            // as the main loop: not while the Bluetooth is on
+    bool was = (rom_state.flags & 2) != 0;
     checkpoint_poll();
     if (!take) return false;
     rw.due_ms = rw_now();
     rw_host_take = true;
-    bool was = (rom_state.flags & 2) != 0;
+    was = (rom_state.flags & 2) != 0;
     checkpoint_poll();
     rw_host_take = false;
     return !was && (rom_state.flags & 2) != 0;
 }
 #endif
 
-// ACTION_CHECKPOINT_ASK: param1 0, before a load from the menu: status 0 to ask, 1 not
-// (checkpoints off, no SD card, a checkpoint being loaded). Then 'y' or 'n'.
+// ACTION_CHECKPOINT_ASK: param1 0, before a load from the menu (through picoscreen): status 3
+// to ask, 1 not (checkpoints off, no SD card, a checkpoint being loaded). Then 'y' or 'n'. On the
+// Pico W the high score table of the game being left comes first (hs_leave: PICO_RUN, its own
+// screen, or 2 to stay in the game).
 static void nmi_action_checkpoint_ask() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t key = nmi_rom_data[2];
+#if PICOMENU_HISCORE
+    // first the high score table of the game being left
+    if (key == 0 || hs_leaving()) {
+        if (hs_leave(nmi_rom_data, key)) return;
+        key = 0;                    // (the question, if any, is over: on with the load)
+    }
+#endif
     if (key == 0) {
         if (rw.loading) {           // a checkpoint: still the same game, checkpoints stay on
             rw.loading = false;
@@ -4872,7 +4927,7 @@ static void nmi_action_checkpoint_ask() {
         rw.secs = cfg.checkpoint_s;
         // only for a game: not a reset (4, 1) or a test ROM, which the pico has ready
         bool game = !snap_prepared || prepared_is_game;
-        nmi_rom_data[0] = cfg.checkpoint_s != 0 && sd_card_mounted && nmi_menu_open && game ? 0 : 1;
+        nmi_rom_data[0] = cfg.checkpoint_s != 0 && sd_card_mounted && nmi_menu_open && game ? 3 : 1;
         return;
     }
     rw.on = key == 'y' || key == 'Y';
@@ -4934,6 +4989,842 @@ static const char* checkpoint_to_slot(int i, int n) {
     return MOVED[n - 1];
 }
 
+// ---- High score tables (hiscore.h): the Pico W build ----
+// Where a game keeps its table is found from a name or score in it (T on A-Autosave, or the
+// hotkey T), and kept in /High Scores/<game>.txt; the table itself in <game>.bin. The .bin is
+// put into the game when it is loaded (a snapshot: into it before it starts; a tape: when the
+// menu is first opened once the tape has stopped). It is saved only when asked: S on the high
+// score screen, or Y to "Save the high scores?" when the game is left from the menu (another
+// game, a save slot or an autosave loaded, or a reset), which is asked only if the table is not
+// the one saved. The .bin it replaces is kept as <game>.bak.
+#if PICOMENU_HISCORE
+#include "hiscore.h"
+static void help_put_text(uint8_t* screen, int row, int col, const char* text, int len, uint8_t attr);
+static bool tape_busy();
+// the code at the menu's NMI (after hotkeys, which is at spare_space), and its data
+static const uint16_t HS_MENU_CODE = SPARE_AT + 256, HS_MENU_DATA = SPARE_AT + 512;
+static_assert(hiscore::TABLE_MAX <= 512, "the table fits below the screen's pieces (MOVE_INFO)");
+// the code the high score screens run (PICO_RUN) at PICO_CODE_AT, its data after it
+static const uint16_t HS_READ_DATA = PICO_CODE_AT + 64;
+static const uint16_t HS_READ_MAX = 1728;
+static const uint32_t HS_MEM_OFFSET = 16384;        // the game's 48K in snap_load_buffer
+static struct {
+    char game[screengrab::NAME_MAX + 1];    // the game whose table is in the Spectrum
+    bool restored;          // the .bin is in the game (or was saved from it)
+    uint8_t state;          // the screen: 0 its keys, 1 typing, 2 reading, 3 the finds, 4 a table, 5 "Forget it?", 6 putting it back, 7 saving
+    bool direct;            // opened with the hotkey: X goes back to the game
+    uint8_t leave;          // leaving the game (ACTION_CHECKPOINT_ASK): 0, 1 reading its table, 2 asking
+    uint32_t sent_ms;       // when the game went into the Spectrum (a tape's table: put back 5 s after)
+    uint8_t def;            // its .txt and .bin: 0 not looked at yet, 1 none, 2 both there
+    bool tried;             // tried to put it back (hs_auto_poll), at the tape's tried_at
+    uint32_t tried_at;      // (tape_block_ms then: a block since, and it is tried again)
+    uint16_t check_cmp, check_len;  // ACTION_HS_CHECK: where the memory was copied to, its length
+    uint16_t check_data;    //   and where the saved table is
+    char typed[hiscore::TYPED_MAX + 1];
+    uint32_t read_at;       // the next byte of the game's memory the finder reads
+    uint16_t read_n;
+    int8_t pick;
+    const char* msg;
+    uint8_t cap;            // a tape game's screen redrawn (hs_auto_poll): 0, 1 its memory being copied,
+                            //   2 copied (in snap_load_buffer), 3 the patches made, for the restore's NMI
+    uint32_t cap_ms;
+} hs;
+static bool hs_open_direct = false;     // the next A screen opens on the high scores (hotkey T)
+// The finder's finds and the table picked: in snap_load_buffer after the game's memory (RAM is
+// short), as they are only wanted while its screens are up
+struct HsFound { hiscore::Finder f; hiscore::Table t; };
+static const uint32_t HS_FOUND_OFFSET = 16384 + hiscore::MEM_SIZE;
+static_assert(HS_FOUND_OFFSET + sizeof(HsFound) <= SNAP_LOAD_BUFFER_SIZE - 2048, "the finds fit");
+static HsFound& hs_found() { return *reinterpret_cast<HsFound*>(snap_load_buffer + HS_FOUND_OFFSET); }
+
+// "/High Scores/<game>.<ext>"
+static void hs_path(char* out, size_t outsize, const char* game, const char* ext) {
+    snprintf(out, outsize, "%s/%s.%s", hiscore::FOLDER, game, ext);
+}
+
+// The game in the Spectrum is this one now
+static void hs_game_is(const char* game, bool restored) {
+    snprintf(hs.game, sizeof(hs.game), "%s", game);
+    hs.restored = restored;
+    hs.sent_ms = to_ms_since_boot(get_absolute_time());
+    hs.def = 0;
+    hs.tried = false;
+    hs.cap = 0;
+    hs_bt_played = false;
+}
+
+// A tape put in (T in Browse Games, then the Virtual Tape Player or the Bluetooth: the Spectrum's
+// own ROM loads it): its game is the tape's name, not known to be in the Spectrum yet (its table
+// is put back only if the memory looks like it, hs_restore_code)
+static void hs_tape_game(const char* tape) {
+    char dir[sizeof(sd_cwd)], name[96], game[screengrab::NAME_MAX + 1];
+    const char* slash = strrchr(tape, '/');
+    const char* file = slash != nullptr ? slash + 1 : tape;
+    snprintf(dir, sizeof(dir), "%.*s", (int) (slash != nullptr ? slash - tape : 0), tape);
+    snprintf(name, sizeof(name), "%s", file);
+    char* dot = strrchr(name, '.');
+    if (dot != nullptr) *dot = '\0';
+    game_base(dir, name, game);
+    if (strcmp(game, hs.game) != 0 || hs.restored) {
+        hs_game_is(game, false);
+        LOG("High scores: the tape's game is %s\n", game);
+    }
+}
+
+// The game's .txt: false if there is none (or it can't be a table)
+static bool hs_def(const char* game, uint16_t& addr, uint16_t& len) {
+    if (!sd_card_mounted || game[0] == '\0') return false;
+    char path[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "txt");
+    UINT n = 0;
+    char text[200];
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return false;
+    f_read(&save_fil, text, sizeof(text), &n);
+    f_close(&save_fil);
+    return hiscore::read_def(text, n, addr, len);
+}
+
+// Reads the game's .bin (len bytes) to out: false if there isn't one that long
+static bool hs_bin_read(const char* game, uint8_t* out, uint16_t len) {
+    char path[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "bin");
+    UINT n = 0;
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return false;
+    bool ok = f_size(&save_fil) == len && f_read(&save_fil, out, len, &n) == FR_OK && n == len;
+    f_close(&save_fil);
+    return ok;
+}
+
+static bool hs_bin_exists(const char* game, uint16_t len) {
+    char path[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "bin");
+    FILINFO fi;
+    return f_stat(path, &fi) == FR_OK && fi.fsize == len;
+}
+
+// Is the game's .bin the table p (len bytes)?
+static bool hs_bin_same(const char* game, const uint8_t* p, uint16_t len) {
+    char path[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "bin");
+    uint8_t chunk[64];
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return false;
+    bool same = f_size(&save_fil) == len;
+    for (uint16_t i = 0; same && i < len; i += sizeof(chunk)) {
+        UINT n = 0;
+        UINT want = (UINT) (len - i < sizeof(chunk) ? len - i : sizeof(chunk));
+        same = f_read(&save_fil, chunk, want, &n) == FR_OK && n == want && memcmp(chunk, p + i, want) == 0;
+    }
+    f_close(&save_fil);
+    return same;
+}
+
+// Saves the table p (len bytes) as the game's .bin, the one before it kept as its .bak
+static bool hs_bin_write(const char* game, const uint8_t* p, uint16_t len) {
+    if (hs_bin_same(game, p, len)) return true;
+    char path[sizeof(sd_cwd) + 32], bak[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "bin");
+    hs_path(bak, sizeof(bak), game, "bak");
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, hiscore::FOLDER) != fsops::KIND_DIR) make_sd_folder(hiscore::FOLDER);
+    FILINFO fi;
+    if (f_stat(path, &fi) == FR_OK) {
+        f_unlink(bak);
+        f_rename(path, bak);
+    }
+    UINT n = 0;
+    bool ok = f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+    if (ok) {
+        ok = f_write(&save_fil, p, len, &n) == FR_OK && n == len;
+        if (f_close(&save_fil) != FR_OK) ok = false;
+    }
+    if (!ok) {
+        f_unlink(path);
+        set_last_error("Cannot save", path);
+    }
+    LOG("High scores: %s saved: %d\n", path, ok);
+    return ok;
+}
+
+// Where the Spectrum's address is in a snapshot in snap_load_buffer: a 48K one (header bytes
+// first: .sna 27, .z80 30) or a 128K one (its banks, port 0x7FFD's value in X_7FFD)
+static uint8_t* hs_in_snapshot(uint8_t* buf, bool paged, uint32_t header, uint32_t address) {
+    if (!paged) return buf + header + (address - 0x4000);
+    uint8_t bank = address < 0x8000 ? 5 : address < 0xC000 ? 2 : (uint8_t) (buf[snapload::X_7FFD] & 7);
+    return snapload::bank_memory(buf, bank) + (address & 0x3FFF);
+}
+
+// ---- The table on the screen (hiscore.h's redraw): put back with the table, where the game
+// shows it already (a snapshot showing its table, or a tape game that shows it once loaded).
+// Its working memory is the listing's (list_pool, read again after); the Spectrum's ROM font
+// comes from 48.rom.
+static bool rom_file_open(FileHandle& f, const char* name);
+struct HsRedraw {
+    uint8_t scratch[hiscore::RD_SCRATCH];   // redraw_find's (then the patches, HsPatch)
+    hiscore::Redraw w;
+    uint8_t old[hiscore::TABLE_MAX];        // the old table, as it is on the screen
+    uint8_t now[hiscore::TABLE_MAX];        // the saved one
+    uint8_t rom[768];                       // the ROM's font, characters 32 to 127
+    bool have_rom;
+    uint16_t patches;                       // (hs_auto_poll's) bytes of the screen to change
+};
+struct HsPatch { uint16_t at; uint8_t was, now; };
+static const uint16_t HS_PATCH_MAX = hiscore::RD_SCRATCH / sizeof(HsPatch);
+static_assert(sizeof(HsRedraw) <= LIST_POOL_SIZE && alignof(HsRedraw) <= 8, "the redraw's memory fits the listing's");
+static HsRedraw& hs_rd() { return *reinterpret_cast<HsRedraw*>(list_pool); }
+static HsPatch* hs_patches() { return reinterpret_cast<HsPatch*>(hs_rd().scratch); }
+
+static void hs_rd_begin() {
+    walk_stop();                    // (the listing's memory: Browse Games reads the card again)
+    big_valid = false;
+    HsRedraw& r = hs_rd();
+    r.have_rom = false;
+    r.patches = 0;
+    FileHandle* f = new (r.scratch) FileHandle();   // (the scratch is free until redraw_find)
+    if (rom_file_open(*f, "48.rom")) {
+        r.have_rom = f->seek(0x3D00) && f->read(r.rom, sizeof(r.rom)) == (int) sizeof(r.rom);
+        f->close();
+    }
+}
+
+// Finds the old table on the screen and draws the new one (r.now) there: put(screen offset,
+// byte). mem: the memory (as hiscore's redraw), scr the screen shown
+template <typename Mem, typename Put>
+static bool hs_rd_run(uint16_t addr, uint16_t len, Mem mem, const uint8_t* scr, Put put) {
+    HsRedraw& r = hs_rd();
+    auto rom = [&](uint8_t c, uint8_t* g) {
+        if (!r.have_rom || c < 32 || c > 127) return false;
+        memcpy(g, r.rom + 8 * (c - 32), 8);
+        return true;
+    };
+    for (uint16_t k = 0; k < len; k++) r.old[k] = mem((uint16_t) (addr + k));
+    if (memcmp(r.old, r.now, len) == 0) return false;
+    if (!hiscore::redraw_find(r.w, mem, scr, addr, len, rom, r.scratch)) {
+        LOG("High scores: the table isn't on the screen\n");
+        return false;
+    }
+    bool ok = hiscore::redraw_apply(r.w, mem, [&](int k) { return r.old[k]; }, [&](int k) { return r.now[k]; }, scr, rom, put);
+    LOG("High scores: the table on the screen (%d runs, %s font): %s\n", r.w.runs, r.w.rom ? "the ROM's" : "the game's",
+        ok ? "drawn again" : "not drawn (a character missing)");
+    return ok;
+}
+
+// A snapshot of the game is going into the Spectrum (snap_load_buffer): its table put in it
+static void hs_loaded_snapshot(const char* game, bool paged, uint32_t header) {
+    hs_game_is(game, false);
+    uint16_t addr, len;
+    if (!hs_def(game, addr, len)) return;
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    char path[sizeof(sd_cwd) + 32];
+    hs_path(path, sizeof(path), game, "bin");
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) {
+        hs.restored = true;             // nothing kept yet: what the game has is the table
+        return;
+    }
+    bool ok = f_size(&save_fil) == len;
+    // is what the snapshot has there like the table? (the saved one read twice, a piece at a time)
+    hiscore::Match m;
+    uint8_t chunk[64];
+    for (int pass = 0; ok && pass < 2; pass++) {
+        f_lseek(&save_fil, 0);
+        for (uint32_t i = 0; ok && i < len; i += sizeof(chunk)) {
+            UINT want = (UINT) (len - i < sizeof(chunk) ? len - i : sizeof(chunk)), n = 0;
+            ok = f_read(&save_fil, chunk, want, &n) == FR_OK && n == want;
+            if (!ok) break;
+            if (pass == 0) {
+                m.learn(chunk, want);
+            } else {
+                uint8_t ram[sizeof(chunk)];
+                for (UINT k = 0; k < want; k++) ram[k] = *hs_in_snapshot(buf, paged, header, addr + i + k);
+                m.compare(ram, chunk, want);
+            }
+        }
+        if (pass == 0) m.ranges();
+    }
+    if (ok && !m.ok()) {
+        f_close(&save_fil);
+        LOG("High scores: %s's snapshot has no table like it there\n", game);
+        return;
+    }
+    if (ok && len <= hiscore::TABLE_MAX) {
+        // the table on the snapshot's screen drawn again too, if it shows it
+        hs_rd_begin();
+        UINT n = 0;
+        f_lseek(&save_fil, 0);
+        if (f_read(&save_fil, hs_rd().now, len, &n) == FR_OK && n == len) {
+            uint8_t* scr = paged ? snapload::bank_memory(buf, (buf[snapload::X_7FFD] & 8) ? 7 : 5) : buf + header;
+            hs_rd_run(addr, len, [&](uint16_t a) { return *hs_in_snapshot(buf, paged, header, a); }, scr,
+                [&](uint16_t at, uint8_t v) { scr[at] = v; });
+        }
+    }
+    // (read straight into the snapshot, a bank at a time)
+    f_lseek(&save_fil, 0);
+    for (uint32_t i = 0; ok && i < len; ) {
+        uint32_t a = addr + i;
+        uint32_t run = 0x4000 - (a & 0x3FFF);
+        if (run > len - i) run = len - i;
+        UINT n = 0;
+        ok = f_read(&save_fil, hs_in_snapshot(buf, paged, header, a), run, &n) == FR_OK && n == run;
+        i += run;
+    }
+    f_close(&save_fil);
+    hs.restored = ok;
+    LOG("High scores: %s put in the snapshot: %d\n", game, ok);
+}
+
+// The snapshot in snap_load_buffer is going into the Spectrum (nmi_action_begin_snap_read): the
+// game it is (load_snapshot_file said) is the one now; a reset or a snapshot from a PC: none
+static void hs_commit() {
+    if (!hs_next.valid) {
+        hs_game_is("", false);
+        return;
+    }
+    hs_next.valid = false;
+    if (hs_next.tape) {
+        hs_game_is(hs_next.name, false);
+    } else {
+        hs_loaded_snapshot(hs_next.name, snap_is_paged, current_snap_size == Z80_FILE_SIZE ? 30 : SNA_HEADER_SIZE);
+    }
+}
+
+// Code at code that gives the game its saved table (at data, read here) if what is there now is
+// like it: the memory copied to cmp, ACTION_HS_CHECK says, then the table copied in; then JP next.
+// False if there is no table to give it.
+static bool hs_restore_code(uint8_t* nmi_rom_data, uint16_t code, uint16_t data, uint16_t cmp, uint16_t next,
+        uint16_t patch = 0) {
+    uint16_t addr, len;
+    if (!hs_def(hs.game, addr, len) || !hs_bin_read(hs.game, nmi_rom_data + data, len)) return false;
+    uint8_t* c = nmi_rom_data + code;
+    auto word = [&](uint16_t w) { *c++ = (uint8_t) (w & 0xFF); *c++ = (uint8_t) (w >> 8); };
+    *c++ = 0x21; word(addr);                    // LD HL,table
+    *c++ = 0x11; word(cmp);                     // LD DE,cmp
+    *c++ = 0x01; word(len);                     // LD BC,length
+    *c++ = 0xED; *c++ = 0xB0;                   // LDIR
+    *c++ = 0xDD; *c++ = 0x21; word(0);          // LD IX,0
+    *c++ = 0xDD; *c++ = 0x36; *c++ = 1; *c++ = ACTION_HS_CHECK;     // LD (IX+1),ACTION_HS_CHECK
+    *c++ = 0xCD; word(WAITPICO);                // CALL waitpico
+    *c++ = 0xB7;                                // OR A
+    *c++ = 0xCA; word(next);                    // JP Z,next (not like it)
+    *c++ = 0x21; word(data);                    // LD HL,data
+    *c++ = 0x11; word(addr);                    // LD DE,table
+    *c++ = 0x01; word(len);                     // LD BC,length
+    *c++ = 0xED; *c++ = 0xB0;                   // LDIR
+    if (patch != 0) {
+        // the table on the screen (hs_auto_poll): records of the address, the byte that was there
+        // and the new one, ending with address 0; all of them only if the screen still has every
+        // byte that was (else it has moved on: nothing is drawn)
+        *c++ = 0x21; word(patch);               // LD HL,patch
+        uint8_t* check = c;
+        *c++ = 0x5E; *c++ = 0x23; *c++ = 0x56; *c++ = 0x23;     // LD E,(HL) / INC HL / LD D,(HL) / INC HL
+        *c++ = 0x7A; *c++ = 0xB7;               // LD A,D / OR A
+        *c++ = 0x28; *c++ = 9;                  // JR Z,draw
+        *c++ = 0x1A; *c++ = 0xBE;               // LD A,(DE) / CP (HL)
+        *c++ = 0xC2; word(next);                // JP NZ,next (the screen is not as it was)
+        *c++ = 0x23; *c++ = 0x23;               // INC HL / INC HL
+        *c++ = 0x18; *c = (uint8_t) (check - (c + 1)); c++;     // JR check
+        *c++ = 0x21; word(patch);               // draw: LD HL,patch
+        uint8_t* draw = c;
+        *c++ = 0x5E; *c++ = 0x23; *c++ = 0x56; *c++ = 0x23;     // LD E,(HL) / INC HL / LD D,(HL) / INC HL
+        *c++ = 0x7A; *c++ = 0xB7;               // LD A,D / OR A
+        *c++ = 0xCA; word(next);                // JP Z,next (all drawn)
+        *c++ = 0x23; *c++ = 0x7E; *c++ = 0x12; *c++ = 0x23;     // INC HL / LD A,(HL) / LD (DE),A / INC HL
+        *c++ = 0x18; *c = (uint8_t) (draw - (c + 1)); c++;      // JR draw
+    }
+    *c++ = 0xC3; word(next);                    // JP next
+    hs.check_cmp = cmp;
+    hs.check_data = data;
+    hs.check_len = len;
+    return true;
+}
+
+// ACTION_HS_CHECK: is the memory (copied to check_cmp) like the saved table?
+__attribute__((noinline)) static void nmi_action_hs_check(uint8_t* nmi_rom_data) {
+    bool like = hs.check_len != 0 &&
+        hiscore::table_matches(nmi_rom_data + hs.check_cmp, nmi_rom_data + hs.check_data, hs.check_len);
+    hs.restored = like;
+    hs.check_len = 0;
+    LOG("High scores: %s %s\n", hs.game, like ? "put back" : "not put back: no table like it there");
+    nmi_rom_data[0] = like ? 1 : 0;
+}
+
+// The menu's NMI (sendNmiRequest): a tape game's table put into it (if hs_auto_poll has not),
+// by code at HS_MENU_CODE called in place of the menu (then the menu, or hotkeys)
+__attribute__((noinline)) static void hs_menu_nmi(uint8_t* nmi_rom_data) {
+    uint16_t addr, len;
+    if (hs.restored || !sd_card_mounted || !hs_def(hs.game, addr, len) || !hs_bin_exists(hs.game, len)) return;
+    // (not while a tape loads, or in the game's first 5 s: it would set up its own table after it)
+    if (tape_busy() || to_ms_since_boot(get_absolute_time()) - hs.sent_ms < 5000) return;
+    const uint16_t menu = (uint16_t) (nmi_rom_data[HK_CALLMENU + 1] | nmi_rom_data[HK_CALLMENU + 2] << 8);
+    // (the memory is compared in the screen's pieces, MOVE_INFO, which are not wanted until the menu)
+    if (!hs_restore_code(nmi_rom_data, HS_MENU_CODE, HS_MENU_DATA, SPARE_AT + 1024, menu)) return;
+    nmi_rom_data[HK_CALLMENU + 1] = (uint8_t) (HS_MENU_CODE & 0xFF);
+    nmi_rom_data[HK_CALLMENU + 2] = (uint8_t) (HS_MENU_CODE >> 8);
+}
+
+// ACTION_SNA_SAVE for STARTUP_ACTION_CHECKPOINT: true if it was hs_auto_poll's copy of the
+// game's memory (now in snap_load_buffer), not an autosave
+static bool hs_copied() {
+    if (hs.cap != 1) return false;
+    hs.cap = 2;
+    return true;
+}
+static int8_t cp_bank_now();
+static uint8_t cp_port_now();
+
+// hs_auto_poll: the game's memory copied (cpsave's copy, in snap_load_buffer: hs.cap 2). If
+// its screen shows the old table, the bytes to draw the saved one there (HsPatch, for the restore's
+// NMI, hs_auto_code)
+static void hs_rd_patches() {
+    uint16_t addr, len;
+    if (!hs_def(hs.game, addr, len) || len > hiscore::TABLE_MAX) return;
+    hs_rd_begin();
+    HsRedraw& r = hs_rd();
+    if (!hs_bin_read(hs.game, r.now, len)) return;
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    const bool big = save_is_128k;
+    auto mem = [&](uint16_t a) -> uint8_t {
+        if (!big) return buf[SNA_HEADER_SIZE + (a - 0x4000)];
+        uint8_t bank = a < 0x8000 ? 5 : a < 0xC000 ? 2 : (uint8_t) cp_bank_now();
+        return snapload::bank_memory(buf, bank)[a & 0x3FFF];
+    };
+    const uint8_t* scr = big ? snapload::bank_memory(buf, (cp_port_now() & 8) ? 7 : 5) : buf + SNA_HEADER_SIZE;
+    HsPatch* p = hs_patches();
+    uint16_t n = 0;
+    bool over = false;
+    bool ok = hs_rd_run(addr, len, mem, scr, [&](uint16_t at, uint8_t v) {
+        if (n < HS_PATCH_MAX) p[n++] = { at, scr[at], v };
+        else over = true;
+    });
+    r.patches = ok && !over ? n : 0;
+}
+
+// A tape's game (a .tap or .tzx: loaded through the tape trap, made into a snapshot, or put in
+// and played from the Virtual Tape Player or the Bluetooth): its table is put back by itself once
+// the game has set up its own, 5 s after the tape last gave it a block (and after it went in), if
+// the memory there looks like the table (hs_restore_code): an NMI the game does not see
+// (STARTUP_ACTION_CHECKPOINT with that code in place of cpsave). If it doesn't, it is tried
+// again after the tape has given more. True if one was sent.
+static bool hs_auto_nmi = false;
+static bool hs_auto_poll() {
+    static bool bt_was = false;
+    if (bt_playing) {
+        bt_was = true;
+        return false;
+    }
+    if (bt_was) {
+        bt_was = false;
+        hs_bt_played = true;
+        tape_block_ms = to_ms_since_boot(get_absolute_time());     // (the Bluetooth has stopped: as a block)
+    }
+    if (hs.restored || hs.game[0] == '\0' || hs.def == 1 || !game_running || !sd_card_mounted ||
+            rom_state.nmi_active || (rom_state.flags & 2) != 0 || conv_running() || tape_busy()) {
+        return false;
+    }
+    if (hs.tried && hs.tried_at == tape_block_ms) return false;        // (nothing new from the tape)
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - hs.sent_ms < 5000 || (tape_block_ms != 0 && now - tape_block_ms < 5000)) return false;
+    if (hs.def == 0) {
+        // (the SD card is looked at once for each game)
+        uint16_t addr, len;
+        hs.def = hs_def(hs.game, addr, len) && hs_bin_exists(hs.game, len) ? 2 : 1;
+        if (hs.def == 1) return false;
+    }
+    if (hs.cap == 0 && !bt_on) {
+        // first a copy of the game's memory (as an autosave's, cpsave): does its screen show the
+        // table? (not with the Bluetooth on: its memory is snap_load_buffer)
+        hs.cap = 1;
+        hs.cap_ms = now;
+        if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) {
+            hs.cap = 0;
+            return false;
+        }
+        return true;
+    }
+    if (hs.cap == 1) {
+        if (now - hs.cap_ms > 3000) hs.cap = 0;     // (the copy never came: again)
+        return false;
+    }
+    if (hs.cap == 2) {
+        hs_rd_patches();
+        hs.cap = 3;
+    }
+    hs.tried = true;
+    hs.tried_at = tape_block_ms;
+    hs_auto_nmi = true;
+    if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) {
+        hs_auto_nmi = false;
+        hs.tried = false;               // (soon again)
+        return false;
+    }
+    return true;
+}
+
+// sendNmiRequest, for hs_auto_poll's NMI: the code at CP_AT, where cpsave would go (the saved
+// table and the memory's copy after it), then out of the NMI. False if there is nothing to do.
+static const uint16_t HS_AUTO_PATCH = CP_AT + 128 + 2 * hiscore::TABLE_MAX;
+static const uint16_t HS_AUTO_PATCH_MAX = (CP_LIMIT - HS_AUTO_PATCH - 2) / 4;
+static bool hs_auto_code(uint8_t* nmi_rom_data) {
+    hs_auto_nmi = false;
+    static_assert(CP_AT + 128 + 2 * hiscore::TABLE_MAX + 4 * 64 <= CP_LIMIT, "the tables fit where cpsave goes");
+    uint16_t patch = 0;
+    if (hs.cap == 3 && hs_rd().patches > 0 && hs_rd().patches <= HS_AUTO_PATCH_MAX) {
+        uint8_t* d = nmi_rom_data + HS_AUTO_PATCH;
+        const HsPatch* p = hs_patches();
+        for (uint16_t i = 0; i < hs_rd().patches; i++) {
+            const uint16_t at = (uint16_t) (0x4000 + p[i].at);
+            *d++ = (uint8_t) (at & 0xFF); *d++ = (uint8_t) (at >> 8); *d++ = p[i].was; *d++ = p[i].now;
+        }
+        *d++ = 0; *d = 0;
+        patch = HS_AUTO_PATCH;
+    }
+    hs.cap = 0;
+    // (code at CP_AT, the saved table at +128, the memory's copy after it, then the patches)
+    return hs_restore_code(nmi_rom_data, CP_AT, CP_AT + 128, CP_AT + 128 + hiscore::TABLE_MAX, EXIT_NO_SCREEN, patch);
+}
+
+// Code at PICO_CODE_AT (PICO_RUN): n bytes copied from to (LDIR), then back
+static void hs_run_copy(uint8_t* nmi_rom_data, uint16_t from, uint16_t to, uint16_t n) {
+    uint8_t* c = nmi_rom_data + PICO_CODE_AT;
+    auto word = [&](uint16_t w) { *c++ = (uint8_t) (w & 0xFF); *c++ = (uint8_t) (w >> 8); };
+    *c++ = 0x21; word(from);                    // LD HL,from
+    *c++ = 0x11; word(to);                      // LD DE,to
+    *c++ = 0x01; word(n);                       // LD BC,n
+    *c++ = 0xED; *c++ = 0xB0;                   // LDIR
+    *c = 0xC9;                                  // RET
+    nmi_rom_data[0] = PICO_RUN;
+}
+
+// BREAK goes back to the game: from the menu, and only when nothing was made ready for the load
+// (a game picked in Browse Games; a reset, Recent, Reload, an autosave or a slot has already
+// changed things for it)
+static bool hs_can_stay() { return nmi_menu_open && !snap_prepared; }
+
+static void hs_draw_leave(uint8_t* nmi_rom_data) {
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    slots_banner(screen, "High scores: ", hs.game);
+    auto put = [&](int row, int col, const char* t, uint8_t a) { help_put_text(screen, row, col, t, (int) strlen(t), a); };
+    put(2, 1, "The game's high score table", gameinfo::ATTR_TEXT);
+    put(3, 1, "is not the one saved.", gameinfo::ATTR_TEXT);
+    put(5, 1, "Save the high scores before", gameinfo::ATTR_HEADING);
+    put(6, 1, "leaving this game?", gameinfo::ATTR_HEADING);
+    put(8, 1, "Y", gameinfo::ATTR_KEYS);
+    put(8, 8, "Yes, save them", gameinfo::ATTR_TEXT);
+    put(9, 1, "N", gameinfo::ATTR_KEYS);
+    put(9, 8, "No", gameinfo::ATTR_TEXT);
+    if (hs_can_stay()) {
+        put(10, 1, "BREAK", gameinfo::ATTR_KEYS);
+        put(10, 8, "Back to the game", gameinfo::ATTR_TEXT);
+    }
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+static bool hs_leaving() { return hs.leave != 0; }
+
+// Leaving the game (ACTION_CHECKPOINT_ASK, through picoscreen, before a load from the menu):
+// its table read, and "Save the high scores?" if it is not the one saved. True: the status is
+// set (go on with the question, or 2: back to the game, see hs_can_stay); false: carry on with
+// the load.
+__attribute__((noinline)) static bool hs_leave(uint8_t* nmi_rom_data, uint8_t key) {
+    uint16_t addr, len;
+    if (key == 0) {
+        hs.leave = 0;
+        // only a table that is the game's own (put back, or none saved yet)
+        if (!sd_card_mounted || !hs_def(hs.game, addr, len) || (!hs.restored && hs_bin_exists(hs.game, len))) return false;
+        hs.leave = 1;
+        hs_run_copy(nmi_rom_data, addr, HS_READ_DATA, len);
+        return true;
+    }
+    if (hs.leave == 0 || !hs_def(hs.game, addr, len)) {
+        hs.leave = 0;
+        return false;
+    }
+    if (hs.leave == 1) {
+        if (key != 254) return false;
+        if (hs_bin_same(hs.game, nmi_rom_data + HS_READ_DATA, len)) {
+            hs.leave = 0;
+            return false;
+        }
+        if (hs_bin_exists(hs.game, len) && hs_bin_read(hs.game, nmi_rom_data + HS_READ_DATA + hiscore::TABLE_MAX, len) &&
+                !hiscore::table_matches(nmi_rom_data + HS_READ_DATA, nmi_rom_data + HS_READ_DATA + hiscore::TABLE_MAX, len)) {
+            // not like the game's table (another game is in the Spectrum): nothing to save
+            hs.leave = 0;
+            return false;
+        }
+        hs.leave = 2;
+        hs_draw_leave(nmi_rom_data);
+        return true;
+    }
+    // asking
+    if (key == 'y' || key == 'Y') {
+        hs_bin_write(hs.game, nmi_rom_data + HS_READ_DATA, len);
+    } else if (is_key_break(key) && hs_can_stay()) {
+        hs.leave = 0;
+        nmi_rom_data[0] = 2;
+        return true;
+    } else if (key != 'n' && key != 'N') {
+        hs_draw_leave(nmi_rom_data);
+        return true;
+    }
+    hs.leave = 0;
+    return false;
+}
+
+// The finder's code: the game's memory from read_at into HS_READ_DATA (PICO_RUN)
+static void hs_read_next(uint8_t* nmi_rom_data) {
+    uint32_t n = 0x10000 - hs.read_at;
+    if (n > HS_READ_MAX) n = HS_READ_MAX;
+    hs.read_n = (uint16_t) n;
+    uint8_t* c = nmi_rom_data + PICO_CODE_AT;
+    auto word = [&](uint16_t w) { *c++ = (uint8_t) (w & 0xFF); *c++ = (uint8_t) (w >> 8); };
+    *c++ = 0x21; word((uint16_t) hs.read_at);       // LD HL,from
+    *c++ = 0x11; word(HS_READ_DATA);                // LD DE,data
+    *c++ = 0x01; word((uint16_t) n);                // LD BC,n
+    *c++ = 0xED; *c++ = 0xB0;                       // LDIR
+    *c = 0xC9;                                      // RET
+    nmi_rom_data[0] = PICO_RUN;
+}
+
+static uint8_t* hs_mem() { return reinterpret_cast<uint8_t*>(snap_load_buffer) + HS_MEM_OFFSET; }
+static_assert(HS_MEM_OFFSET >= 6912 && HS_MEM_OFFSET + hiscore::MEM_SIZE <= SNAP_LOAD_BUFFER_SIZE, "the game's memory is clear of the screen");
+
+// The high score table's screens, on A - Autosave (nmi_action_checkpoints). Returns false when
+// it is left for the autosaves' screen (true: the status is set)
+__attribute__((noinline)) static bool hs_action(uint8_t* nmi_rom_data, uint8_t key) {
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    HsFound& found = hs_found();
+    const bool back = is_key_break(key) || key == 'x' || key == 'X';
+    const char* g = hs.game;                // the game in the Spectrum
+    uint16_t addr = 0, len = 0;
+    bool known = hs_def(g, addr, len);
+    bool saved = known && hs_bin_exists(g, len);
+    hs.msg = nullptr;
+    if (key != 0) {
+        switch (hs.state) {
+        case 0:
+            if (back) {
+                if (hs.direct) {
+                    nmi_rom_data[0] = 1;
+                    return true;
+                }
+                return false;
+            } else if ((key == 'f' || key == 'F') && g[0] != '\0') {
+                hs.state = 1;
+                hs.typed[0] = '\0';
+            } else if ((key == 'r' || key == 'R') && saved) {
+                if (hs_bin_read(g, nmi_rom_data + HS_READ_DATA, len)) {
+                    hs.state = 6;
+                    hs_run_copy(nmi_rom_data, HS_READ_DATA, addr, len);
+                    return true;
+                }
+                hs.msg = "Cannot read the saved table";
+            } else if ((key == 's' || key == 'S') && known) {
+                // S: the table saved now (read from the game first)
+                hs.state = 7;
+                hs_run_copy(nmi_rom_data, addr, HS_READ_DATA, len);
+                return true;
+            } else if ((key == 'c' || key == 'C') && known) {
+                hs.state = 5;
+            }
+            break;
+        case 1: {       // typing
+            size_t n = strlen(hs.typed);
+            if (key == notes::KEY_BREAK) {
+                hs.state = 0;
+            } else if (key == notes::KEY_DELETE) {
+                if (n > 0) hs.typed[n - 1] = '\0';
+            } else if (key == notes::KEY_ENTER) {
+                if (hiscore::classify(hs.typed) == hiscore::T_NONE || strlen(hs.typed) < 2) {
+                    hs.msg = "Two letters or digits at least";
+                } else {
+                    hs.state = 2;
+                    hs.read_at = 0x4000;
+                    sna_in_buffer = false;          // (the game's memory goes where a snapshot would)
+                    snap_is_paged = false;
+                    hs_read_next(nmi_rom_data);
+                    return true;
+                }
+            } else if (key >= 32 && key < 127 && key != '~' && n < hiscore::TYPED_MAX) {
+                hs.typed[n] = (char) (key >= 'a' && key <= 'z' ? key - 32 : key);
+                hs.typed[n + 1] = '\0';
+            }
+            break;
+        }
+        case 2:         // reading: the code has run
+            if (key == 254) {
+                memcpy(hs_mem() + (hs.read_at - 0x4000), nmi_rom_data + HS_READ_DATA, hs.read_n);
+                hs.read_at += hs.read_n;
+                if (hs.read_at < 0x10000) {
+                    hs_read_next(nmi_rom_data);
+                    return true;
+                }
+                found.f.find(hs_mem(), hs.typed);
+                if (found.f.count == 0) {
+                    hs.state = 1;
+                    hs.msg = "Not found: try another";
+                } else {
+                    hs.state = 3;
+                }
+            }
+            break;
+        case 3: {       // the finds
+            int n = key >= '1' && key <= '9' ? key - '0' : 0;
+            if (back) {
+                hs.state = 1;
+            } else if (n > 0 && n <= found.f.count) {
+                hs.pick = (int8_t) (n - 1);
+                found.t = hiscore::table_for(hs_mem(), found.f.hits[n - 1]);
+                hs.state = 4;
+            }
+            break;
+        }
+        case 4:         // a table
+            if (back) {
+                hs.state = 3;
+            } else if (key == 's' || key == 'S') {
+                char path[sizeof(sd_cwd) + 32];
+                if (fsops::kind(Drive::EXTERNAL_SD_CARD, hiscore::FOLDER) != fsops::KIND_DIR) make_sd_folder(hiscore::FOLDER);
+                hs_path(path, sizeof(path), g, "txt");
+                char text[200];
+                int tl = hiscore::write_def(text, sizeof(text), found.t.addr, found.t.len);
+                UINT w = 0;
+                bool ok = f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+                if (ok) {
+                    ok = f_write(&save_fil, text, (UINT) tl, &w) == FR_OK && w == (UINT) tl;
+                    if (f_close(&save_fil) != FR_OK) ok = false;
+                }
+                if (ok) {
+                    hs_bin_write(g, hs_mem() + (found.t.addr - 0x4000), found.t.len);
+                    hs.restored = true;
+                    hs.msg = "Saved: it is kept from now on";
+                } else {
+                    hs.msg = "Could not save it";
+                }
+                hs.state = 0;
+            }
+            break;
+        case 5:         // "Forget it?"
+            hs.state = 0;
+            if (key == 'y' || key == 'Y') {
+                char path[sizeof(sd_cwd) + 32];
+                hs_path(path, sizeof(path), g, "txt");
+                f_unlink(path);
+                hs_path(path, sizeof(path), g, "bin");
+                f_unlink(path);
+                hs_path(path, sizeof(path), g, "bak");
+                f_unlink(path);
+                hs.msg = "Forgotten";
+            }
+            break;
+        case 6:         // put back: the code has run
+            hs.state = 0;
+            hs.restored = true;
+            hs.msg = "The saved table is back in it";
+            break;
+        case 7:         // S: the table has been read
+            hs.state = 0;
+            if (key == 254) {
+                hs.msg = hs_bin_same(g, nmi_rom_data + HS_READ_DATA, len) ? "Saved already: no change" :
+                    hs_bin_write(g, nmi_rom_data + HS_READ_DATA, len) ? "Saved (the old one: its .bak)" : "Could not save it";
+                hs.restored = true;
+            }
+            break;
+        }
+        known = hs_def(g, addr, len);
+        saved = known && hs_bin_exists(g, len);
+    }
+    // the screen
+    slots_banner(screen, "High scores: ", g[0] != '\0' ? g : "no game");
+    char t[48];
+    auto put = [&](int row, int col, const char* s, uint8_t a) { help_put_text(screen, row, col, s, (int) strlen(s), a); };
+    auto key_line = [&](int row, const char* k, const char* s) { put(row, 1, k, gameinfo::ATTR_KEYS); put(row, 4, s, gameinfo::ATTR_TEXT); };
+    switch (hs.state) {
+    case 0:
+    case 5:
+        if (g[0] == '\0') {
+            put(2, 1, "Load a game first.", gameinfo::ATTR_TEXT);
+        } else if (known) {
+            snprintf(t, sizeof(t), "Its table: %u bytes at %u", (unsigned) len, (unsigned) addr);
+            put(2, 1, t, gameinfo::ATTR_TEXT);
+            put(3, 1, saved ? "Saved: put back each time the" : "Not saved yet.", gameinfo::ATTR_DIM);
+            put(4, 1, saved ? "game is loaded." : "", gameinfo::ATTR_DIM);
+        } else {
+            put(2, 1, "Not found yet. Play a game", gameinfo::ATTR_TEXT);
+            put(3, 1, "and put your name or score in", gameinfo::ATTR_TEXT);
+            put(4, 1, "its table, then F finds it.", gameinfo::ATTR_TEXT);
+        }
+        if (g[0] != '\0') key_line(7, "F", "Find the table");
+        if (known) key_line(8, "S", "Save the table now");
+        if (saved) key_line(9, "R", "Put the saved table back");
+        if (known) key_line(10, "C", "Forget it (its files go)");
+        key_line(12, "X", "Back");
+        if (hs.state == 5) {
+            put(19, 1, "Forget where the table is?", gameinfo::ATTR_HEADING);
+            put(20, 1, "Y-Yes  N-No", gameinfo::ATTR_KEYS);
+        }
+        break;
+    case 1:
+        put(2, 1, "Type a name or a score that", gameinfo::ATTR_TEXT);
+        put(3, 1, "is in the game's table now", gameinfo::ATTR_TEXT);
+        put(4, 1, "(what you typed in is best).", gameinfo::ATTR_TEXT);
+        snprintf(t, sizeof(t), "> %s_", hs.typed);
+        put(6, 1, t, gameinfo::ATTR_HEADING);
+        put(8, 1, "ENTER finds it  DELETE rubs out", gameinfo::ATTR_KEYS);
+        put(9, 1, "BREAK back", gameinfo::ATTR_KEYS);
+        break;
+    case 3: {
+        snprintf(t, sizeof(t), "\"%s\": %d found", hs.typed, found.f.total);
+        put(2, 1, t, gameinfo::ATTR_TEXT);
+        for (int k = 0; k < found.f.count; k++) {
+            const hiscore::Hit& h = found.f.hits[k];
+            snprintf(t, sizeof(t), "%d", k + 1);
+            put(4 + k, 1, t, gameinfo::ATTR_KEYS);
+            snprintf(t, sizeof(t), "%5u", (unsigned) h.addr);
+            put(4 + k, 3, t, gameinfo::ATTR_DIM);
+            char v[24];
+            uint32_t from = h.addr - 0x4000;
+            int show = (int) (hiscore::MEM_SIZE - from < 22 ? hiscore::MEM_SIZE - from : 22);
+            hiscore::show_bytes(hs_mem() + from, show, h, v, (h.enc == hiscore::BCD || h.enc == hiscore::BIN) ? 23 : 22);
+            put(4 + k, 9, v, gameinfo::ATTR_TEXT);
+        }
+        if (found.f.total > found.f.count) put(14, 1, "(more: type more of it)", gameinfo::ATTR_DIM);
+        if (found.f.count == 1) snprintf(t, sizeof(t), "1 Is it the table?");
+        else snprintf(t, sizeof(t), "1-%d Which is the table?", found.f.count);
+        put(16, 1, t, gameinfo::ATTR_KEYS);
+        put(17, 1, "X Back", gameinfo::ATTR_KEYS);
+        break;
+    }
+    case 4: {
+        const hiscore::Hit& h = found.f.hits[hs.pick];
+        if (found.t.stride != 0) {
+            snprintf(t, sizeof(t), "%u bytes at %u, %u entries", (unsigned) found.t.len, (unsigned) found.t.addr, (unsigned) found.t.entries);
+        } else {
+            snprintf(t, sizeof(t), "Only this: %u bytes at %u", (unsigned) found.t.len, (unsigned) found.t.addr);
+        }
+        put(2, 1, t, gameinfo::ATTR_TEXT);
+        const int row_len = found.t.stride != 0 ? found.t.stride : found.t.len;
+        const int rows = (found.t.len + row_len - 1) / row_len;
+        for (int r = 0; r < rows && r < 14; r++) {
+            char v[32];
+            int n = row_len;
+            if (r * row_len + n > found.t.len) n = found.t.len - r * row_len;
+            if (n > 30) n = 30;
+            hiscore::show_bytes(hs_mem() + (found.t.addr - 0x4000) + r * row_len, n, h, v, (h.enc == hiscore::BCD || h.enc == hiscore::BIN) ? 31 : 31);
+            put(4 + r, 1, v, gameinfo::ATTR_HEADING);
+        }
+        put(19, 1, "Is this the high score table?", gameinfo::ATTR_TEXT);
+        key_line(20, "S", "Save it as the game's table");
+        key_line(21, "X", "Back to the finds");
+        break;
+    }
+    default:
+        break;
+    }
+    if (hs.msg != nullptr) put(22, 1, hs.msg, gameinfo::ATTR_TEXT);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+    return true;
+}
+#endif
+
 // ACTION_CHECKPOINTS: K on the menu. BYTE param1 = the key (0: opened). Status 0 stays, 1 closed,
 // 2 the checkpoint chosen is ready (loaded into snap_load_buffer)
 __attribute__((noinline)) static void nmi_action_checkpoints() {
@@ -4945,6 +5836,25 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     const int n = key >= '1' && key <= '9' ? key - '0' : 0;
     const bool back = is_key_break(key) || key == 'x' || key == 'X';
     if (key == 0) cp_state = 0;
+#if PICOMENU_HISCORE
+    // T: the high score table's screens (cp_state 10); the hotkey T opens them straight away
+    if (key == 0 && hs_open_direct) {
+        hs_open_direct = false;
+        cp_state = 10;
+        hs.state = 0;
+        hs.direct = true;
+        if (hs_action(nmi_rom_data, 0)) return;
+    } else if (cp_state == 10) {
+        if (hs_action(nmi_rom_data, key)) return;
+        cp_state = 0;
+        key = 0;                // (back on the autosaves' screen: drawn as it is)
+    } else if (cp_state == 0 && (key == 't' || key == 'T')) {
+        cp_state = 10;
+        hs.state = 0;
+        hs.direct = false;
+        if (hs_action(nmi_rom_data, 0)) return;
+    }
+#endif
     slot_msg = nullptr;
     switch (key == 0 ? 255 : cp_state) {
     case 0:
@@ -5084,7 +5994,11 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     }
     help_put_text(screen, 15, 1, "O", 1, gameinfo::ATTR_KEYS);
     help_put_text(screen, 15, 5, rw.on ? "Turn autosave off" : "Turn autosave on", rw.on ? 17 : 16, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 17, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
+#if PICOMENU_HISCORE
+    help_put_text(screen, 16, 1, "T", 1, gameinfo::ATTR_KEYS);
+    help_put_text(screen, 16, 5, "High score table", 16, gameinfo::ATTR_TEXT);
+#endif
+    help_put_text(screen, 18, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
     const char* ask = nullptr;
     const char* keys = "X-Back";
     switch (cp_state) {
@@ -5171,6 +6085,19 @@ static void help_token(const char* token, size_t len, char* out, size_t outsize)
                      (unsigned long) sd_read_failures, (unsigned long) sd_remounts);
         }
     }
+    else if (is("autosave")) {
+        // the pause the game had for the last autosave (since power on)
+        if (cp_pause_us == 0) {
+            snprintf(out, outsize, "None yet");
+        } else {
+#if PICOMENU_CP_OLD
+            snprintf(out, outsize, "%s old: %lu ms, max %lu ms", cp_pause_128 ? "128K" : "48K",
+#else
+            snprintf(out, outsize, "%s: %lu ms, longest %lu ms", cp_pause_128 ? "128K" : "48K",
+#endif
+                     (unsigned long) ((cp_pause_us + 500) / 1000), (unsigned long) ((cp_pause_max_us + 500) / 1000));
+        }
+    }
     else if (is("ini1")) {
         settings::describe(cfg, out, outsize);
     }
@@ -5246,11 +6173,6 @@ static void help_draw_page(uint8_t* screen, int page) {
     hp.title = at;
     hp.text = at + strlen(at) + 1;
     help_put_text(screen, 0, 1, hp.title, strlen(hp.title), BANNER);
-    if (HELP_PAGE_COUNT > 1) {
-        char number[12];
-        int n = snprintf(number, sizeof(number), "%d/%d", page + 1, HELP_PAGE_COUNT);
-        help_put_text(screen, 0, 31 - n, number, n, BANNER);
-    }
     // the text
     int row = 1;
     for (const char* p = hp.text; *p && row <= 22; row++) {
@@ -5275,8 +6197,9 @@ static void help_draw_page(uint8_t* screen, int page) {
         }
         p += len + (end ? 1 : 0);
     }
-    const char* keys = HELP_PAGE_COUNT == 1 ? "Any key: back to Options" : page == 0 ? "N-Next page      X-Back" :
-        page == HELP_PAGE_COUNT - 1 ? "P-Previous page  X-Back" : "N-Next  P-Previous  X-Back";
+    // (each page is shown on its own: Diagnostics, the last, from Options; the hotkeys' list,
+    // the first, with the button and SPACE)
+    const char* keys = page == HELP_PAGE_COUNT - 1 ? "Any key: back to Options" : "Any key: back to the game";
     help_put_text(screen, 23, 1, keys, strlen(keys), KEYS);
 }
 
@@ -5695,6 +6618,9 @@ static void web_draw(uint8_t* screen) {
     preview_screen = screen;
 }
 
+// The screens of the Pico W firmware only, in the standard one
+#define NEEDS_PICO_W "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it."
+
 #if PICOMENU_NET
 static uint8_t zx_key(uint8_t key);
 static void zx_draw(uint8_t* screen);
@@ -5736,7 +6662,7 @@ __attribute__((noinline)) static void nmi_action_wifi() {
         memset(&w, 0, sizeof(w));
         w.bt = key == 0xFE;
         w.pok = key != 0xFE;
-        w.problem = "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it.";
+        w.problem = NEEDS_PICO_W;
         web_draw(screen);
         nmi_rom_data[0] = 2;
         return;
@@ -5751,7 +6677,7 @@ __attribute__((noinline)) static void nmi_action_wifi() {
         walk_stop();
         web_read_ini(w);
 #ifndef WIFI_ENABLE
-        w.problem = "This needs a Pico W, with the\nPico W firmware of PicoMenu\n(picomenu-...-W.uf2) on it.";
+        w.problem = NEEDS_PICO_W;
 #else
         if (!web_card_ok()) {
             w.problem = "There is no SD card (or the PC\nhas it as a USB drive).";
@@ -6819,6 +7745,15 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
     nmi_rom_data[3] = (uint8_t) (pages > 15 ? view_page : page);    // the page as it was kept to the pages there are
     nmi_rom_data[0] = (uint8_t) ((pages > 15 ? 15 : pages) | ((pictures > 15 ? 15 : pictures) << 4));
 }
+// The texts set up writes (settings.h's DEFAULT_SETTINGS and ORDER_HEADING, then sdsetup.h's
+// EXAMPLE), kept packed in the firmware (asm_to_c_file.py) and unpacked where Help's text goes
+static const char* setup_texts() {
+    static_assert(HELP_TEXT_OFFSET + SETUP_INI_SIZE + SETUP_EXAMPLE_SIZE <= SNAP_LOAD_BUFFER_SIZE, "they fit");
+    char* t = snap_load_buffer + HELP_TEXT_OFFSET;
+    lzss_unpack(SETUP_TEXTS_LZ, reinterpret_cast<uint8_t*>(t), SETUP_INI_SIZE + SETUP_EXAMPLE_SIZE);
+    return t;
+}
+
 
 // ---- C on the NMI menu: set up the SD card (sdsetup.h). The ROM shows it as the game
 // information with mode 2: D asks "Set up this card?", Y does it (op 2), any other key does not.
@@ -6862,7 +7797,8 @@ NOTES_FUNC static void sd_setup_run() {
         if (scraper_ok) {
             FileHandle& f = *notes_handle();
             if (f.open(Drive::EXTERNAL_SD_CARD, sdsetup::EXAMPLE_PATH, false)) {
-                bool ok = f.write(sdsetup::EXAMPLE, sizeof(sdsetup::EXAMPLE) - 1) == (int) (sizeof(sdsetup::EXAMPLE) - 1);
+                const char* example = setup_texts() + SETUP_INI_SIZE;
+                bool ok = f.write(example, SETUP_EXAMPLE_SIZE) == (int) SETUP_EXAMPLE_SIZE;
                 ok = f.close() && ok;
                 r = ok ? sdsetup::MADE : sdsetup::FAILED;
                 if (!ok) {
@@ -6889,8 +7825,7 @@ NOTES_FUNC static void sd_setup_run() {
         }
         if (f.open(Drive::EXTERNAL_SD_CARD, settings::FILE_NAME, false)) {
             auto put = [&](const char* text, size_t n) { return f.write(text, (int) n) == (int) n; };
-            bool ok = put(settings::DEFAULT_SETTINGS, sizeof(settings::DEFAULT_SETTINGS) - 1) &&
-                put(settings::ORDER_HEADING, sizeof(settings::ORDER_HEADING) - 1);
+            bool ok = put(setup_texts(), SETUP_INI_SIZE);     // DEFAULT_SETTINGS and ORDER_HEADING
             if (ok && order_len >= 0) {
                 ok = put(order, (size_t) order_len);
                 if (ok && order_len > 0 && order[order_len - 1] != '\n') ok = put("\r\n", 2);
@@ -8718,7 +9653,6 @@ static void nmi_action_slot_ask();
 static void nmi_action_options();
 static void nmi_action_batch();
 
-static bool sna_in_buffer = false;          // a snapshot sent to be saved is in snap_load_buffer
 
 static bool list_pool_busy = false;         // a screen (Options, the batch's folders) keeps its state in list_pool
 static bool menu_shot_piece();
@@ -8745,6 +9679,208 @@ static_assert(SAVE128_GEN_CODE + SAVE128_GEN_BLOCK * 2 + 6 <= 16384, "gencopy's 
 
 // The hash of the end of the 128K bank paged in (ACTION_SNA_HASH), as the NMI ROM sends it
 static uint16_t save_hash1 = 0, save_hash2 = 0;
+
+// ---- Hotkeys (Picomenu.ini's nmi_button = hotkeys) ----
+// The button sends the NMI as soon as it goes down, with hotkeys (nmirom.asm) in place of the
+// menu: a key pressed while it is held opens that straight away (ACTION_HOTKEY), and closing it
+// goes back to the game; let go with no key, it is the menu as always. With the menu up a press
+// saves the menu's screen (as a double press does with the original button). There is no long
+// press reset (1 and 4 are hotkeys) and no hold or double press.
+static bool hotkey_nmi = false;         // the next NMI is the button's: hotkeys goes in
+bool button_press_action(bool held);
+
+// ACTION_HOTKEY: the key (from the ROM's key table) and what it opens
+__attribute__((noinline)) static void nmi_action_hotkey(uint8_t* nmi_rom_data) {
+    static const struct { char key; uint16_t at; } KEYS[] = {
+        { 'b', HK_BROWSE }, { 'f', HK_BROWSE }, { 'z', HK_ZXDB }, { 'i', HK_INFO }, { 's', HK_SAVE },
+        { 'g', HK_GRAB }, { '1', HK_RESET128 }, { '4', HK_RESET48 }, { 'v', HK_TAPE },
+        { 'a', HK_AUTOSAVE }, { 'p', HK_POKE } };
+    uint8_t k = nmi_rom_data[2];
+    if (k >= 'A' && k <= 'Z') k = (uint8_t) (k + 32);
+    uint8_t status = k == 'h' ? 2 : k == ' ' ? 3 : 0;
+#if PICOMENU_HISCORE
+    if (k == 't') {
+        // T: the high score table (A - Autosave's T)
+        status = 1;
+        nmi_rom_data[3] = (uint8_t) (HK_AUTOSAVE & 0xFF);
+        nmi_rom_data[4] = (uint8_t) (HK_AUTOSAVE >> 8);
+        hs_open_direct = true;
+    }
+#endif
+    for (const auto& e : KEYS) {
+        if (e.key == k) {
+            status = 1;
+            nmi_rom_data[3] = (uint8_t) (e.at & 0xFF);
+            nmi_rom_data[4] = (uint8_t) (e.at >> 8);
+        }
+    }
+    if (k == 'f') {
+        // Browse Games in the Favourites folder (A in Browse Games copies a game there): the SD
+        // card's, else the flash's; neither, Browse Games where it would start
+        for (uint8_t d = 1; ; d = 0) {
+            if ((d == 0 || sd_card_mounted) && fsops::kind(fsops::drive_of(d), FAVOURITES_DIR) == fsops::KIND_DIR) {
+                snprintf(d == 1 ? sd_cwd : flash_cwd, sizeof(sd_cwd), "%s", FAVOURITES_DIR);
+                nmi_rom_data[START_DRIVE] = d;
+                break;
+            }
+            if (d == 0) break;
+        }
+    }
+    nmi_rom_data[0] = status;
+}
+
+// The button (debounced) went down or up, with Picomenu.ini's nmi_button = hotkeys
+static void hotkeys_button(bool down) {
+    rom_data[16384 + HK_HELD] = down ? 1 : 0;
+    if (!down) return;
+    if (rom_state.nmi_active || (rom_state.flags & 2) != 0) {
+        button_press_action(false);         // the menu's screen saved (as a .png)
+        return;
+    }
+    hotkey_nmi = true;
+    if (!sendNmiRequest(0, 0, 0)) hotkey_nmi = false;
+    rom_data[16384 + HK_HELD] = 1;          // (sendNmiRequest unpacked the ROM afresh)
+}
+
+#ifdef PICOFACE_HOST
+void host_hotkeys_button(bool down) { hotkeys_button(down); }     // the simulator's hkbutton
+#endif
+
+// ---- The autosave's copy (cpsave in nmirom.asm) ----
+// cpsave (put in place of the menu's code for an autosave, see sendNmiRequest) asks for the
+// copy a block at a time: the code written at CP_CODE copies up to CP_DATA_SIZE bytes of the
+// Spectrum's memory into CP_DATA with POP and PUSH, 14 bytes a group, and the block is put in
+// snap_load_buffer when it has run (ACTION_CP_NEXT). The memory is in pieces (cp_seg): a 48K
+// snapshot is 0x4000 to 0xFFFF after the .sna header; a 128K one is banks 5 and 2, the bank
+// paged in at 0xC000 as it is, then the others paged in there, each where KIND_PAGED has it.
+static struct {
+    struct Seg { uint16_t from; uint8_t page; uint32_t to, len; } seg[8];    // page: 0xFF none
+    uint8_t segs, at;
+    uint32_t done;                          // bytes of seg[at] copied
+    uint32_t block_to, block_len;           // the block the code copies now: where it goes
+    int8_t bank;                            // the 128K bank at 0xC000, -1 for a 48K snapshot
+    uint8_t port;                           // the 7FFD value for the game (128K)
+} cp;
+
+static int8_t cp_bank_now() { return cp.bank; }
+static uint8_t cp_port_now() { return cp.port; }
+
+// Writes the copy of the next block at CP_CODE (from cp.seg[cp.at], cp.done): false if all is sent
+static bool cp_write_block(uint8_t* nmi_rom_data) {
+    while (cp.at < cp.segs && cp.done >= cp.seg[cp.at].len) {
+        cp.at++;
+        cp.done = 0;
+    }
+    if (cp.at >= cp.segs) return false;
+    const auto& g = cp.seg[cp.at];
+    uint32_t n = g.len - cp.done;
+    if (n > CP_DATA_SIZE / 14 * 14) n = CP_DATA_SIZE / 14 * 14;
+    uint16_t from = (uint16_t) (g.from + cp.done);
+    uint8_t* c = nmi_rom_data + CP_CODE;
+    auto word = [&](uint16_t w) { *c++ = (uint8_t) (w & 0xFF); *c++ = (uint8_t) (w >> 8); };
+    if (cp.done == 0 && g.page != 0xFF) {
+        *c++ = 0x3E; *c++ = g.page;                 // LD A,page
+        *c++ = 0x01; word(0x7FFD);                  // LD BC,0x7FFD
+        *c++ = 0xED; *c++ = 0x79;                   // OUT (C),A
+    }
+    *c++ = 0xED; *c++ = 0x73; word(CP_SP);          // LD (CP_SP),SP
+    static const uint8_t POPS[7] = { 0xF1, 0xC1, 0xD1, 0xE1, 0xC1, 0xD1, 0xE1 };   // AF BC DE HL, then BC' DE' HL'
+    uint16_t to = CP_DATA;
+    for (uint32_t left = n; left > 0; ) {
+        uint32_t pairs = left >= 14 ? 7 : left / 2;
+        *c++ = 0x31; word(from);                    // LD SP,from
+        for (uint32_t i = 0; i < pairs; i++) {
+            if (i == 4) *c++ = 0xD9;                // EXX
+            *c++ = POPS[i];
+        }
+        *c++ = 0x31; word((uint16_t) (to + 2 * pairs));     // LD SP,to + the group
+        for (uint32_t i = pairs; i-- > 0; ) {
+            *c++ = (uint8_t) (POPS[i] + 4);         // PUSH (the last popped first)
+            if (i == 4) *c++ = 0xD9;                // EXX
+        }
+        from = (uint16_t) (from + 2 * pairs);
+        to = (uint16_t) (to + 2 * pairs);
+        left -= 2 * pairs;
+    }
+    *c++ = 0xED; *c++ = 0x7B; word(CP_SP);          // LD SP,(CP_SP)
+    *c = 0xC9;                                      // RET
+    cp.block_to = g.to + cp.done;
+    cp.block_len = n;
+    cp.done += n;
+    return true;
+}
+static_assert(CP_CODE + 7 + 4 + (CP_DATA_SIZE / 14) * CP_GROUP_CODE + 5 <= CP_LIMIT, "the copy's code fits");
+
+// ACTION_CP_BEGIN: the header, and the copy of the first block
+static void nmi_action_cp_begin(uint8_t* nmi_rom_data) {
+    uint16_t headeroffset = (uint16_t) ((nmi_rom_data[3] << 8) | nmi_rom_data[2]);
+    uint8_t bank = nmi_rom_data[4];
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    sna_in_buffer = true;
+    snap_is_paged = false;
+    cp.segs = cp.at = 0;
+    cp.done = 0;
+    if (bank > 7) {
+        save_is_128k = false;
+        cp.bank = -1;
+        memcpy(buf, nmi_rom_data + headeroffset, SNA_HEADER_SIZE);
+        cp.seg[cp.segs++] = { 0x4000, 0xFF, SNA_HEADER_SIZE, 49152 };
+        current_sna_write_offset = SNA_FILE_SIZE;
+    } else {
+        save_is_128k = true;
+        cp.bank = (int8_t) bank;
+        memcpy(save128_info, nmi_rom_data + headeroffset, sizeof(save128_info));
+        // the port's value as it will be saved (its screen and ROM bits are a guess, see
+        // choose_7ffd): its screen bit while the other banks are paged in, so the game's screen
+        // stays on the TV
+        cp.port = snapload::choose_7ffd(buf, save128_info, &loaded_paging, bank);
+        const uint8_t keep = cp.port & 0x18;
+        auto add = [&](uint16_t from, uint8_t page, uint32_t b) {
+            cp.seg[cp.segs++] = { from, page, (uint32_t) (snapload::bank_memory(buf, b) - buf), snapload::PAGE_SIZE };
+        };
+        add(0x4000, (uint8_t) (keep | bank), 5);
+        add(0x8000, 0xFF, 2);
+        if (bank != 5 && bank != 2) add(0xC000, 0xFF, bank);
+        for (uint8_t b : snapload::PAGE_ORDER) {
+            if (b != 5 && b != 2 && b != bank) add(0xC000, (uint8_t) (keep | b), b);
+        }
+        current_sna_write_offset = snapload::BUFFER128_SIZE;
+    }
+    cp_write_block(nmi_rom_data);
+}
+
+// ACTION_CP_NEXT: the block is in CP_DATA. Status 0 with the next one's copy written, or 1 when
+// all is sent (param1 the port's value, param2 1 to write it)
+static void nmi_action_cp_next(uint8_t* nmi_rom_data) {
+    uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    memcpy(buf + cp.block_to, nmi_rom_data + CP_DATA, cp.block_len);
+    if (cp_write_block(nmi_rom_data)) {
+        nmi_rom_data[0] = 0;
+        return;
+    }
+    if (cp.bank >= 0) {
+        uint8_t port = snapload::finish_save128(buf, save128_info, &loaded_paging, cp.bank);
+        nmi_rom_data[2] = port;
+        nmi_rom_data[3] = 1;
+    } else {
+        nmi_rom_data[3] = 0;
+    }
+    nmi_rom_data[0] = 1;
+}
+
+// A snapshot being sent (an autosave, or a save from the menu): the main loop serves each of
+// its requests as soon as it comes (not after its 1 ms sleep and the other things it does) until
+// the snapshot is saved, or nothing has come for SAVE_STREAM_IDLE_US
+static bool save_stream = false;
+static uint64_t save_stream_at = 0;
+static const uint64_t SAVE_STREAM_IDLE_US = 100000;
+static void save_stream_start() {
+#if PICOMENU_CP_OLD
+    return;                                 // (a test build: Rev 2.5.0's way)
+#endif
+    save_stream = true;
+    save_stream_at = time_us_64();
+}
 
 void processNmiRequest() {
     uint8_t* nmi_rom_data = rom_data + 16384;
@@ -8774,6 +9910,7 @@ void processNmiRequest() {
         memcpy(snap_load_buffer, nmi_rom_data + headeroffset, SNA_HEADER_SIZE);
         current_sna_write_offset = SNA_HEADER_SIZE;
         gencopy_write(nmi_rom_data);
+        save_stream_start();
     }  else if (action == ACTION_SNA_HASH) {
         uint16_t offset =  (nmi_rom_data[3] << 8) |  nmi_rom_data[2];
         uint16_t count =  (nmi_rom_data[5] << 8) |  nmi_rom_data[4];
@@ -8799,6 +9936,20 @@ void processNmiRequest() {
         current_sna_write_offset = snapload::HEADER_AREA;
         save_hash1 = save_hash2 = 0;
         gencopy_write(nmi_rom_data);
+        save_stream_start();
+#if PICOMENU_HISCORE
+    }  else if (action == ACTION_HS_CHECK) {
+        nmi_action_hs_check(nmi_rom_data);
+        return;
+#endif
+    }  else if (action == ACTION_HOTKEY) {
+        nmi_action_hotkey(nmi_rom_data);
+        return;
+    }  else if (action == ACTION_CP_BEGIN) {
+        nmi_action_cp_begin(nmi_rom_data);
+    }  else if (action == ACTION_CP_NEXT) {
+        nmi_action_cp_next(nmi_rom_data);
+        return;
     }  else if (action == ACTION_SNA_END_WRITE128) {
         uint8_t port = snapload::finish_save128(reinterpret_cast<uint8_t*>(snap_load_buffer), save128_info, &loaded_paging);
         LOG("End 128K save, paged bank at 0xC000 was %d, port 7FFD = %02X\n", port & 7, port);
@@ -8905,6 +10056,7 @@ void processNmiRequest() {
     } else if (action == ACTION_SNAP_FIND) {
         nmi_action_snap_find();
     } else if (action == ACTION_SNA_SAVE) {
+        save_stream = false;
         nmi_action_sna_save();
         return;
     } else if (action == ACTION_SNA_SAVE_DIR) {
@@ -9121,6 +10273,15 @@ static uint8_t tape_drive = 0;
 static char tape_name[BROWSE_PATH_MAX];
 static TzxState tape_tz;      // where the tape being served is (a preview of another .tzx has its own)
 static uint32_t tape_done = 0;  // data blocks the tape has gone past since its start
+#if PICOMENU_HISCORE
+// a tape is being loaded: the high score table is not put back until it has stopped (no block
+// for 5 s, after one at least), as the game sets up its own table once it is in
+static bool tape_busy() {
+    if (bt_playing) return true;
+    if (!tape_service_active || tape_ejected) return false;
+    return (tape_done == 0 && !hs_bt_played) || to_ms_since_boot(get_absolute_time()) - tape_block_ms < 5000;
+}
+#endif
 static bool tape_goto(uint32_t block);
 // Tape in (T in Browse Games): see tape_in_start()
 static const uint32_t TAPE_IN_ENTRY = TAPE_HOOK_ADDR;   // as in piohandler.S
@@ -9271,6 +10432,7 @@ static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bo
     uint32_t blen;
     bool more = tape_next_block(tape_file, tzx, blen);
     if (more) tape_done++;
+    tape_block_ms = to_ms_since_boot(get_absolute_time());
     if (!more) {
         // The end of the tape: the load fails (as it would wait for ever on a real tape) and
         // the tape is rewound, so the next load starts from the first block again.
@@ -9488,6 +10650,9 @@ static const char* tape_in_start(uint8_t drive, const char* filename, uint32_t b
     tape_goto(block);
     tape_in_watch(true);
     level_loaders_scan_pending = true;              // once the menu has gone
+#if PICOMENU_HISCORE
+    hs_tape_game(tape_name);
+#endif
     LOG("Tape in: %s from block %u\n", tape_name, (unsigned) tape_done);
     return nullptr;
 }
@@ -10213,13 +11378,13 @@ static void opt_draw(uint8_t* screen) {
             help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
         }
         const char* hint = options::ITEMS[opt_cursor[0]].hint;
-        static_assert(1 + options::MAIN_COUNT <= 20, "the items above the hint");
-        help_put_text(screen, 20, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
-        help_put_text(screen, 21, 1, "Q/A-Up/Down  C-Change  X-Back", 29, gameinfo::ATTR_KEYS);
+        static_assert(1 + options::MAIN_COUNT <= 21, "the items above the hint");
+        help_put_text(screen, 21, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
+        help_put_text(screen, 22, 1, "Q/A-Up/Down  C-Change  X-Back", 29, gameinfo::ATTR_KEYS);
 #if PICOMENU_WIFI_UI
-        help_put_text(screen, 22, 1, "N-Order W-WiFi/BT D-Diagnostics", 31, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 23, 1, "N-Order W-WiFi/BT D-Diagnostics", 31, gameinfo::ATTR_KEYS);
 #else
-        help_put_text(screen, 22, 1, "N-Grab order  D-Diagnostics", 27, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 23, 1, "N-Grab order  D-Diagnostics", 27, gameinfo::ATTR_KEYS);
 #endif
 #if PICOMENU_WIFI_UI
     } else if (opt_page == 2) {
@@ -11039,10 +12204,12 @@ static void tape_note_resume(uint8_t drive, const char* snap, bool paged, uint8_
 //   5 Tape files      /Tape Files: the notes of where a tape had got to for its snapshots, and
 //                     the labels of its tapes
 //   6 Screen grabs    /Scraper/Screen Grabs and /Screen Grabs: <game> and its categories' grabs
-// 1-6 turn a category on or off, E erases what is on (Y to be sure): to the Waste Bin, as E in
+//   7 High scores     /High Scores/<game>.txt (where its table is), .bin (the table), .bak
+//                     (the Pico W build: the standard one has no high scores, so 6 categories)
+// 1-7 (1-6) turn a category on or off, E erases what is on (Y to be sure): to the Waste Bin, as E in
 // Browse Games does (waste_bin = off: for good). The names listed and the assets found are kept
 // in snap_load_buffer (free while the screen is up), after the screen.
-static const int AS_CATS = 6;
+static const int AS_CATS = PICOMENU_HISCORE ? 7 : 6;
 static const uint32_t AS_NAMES_AT = 16384, AS_NAMES_SIZE = 16384;           // the names, \0 after each
 static const uint32_t AS_INDEX_AT = AS_NAMES_AT + AS_NAMES_SIZE;            // where each one starts
 static const int AS_NAMES_MAX = 1024;
@@ -11067,7 +12234,11 @@ static const uint32_t AS_STATE_AT = 6912;
 static_assert(AS_STATE_AT + sizeof(AsState) <= AS_NAMES_AT, "the assets screen's state fits");
 #define as (*reinterpret_cast<AsState*>(snap_load_buffer + AS_STATE_AT))
 static const char* const AS_CAT_NAME[AS_CATS] = { "Autosaves", "Save slots, saves", "Game Notes", "Pokes (.pok)",
-    "Tape files", "Screen grabs" };
+    "Tape files", "Screen grabs",
+#if PICOMENU_HISCORE
+    "High scores"
+#endif
+};
 
 static char* as_names() { return snap_load_buffer + AS_NAMES_AT; }
 static uint16_t* as_index() { return reinterpret_cast<uint16_t*>(snap_load_buffer + AS_INDEX_AT); }
@@ -11172,6 +12343,14 @@ __attribute__((noinline)) static void as_list() {
         char g[screengrab::NAME_MAX + 1];
         if (!dir && as_tape_game(n, g)) as_name_add(g);
     });
+#if PICOMENU_HISCORE
+    as_each(hiscore::FOLDER, [](char* n, bool dir) {
+        char* dot = strrchr(n, '.');
+        if (dir || dot == nullptr || (strcasecmp(dot, ".txt") != 0 && strcasecmp(dot, ".bin") != 0 && strcasecmp(dot, ".bak") != 0)) return;
+        *dot = '\0';
+        as_name_add(n);
+    });
+#endif
     // in order (a few hundred at most: a simple sort)
     char* names = as_names();
     uint16_t* index = as_index();
@@ -11269,6 +12448,13 @@ __attribute__((noinline)) static void as_find() {
         snprintf(p, sizeof(p), "%s/%s", screengrab::OLD_FOLDER, n);
         as_found_add(5, false, p);
     });
+#if PICOMENU_HISCORE
+    static const char* const HS_EXT[] = { "txt", "bin", "bak" };
+    for (const char* e : HS_EXT) {
+        snprintf(path, sizeof(path), "%s/%s.%s", hiscore::FOLDER, as.game, e);
+        if (fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_FILE) as_found_add(6, false, path);
+    }
+#endif
     as.on = 0;
     for (int c = 0; c < AS_CATS; c++) if (as.count[c] > 0) as.on |= (uint8_t) (1 << c);
 }
@@ -11289,6 +12475,9 @@ __attribute__((noinline)) static void as_erase() {
         else failed++;
         LOG("Assets of %s: %s %s\n", as.game, path, failed ? "not erased" : "erased");
     }
+#if PICOMENU_HISCORE
+    hs.def = 0;                         // (a high score table may have gone: looked for again)
+#endif
     if (failed > 0) snprintf(as.said, sizeof(as.said), "Erased %d, %d could not be", done, failed);
     else snprintf(as.said, sizeof(as.said), "Erased %d%s", done, cfg.waste_bin ? " (to the Waste Bin)" : "");
 }
@@ -11306,7 +12495,8 @@ static void as_draw(uint8_t* screen) {
             text(6, "ENTER lists the games that have", gameinfo::ATTR_DIM);
             text(7, "assets (nothing typed: all):", gameinfo::ATTR_DIM);
             text(8, "autosaves, saves, notes, pokes,", gameinfo::ATTR_DIM);
-            text(9, "tape files and screen grabs.", gameinfo::ATTR_DIM);
+            text(9, "tape files, screen grabs and", gameinfo::ATTR_DIM);
+            text(10, "high scores.", gameinfo::ATTR_DIM);
             keys = "ENTER-List  BREAK-Back";
             break;
         case AS_LIST: {
@@ -11334,9 +12524,9 @@ static void as_draw(uint8_t* screen) {
                 text(4 + c, t, as.count[c] == 0 ? gameinfo::ATTR_DIM : on ? gameinfo::ATTR_TEXT : gameinfo::ATTR_HEADING);
                 if (on) total += as.count[c];
             }
-            text(11, cfg.waste_bin ? "They go to the Waste Bin (W in" : "waste_bin is off: they are", gameinfo::ATTR_DIM);
-            text(12, cfg.waste_bin ? "Tools gets them back)." : "erased for good.", gameinfo::ATTR_DIM);
-            if (as.found_full) text(13, "(more than fit: E again after)", gameinfo::ATTR_DIM);
+            text(12, cfg.waste_bin ? "They go to the Waste Bin (W in" : "waste_bin is off: they are", gameinfo::ATTR_DIM);
+            text(13, cfg.waste_bin ? "Tools gets them back)." : "erased for good.", gameinfo::ATTR_DIM);
+            if (as.found_full) text(14, "(more than fit: E again after)", gameinfo::ATTR_DIM);
             if (as.mode == AS_ASK) {
                 snprintf(t, sizeof(t), "Erase %d? Y-Yes  other key-No", total);
                 text(21, t, gameinfo::ATTR_KEYS);
@@ -11344,7 +12534,7 @@ static void as_draw(uint8_t* screen) {
                 text(15, as.said, gameinfo::ATTR_HEADING);
                 keys = "Any key-Back";
             } else {
-                text(21, total > 0 ? "1-6 On/off  E-Erase" : "Nothing to erase", gameinfo::ATTR_KEYS);
+                text(21, total > 0 ? (AS_CATS == 7 ? "1-7 On/off  E-Erase" : "1-6 On/off  E-Erase") : "Nothing to erase", gameinfo::ATTR_KEYS);
                 keys = "X-Back to the list";
             }
             break;
@@ -11419,22 +12609,6 @@ __attribute__((noinline)) static void nmi_action_assets() {
     nmi_rom_data[0] = 0;
 }
 #undef as
-#else
-// The standard firmware: no room for it
-__attribute__((noinline)) static void nmi_action_assets() {
-    uint8_t* nmi_rom_data = rom_data + 16384;
-    if (nmi_rom_data[2] != 0) {
-        nmi_rom_data[0] = 1;
-        return;
-    }
-    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
-    slots_banner(screen, "", "Erase all assets");
-    static const char* const LINES[] = { "This is in the Pico W firmware", "(picomenu-...-W.uf2) only: the", "standard one has no room." };
-    for (int i = 0; i < 3; i++) help_put_text(screen, 2 + i, 1, LINES[i], (int) strlen(LINES[i]), gameinfo::ATTR_TEXT);
-    help_put_text(screen, 22, 1, "Any key-Back", 12, gameinfo::ATTR_KEYS);
-    preview_screen = screen;
-    nmi_rom_data[0] = 0;
-}
 #endif
 
 // ---- V on the menu: the Virtual Tape Player (the tape position) ----
@@ -11512,6 +12686,7 @@ static bool tape_goto(uint32_t block) {
         tape_tz = tz;
         if (!ok) return tape_open_file();
         tape_done++;
+        tape_block_ms = to_ms_since_boot(get_absolute_time());
     }
     return true;
 }
@@ -12026,9 +13201,11 @@ static const char* bt_radio_start() {
 static bool bt_keeps(uint8_t action) {
     // (and V - the tape player, whose screen is there too, its labels further on: before the
     // Bluetooth's part)
+    // (a high score table put back, and a hotkey asked about, use only the NMI ROM's memory: the
+    // Bluetooth plays on after them)
     return action == ACTION_SCREEN_STASH || action == ACTION_SCREEN_RESTORE ||
         (action == ACTION_WIFI && (bt_screen || rom_data[16384 + 2] == 0xFE)) ||
-        action == ACTION_TAPE_POSITION ||
+        action == ACTION_TAPE_POSITION || action == ACTION_HS_CHECK || action == ACTION_HOTKEY ||
         (action == ACTION_PREVIEW_READ && (bt_screen || preview_screen == reinterpret_cast<uint8_t*>(snap_load_buffer)));
 }
 
@@ -12049,6 +13226,9 @@ static const char* bt_start(uint32_t lead) {
     bt_lead = bt::rate() / lead;
     bt_owns = true;                         // the ROM loads from the EAR socket (the hook's 4)
     bt_playing = true;
+#if PICOMENU_HISCORE
+    if (!tape_rec) hs_tape_game(tape_name);          // (the tape's game, if it is not the one already)
+#endif
     LOG("Bluetooth tape: playing from block %u\n", (unsigned) bt_tape.data_position());
     return nullptr;
 }
@@ -12674,6 +13854,37 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
             }
             extras::reload_label(reload_known, reload_drive == 0 || sd_card_mounted, label_name,
                 reinterpret_cast<char*>(nmi_rom_data + STARTUP_RELOAD_LABEL));
+        }
+        if (hotkey_nmi && command == 0) {
+            // the button with hotkeys: hotkeys called in place of startmenu (see there)
+            lzss_unpack(HOTKEYS_LZ, nmi_rom_data + HOTKEYS_AT, HOTKEYS_SIZE);
+            nmi_rom_data[HK_CALLMENU + 1] = (uint8_t) (HOTKEYS_AT & 0xFF);
+            nmi_rom_data[HK_CALLMENU + 2] = (uint8_t) (HOTKEYS_AT >> 8);
+        }
+        hotkey_nmi = false;
+#if PICOMENU_HISCORE
+        if (command == 0) hs_menu_nmi(nmi_rom_data);       // (after hotkeys: it goes on to them)
+#endif
+#if PICOMENU_HISCORE
+        if (command == STARTUP_ACTION_CHECKPOINT && hs_auto_nmi) {
+            // not an autosave: a tape game's high score table put back (hs_auto_poll)
+            if (!hs_auto_code(nmi_rom_data)) {
+                // (nothing to put in: out again at once)
+                uint8_t* c = nmi_rom_data + CP_AT;
+                c[0] = 0xC3; c[1] = (uint8_t) (EXIT_NO_SCREEN & 0xFF); c[2] = (uint8_t) (EXIT_NO_SCREEN >> 8);
+            }
+        } else
+#endif
+        if (command == STARTUP_ACTION_CHECKPOINT) {
+            // the autosave's copy in place of the menu's code (after all the above, which
+            // writes some of the menu's bytes)
+#if PICOMENU_CP_OLD
+            memcpy(nmi_rom_data + CP_AT, CP_OLD_BIN, CP_OLD_SIZE);      // (a test build: Rev 2.5.0's way)
+#else
+            lzss_unpack(CP_SAVE_LZ, nmi_rom_data + CP_AT, CP_SIZE);
+            save_stream_start();
+#endif
+            cp_nmi_at = time_us_64();
         }
         rom_state.flags |= 2;
         gpio_put(PIN_NMI, false);
@@ -13668,6 +14879,7 @@ static bool menu_shot_piece() {
     return true;
 }
 
+
 // The button held a second (held true) or pressed twice quickly: Picomenu.ini's save_press
 // says which opens the save screen (S: the slots, or the Save snapshot screen) and which the
 // screen grab question (G); either goes back to the game when it is closed. With a menu up a
@@ -13810,8 +15022,22 @@ int main() {
             sd_setup_early();
             processNmiRequest();
         }
+        while (save_stream) {
+            // a snapshot being sent: its next piece at once (see save_stream). (volatile: the
+            // ROM's write of 255 comes from the bus handler, and nothing else here would make
+            // the compiler read it again)
+            if (*(volatile uint8_t*) nmi_rom_data == 255) {
+                processNmiRequest();
+                save_stream_at = time_us_64();
+            } else if (time_us_64() - save_stream_at > SAVE_STREAM_IDLE_US) {
+                save_stream = false;
+            }
+        }
 
         tape_service_poll();
+        #if PICOMENU_HISCORE
+        hs_auto_poll();         // (not snap_load_buffer: with the Bluetooth on too)
+        #endif
         #ifdef WIFI_ENABLE
         if (!bt_on) {           // (the Bluetooth's memory is in snap_load_buffer, which they use)
             level_loaders_poll();
@@ -13823,7 +15049,19 @@ int main() {
         #endif
 
         bool isup = gpio_get(PIN_USER_SWITCH);
-        if (!isup) {
+        if (cfg.hotkeys) {
+            // hotkeys: the button's state, steady for BUTTON_SETTLE_MS
+            static bool raw = false, steady = false;
+            static uint32_t since = 0;
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            if (!isup != raw) {
+                raw = !isup;
+                since = now;
+            } else if (raw != steady && now - since >= extras::SETTLE_MS) {
+                steady = raw;
+                hotkeys_button(steady);
+            }
+        } else if (!isup) {
 
             extras::Press press = button_read([] { return !gpio_get(PIN_USER_SWITCH); }, [](uint32_t ms) { sleep_ms(ms); });
             if (!button_act(press)) {

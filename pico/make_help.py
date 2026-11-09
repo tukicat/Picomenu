@@ -50,7 +50,7 @@ for title, lines in pages:
         shown = l[2:] if l.startswith('# ') else l
         if '{' in shown:
             # {tokens} are filled in by the pico (help_token in picoface.cxx): check the rest
-            if not re.fullmatch(r'\{(version|flash|sd|sdfix|error1|error2|ini1|ini2)\}', shown):
+            if not re.fullmatch(r'\{(version|flash|sd|sdfix|error1|error2|ini1|ini2|autosave)\}', shown):
                 errors.append('%r: unknown token in %r' % (title, l))
             continue
         if len(shown) > COLS:

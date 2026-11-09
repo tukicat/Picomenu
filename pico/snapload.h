@@ -477,17 +477,21 @@ static inline int find_hashed_bank(const uint8_t* buf, const uint8_t* info, uint
 // used for those bits unless BANK_M has been written since the load (it is not the
 // byte the snapshot had) and looks like a port value of the bank that is paged in.
 // The lock bit is clear, paging worked.
-static inline uint8_t choose_7ffd(const uint8_t* buf, const uint8_t* info, const LoadedPaging* loaded = nullptr) {
+// known: the bank the NMI rom found paged in (an autosave finds it, see cpsave), or -1 for the
+// hash to tell (buf is not looked at when it is known)
+static inline uint8_t choose_7ffd(const uint8_t* buf, const uint8_t* info, const LoadedPaging* loaded = nullptr,
+                                  int known = -1) {
     uint8_t bankm = info[SV_BANKM];
     uint8_t value = bankm & 0x1F;
     if (loaded && loaded->valid) {
         bool untouched = bankm == loaded->bankm;
-        bool looks_like_port = (bankm & 0xE0) == 0 && find_hashed_bank(buf, info, bankm & 7) == (bankm & 7);
+        int at = known >= 0 ? known : find_hashed_bank(buf, info, bankm & 7);
+        bool looks_like_port = (bankm & 0xE0) == 0 && at == (bankm & 7);
         if (untouched || !looks_like_port) {
             value = loaded->port & 0x1F;
         }
     }
-    int bank = find_hashed_bank(buf, info, value & 7);
+    int bank = known >= 0 ? known : find_hashed_bank(buf, info, value & 7);
     if (bank >= 0) {
         value = (uint8_t) ((value & 0x18) | bank);
     }
@@ -496,7 +500,8 @@ static inline uint8_t choose_7ffd(const uint8_t* buf, const uint8_t* info, const
 
 // Once the NMI rom has sent the header and the banks. buf has the banks.  The
 // header goes in the front of buf and the 7FFD value is returned
-static inline uint8_t finish_save128(uint8_t* buf, const uint8_t* info, const LoadedPaging* loaded = nullptr) {
+static inline uint8_t finish_save128(uint8_t* buf, const uint8_t* info, const LoadedPaging* loaded = nullptr,
+                                     int known = -1) {
     uint16_t sp = (uint16_t) (info[23] | (info[24] << 8));
     sp = (uint16_t) (sp + 2);                   // the PC was on the stack
     uint8_t s[27];
@@ -504,7 +509,7 @@ static inline uint8_t finish_save128(uint8_t* buf, const uint8_t* info, const Lo
     s[23] = (uint8_t) (sp & 0xFF);
     s[24] = (uint8_t) (sp >> 8);
     sna_to_z80_header(s, info[SV_PC], info[SV_PC + 1], buf);
-    uint8_t port = choose_7ffd(buf, info, loaded);
+    uint8_t port = choose_7ffd(buf, info, loaded, known);
     buf[X_7FFD] = port;
     buf[X_AYFLAG] = 1;
     buf[X_AYSEL] = 0;                           // the register selected can't be found out

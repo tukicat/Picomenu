@@ -1,3 +1,25 @@
+@@ Hotkeys
+Hold the NMI button and press:
+
+B  Browse Games
+F  Browse the Favourites folder
+Z  Search ZXDB
+I  Game instructions
+S  Save (the save slots)
+G  Screen grab
+A  Autosave
+P  Pokes
+V  Virtual Tape Player
+T  High score table (Pico W)
+H  Pause the game
+1  Reset to 128K
+4  Reset to 48K
+SPACE  This list
+
+The button on its own opens the
+menu. What a hotkey opens goes
+back to the game when you leave
+it (X or BREAK).
 @@ Diagnostics
 # Firmware
 {version}
@@ -12,9 +34,9 @@
 # Picomenu.ini
 {ini1}
 {ini2}
+# Last autosave pause
+{autosave}
 
 The error is the last file
 that would not open, load or
-save. It is forgotten at power
-off. D on O - Options shows
-this page.
+save (until power off).

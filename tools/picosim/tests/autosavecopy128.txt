@@ -1,0 +1,64 @@
+# The autosave's quick copy (cpsave): each snapshot has the RAM exactly as the game had it, with
+# the bank that was paged in at 0xC000 found by the marks (also when another bank has them, or a
+# game paged without BANK_M), the sound chip's volumes kept and put back, and a machine that
+# can't page any more saved as a 48K one. Diagnostics shows the pause.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+ay 8 13
+ay 9 14
+ay 10 15
+checkpoint stay
+memkeep
+wait 5
+expectsnap /Autosave/Athena/Autosave 1.z80
+expectbyte sd /Autosave/Athena/Autosave 1.z80|47|13
+expectbyte sd /Autosave/Athena/Autosave 1.z80|49|15
+expectay 8 13
+expectay 9 14
+expectay 10 15
+# bank 6 paged in by the game itself (BANK_M left alone), the shadow screen (then back as it was)
+page 0x1E
+checkpoint stay
+memkeep
+page 0x10
+wait 5
+expectsnap /Autosave/Athena/Autosave 2.z80
+# bank 1 has the marks the copy puts in bank 0 (the 16 bytes after them tell them apart)
+markclash 1
+checkpoint stay
+memkeep
+wait 5
+expectsnap /Autosave/Athena/Autosave 3.z80
+# the paging locked (48K mode): a 48K snapshot
+page 0x30
+checkpoint stay
+memkeep
+wait 5
+expectsnap /Autosave/Athena/Autosave 4.sna
+# the pause on Diagnostics (O, D)
+nmi
+wait 30
+key o
+wait 40
+key d
+wait 30
+expect Last autosave pause
+expect 48K:
+expect longest
+key x
+wait 30
+key x
+wait 40

@@ -1,0 +1,61 @@
+# High score tables: not saved by autosaves (only when asked: S, or leaving the game)
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /High Scores/Alpha.txt {HERE}/hs-alpha.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+pokestr 0xE800 SCOTT   012345ANDY    010000
+checkpoint
+wait 20
+nofile sd /High Scores/Alpha.bin
+# leaving it (a reset): asked, as there is no .bin yet; Y makes it
+nmi
+wait 30
+key 1
+wait 30
+key y
+wait 60
+expect Save the high scores before
+key y
+wait 300
+expectbyte sd /High Scores/Alpha.bin|0|0x53
+expectbyte sd /High Scores/Alpha.bin|8|0x30
+# an autosave loaded from A: asked first (the table is not the saved one), and the table saved
+# goes into the autosave as it loads
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+expectmem 0xE800 0x53
+poke 0xE800 0x41
+checkpoint
+wait 20
+poke 0xE800 0x42
+nmi
+wait 30
+key a
+wait 40
+key 1
+wait 60
+expect Save the high scores before
+expectnot BREAK  Back to the game
+key y
+wait 300
+expectbyte sd /High Scores/Alpha.bin|0|0x42
+expectmem 0xE800 0x42

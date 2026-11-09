@@ -1,0 +1,113 @@
+# Hotkeys (nmi_button = hotkeys): the button held and a key opens that screen with no menu, and
+# leaving it goes back to the game; the button on its own is the menu. SPACE lists them, H
+# pauses, F is Browse Games in /Favourites. Options shows the setting.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/hotkeys.ini
+sd /Games/Green.tzx {TAPES}/Green_Beret_1986ImagineSpeedLock_2.tzx
+sd /Favourites/Fave.tap {HERE}/tapein.tap
+boot
+wait 50
+# the button alone: the menu
+hkbutton 1
+wait 20
+hkbutton 0
+wait 40
+expect Search ZXDB
+key x
+wait 40
+expectnot Search ZXDB
+# B: Browse Games, X back to the game (not the menu)
+hkbutton 1
+wait 20
+key b
+wait 60
+hkbutton 0
+expect Browse Games
+expect 2-Games/
+key x
+wait 40
+expectnot Browse Games
+expectnot Search ZXDB
+# SPACE: the list of hotkeys, any key back to the game
+hkbutton 1
+wait 20
+key SPACE
+wait 40
+hkbutton 0
+expect Hotkeys
+expect Browse the Favourites folder
+expect Any key: back to the game
+key q
+wait 40
+expectnot Hotkeys
+expectnot Search ZXDB
+# H: paused until a key
+hkbutton 1
+wait 20
+key h
+wait 30
+hkbutton 0
+expect Paused: a key carries on
+wait 50
+expect Paused: a key carries on
+key q
+wait 40
+expectnot Paused
+expectnot Search ZXDB
+# F: Browse Games in /Favourites
+hkbutton 1
+wait 20
+key f
+wait 60
+hkbutton 0
+expect SD:/Favourites
+expect 1-Fave
+key x
+wait 40
+expectnot Browse Games
+# a key that is not a hotkey does nothing; let go, the menu
+hkbutton 1
+wait 20
+key q
+wait 30
+expectnot Search ZXDB
+hkbutton 0
+wait 40
+expect Search ZXDB
+# with the menu up, a press saves the menu's screen (as a double press does with the original button)
+hkbutton 1
+hkbutton 0
+wait 60
+get sd /Scraper/Screen Grabs/NMI Menu.png {OUT}/hk-menugrab.png
+expect Search ZXDB
+# Options (O) shows nmi_button hotkeys; then X, X back to the game
+key o
+wait 40
+expect nmi_button
+expect hotkeys
+key x
+wait 30
+key x
+wait 40
+# A: the autosaves; X back to the game
+hkbutton 1
+wait 20
+key a
+wait 40
+hkbutton 0
+expect Autosave
+key x
+wait 40
+expectnot Autosave
+expectnot Search ZXDB
+# 4: reset to 48K asks first; N goes back to the game
+hkbutton 1
+wait 20
+key 4
+wait 40
+hkbutton 0
+expect Reset
+key n
+wait 40
+expectnot Reset
+expectnot Search ZXDB

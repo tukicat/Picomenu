@@ -1,0 +1,4 @@
+; PicoMenu: where the game keeps its high score table
+; (the table itself is in the .bin)
+address = 29362
+length = 165

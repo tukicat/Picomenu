@@ -398,6 +398,22 @@ ACTION_WIFI equ 0x31
 // E in Tools: erase a game's assets (its autosaves, save slots and saves, notes, pokes, tape
 // notes, screen grabs). The pico draws the screen and works it (picoscreen)
 ACTION_ASSETS equ 0x32
+// The autosave's copy (cpsave, which the pico puts in place of the menu's code for it).
+// ACTION_CP_BEGIN: WORD param1 = sna_on_entry (the save header, as ACTION_SNA_BEGIN_WRITE128 has
+// it), BYTE param2 = the 128K bank paged in at 0xC000 (0 to 7), or 255 for a 48K snapshot. The
+// pico writes the copy of the first block at CP_CODE.
+ACTION_CP_BEGIN equ 0x33
+// ACTION_CP_NEXT: CP_CODE has put the block in CP_DATA. Status 0: the next block is at CP_CODE;
+// 1: all sent, with BYTE param1 the value for port 0x7FFD and BYTE param2 1 if it is to be
+// written (a 128K snapshot)
+ACTION_CP_NEXT equ 0x34
+// Hotkeys (see hotkeys): BYTE param1 = the key pressed with the button held. Status 0 not a
+// hotkey, 1 a menu item's handler (WORD param2 its address), 2 pause, 3 the list of hotkeys
+// (ACTION_HELP_PAGE's page 0)
+ACTION_HOTKEY equ 0x35
+// The code the pico puts in to give a game its saved high score table (picoface.cxx's
+// hs_restore_code) has read what is there now: status 1 if it is like the table (it is put in)
+ACTION_HS_CHECK equ 0x36
 // Saves the game's screen (the pico has it from when the menu opened) in the folder
 // Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
@@ -514,6 +530,9 @@ STARTUP_ACTION_GRAB_SCREEN equ 0x7
 // an autosave (a checkpoint): the snapshot goes to the pico (ACTION_SNA_SAVE, param3 = 4), with no
 // menu, and the game carries on
 STARTUP_ACTION_CHECKPOINT equ 0x8
+// (not sent by the pico) the menu was opened with a hotkey: closing what it opened goes back to
+// the game, as for STARTUP_ACTION_SAVE_SCREEN (startmenu.showtopscreen)
+STARTUP_ACTION_HOTKEY equ 0x9
 // how long the border stays coloured: that many times 3,300 T-states (about 0.4 s)
 GRAB_FLASH equ 420
 
@@ -629,9 +648,13 @@ nmientry:
     call loadsnapshot
     jr .exitnoscreenrestore
 
+    // an autosave: the pico has put cpsave in place of the menu's code (see cpsave)
+1:  cp STARTUP_ACTION_CHECKPOINT
+    jp z, cpsave
+
     // The pico keeps the screen while the menu is open (snapshots take it
     // from there too)
-1:  call screentopico
+    call screentopico
 
     ld a, (start_up_action)
     cp STARTUP_ACTION_TRANSFER_SNAP
@@ -639,17 +662,9 @@ nmientry:
     call sendsnapshottopico
     jr .exitnoscreenrestore     // the screen was not touched
 
-1:  cp STARTUP_ACTION_CHECKPOINT
-    jr nz, 1F
-    call savesnapshot
-    ld ix, 0
-    ld (ix + 5), 4          // a checkpoint: the pico has the name
-    ld (ix + 1), ACTION_SNA_SAVE
-    call waitpico
-    jr .exitnoscreenrestore     // the screen was not touched
-
 1:  call ayswap               // the sound chip quiet while the menu is up
     ld (menusp), sp           // T in Browse Games leaves from deep in the menus to here
+.callmenu                     // (hotkeys: the pico makes this a call of hotkeys, see there)
     call startmenu
 
 .exittopscreen
@@ -5375,6 +5390,10 @@ screenfrompico:
 // A screen the pico draws and works (tape position, a text file, emptying the Waste Bin):
 // c = the action, a = 0. Each key goes to it as param1 until it says the screen is closed
 // (status not 0). The params after param1 are left as the caller set them for the first call.
+// Status PICO_RUN: the pico has put code at PICO_CODE (to read or write the game's memory, as
+// the high score table's finder does); it is run, then the action is asked again with key 254.
+PICO_RUN equ 0x80
+PICO_CODE equ spare_space
 picoscreen:
     ld ix, 0
     ld (ix + 2), a
@@ -5382,6 +5401,8 @@ picoscreen:
     push bc
     call waitpico
     pop bc
+    cp PICO_RUN
+    jr z, .run
     or a
     ret nz
     push bc
@@ -5391,6 +5412,12 @@ picoscreen:
     call keywait            // (in a text file's editor, a held key repeats)
     pop af
     pop bc
+    jr picoscreen
+.run
+    push bc
+    call PICO_CODE
+    pop bc
+    ld a, 254
     jr picoscreen
 
 // Brings back only the game's screen below the menu (rows MENU_ROWS to 23), for going back
@@ -5488,16 +5515,19 @@ sendsnapshottopico:
 
 // enter with hl pointing to the snapshot name string
 //            a  holding the drive byte
-// With autosave on in Picomenu.ini a game loaded from the menu first asks whether to take
-// checkpoints of it (the pico says when: not for a checkpoint itself)
+// First the pico may ask about the game being left (its high score table: its own screens,
+// picoscreen); status 2 goes back to it (nothing is loaded; only from the menu). Then, with autosave on in
+// Picomenu.ini, a game loaded from the menu asks whether to take checkpoints of it (status 3;
+// the pico says when: not for a checkpoint itself)
 loadsnapshot:
     push hl
     push af
-    ld ix, 0
-    ld (ix + 2), 0
-    ld (ix + 1), ACTION_CHECKPOINT_ASK
-    call waitpico
-    or a
+    ld c, ACTION_CHECKPOINT_ASK
+    xor a
+    call picoscreen
+    cp 2
+    jr z, .stay
+    cp 3
     jr nz, 2F
     ld hl, checkpointask_def
     call showmenu
@@ -5510,6 +5540,10 @@ loadsnapshot:
     ld (ix + 2), a
     ld (ix + 1), ACTION_CHECKPOINT_ASK
     call waitpico
+    jr 2F
+.stay                       // (from a menu: back to the game, as X on the menu)
+    ld sp, (menusp)
+    jp nmientry.exittopscreen
 2:  pop af
     pop hl
     ld ix, 0
@@ -6495,6 +6529,9 @@ startmenu.chamgemsg equ loadscreen.romnotice + 13   // "Change ROM", of "A ROM: 
 startmenu.backmsg equ pokescreen.listkeys + 20      // "Back", of "1-0 Poke N/P-Page X-Back"
 startmenu.pokemsg equ pokescreen.title + 6          // "Poke", of "Apply Poke"
 
+// Hotkeys: 1 while the button is held (the pico keeps it), see hotkeys
+hotkey_held: BYTE 0
+
 // What is left of the 16K before spare_space (see SPARE_SPACE at the top)
 ROM_FREE equ SPARE_SPACE - $
     DISPLAY "NMI ROM: ", /D, ROM_FREE, " bytes free"
@@ -6520,3 +6557,302 @@ ROM_FREE equ SPARE_SPACE - $
     // the move, rename and erase descriptions, after the longest list
     ASSERT spare_size >= MOVE_INFO + 3 * SNAPLIST_PATH_SIZE
     ASSERT MOVE_INFO >= SNAPLIST_STRINGS + 10 * (SNAPLIST_NAME_MAX + 1 + 4 + 1 + 9)
+
+
+// ---- The autosave (STARTUP_ACTION_CHECKPOINT) ----
+// The game waits while an autosave is copied to the pico, so this is made as quick as it can
+// be. It is not in the 16K: it is assembled to run where loadscreen and savesnapshotscreen are
+// (the menu's code, which an autosave does not use) and the pico puts it there from the
+// firmware with the NMI (the whole ROM is unpacked afresh at the next NMI). The copy itself
+// is code the pico writes after it at CP_CODE, a block of up to CP_DATA_SIZE bytes at a time,
+// into CP_DATA (spare_space: the screen is not stashed for an autosave): for each 14 bytes
+// "LD SP,from / POP AF,BC,DE,HL / EXX / POP BC,DE,HL / LD SP,to+14 / PUSH HL,DE,BC / EXX /
+// PUSH HL,DE,BC,AF", 12.5 T-states a byte (gencopy's is 13, and has a block of 512), with
+// "LD A,n / LD BC,0x7FFD / OUT (C),A" before a block of another bank. Which 128K bank is
+// paged in at 0xC000 (port 0x7FFD can't be read) is found by changing 4 bytes at 0xC000
+// and looking for them in each bank, which also tells a machine that can't page (all of
+// them have them). (The hash that a save from the menu uses, savesnapshot, is not needed.)
+// The sound chip's volumes are 0 while it waits (a held note would sound all through it).
+CP_DATA equ SPARE_SPACE
+CP_DATA_SIZE equ spare_size
+CP_GROUP_CODE equ 22                // bytes of the copy's code for each 14 bytes
+CP_LIMIT equ overwritescreen        // the end of the place cpsave and the copy can have
+
+    ORG 0x8000
+cpsave_bin:
+    DISP loadscreen
+cpsave:
+    ld ix, 0
+    call getimmode
+    ld (sna_on_entry + SNAHEADER.IM), a
+    ld a, (BANK_M)
+    ld (save128_extra.bankm), a
+    // the PC that NMI pushed is at the top of the stack
+    ld hl, (sna_on_entry + SNAHEADER.SP)
+    ld e, (hl)
+    inc hl
+    ld d, (hl)
+    ld (save128_extra.pc), de
+    // the sound chip's registers, then its three volumes 0 while the game waits
+    ld hl, save128_extra.ay
+    ld bc, 0xfffd
+    ld e, 0
+1:  out (c), e
+    in a, (c)
+    ld (hl), a
+    inc hl
+    inc e
+    ld a, e
+    cp 16
+    jr nz, 1B
+    ld e, 8
+1:  ld b, 0xff
+    out (c), e
+    ld b, 0xbf
+    xor a
+    out (c), a
+    inc e
+    ld a, e
+    cp 11
+    jr nz, 1B
+
+    ld a, (start_up_machine48)
+    or a
+    ld a, 255
+    jp nz, .found               // a 48K game: a 48K snapshot
+
+    // which bank is at 0xC000: the 16 bytes after 0xC004 kept, and the 4 at 0xC000 changed
+    // (each its own way, so a bank filled with one value can't have them); then each bank is
+    // paged in to see which has both. A bank can't have them unless it is that one (or the
+    // paging can't be changed: all 8 have them)
+    ld hl, 0xC004
+    ld de, cpkeep
+    ld bc, 16
+    ldir
+    ld hl, 0xC000
+    ld de, cpmark
+    ld bc, 0x0400 + 0x5A
+1:  ld a, (hl)
+    ld (de), a
+    xor c
+    ld (hl), a
+    ld a, c
+    add a, 0x69
+    ld c, a
+    inc hl
+    inc de
+    djnz 1B
+    xor a
+    ld (cpcount), a
+    ld (cptry), a
+.try
+    ld a, (cptry)
+    ld bc, 0x7ffd
+    out (c), a
+    ld hl, 0xC000
+    ld de, cpmark
+    ld bc, 0x0400 + 0x5A
+1:  ld a, (de)
+    xor c
+    cp (hl)
+    jr nz, .next
+    ld a, c
+    add a, 0x69
+    ld c, a
+    inc hl
+    inc de
+    djnz 1B
+    ld de, cpkeep           // (hl is 0xC004)
+    ld b, 16
+1:  ld a, (de)
+    cp (hl)
+    jr nz, .next
+    inc hl
+    inc de
+    djnz 1B
+    ld hl, cpcount
+    ld a, (hl)
+    inc (hl)
+    or a
+    jr nz, .next            // (the first that has them)
+    ld a, (cptry)
+    ld (cpbank), a
+.next
+    ld hl, cptry
+    inc (hl)
+    ld a, (hl)
+    cp 8
+    jr nz, .try
+    ld a, (cpcount)
+    or a
+    jr nz, 1F
+    ld a, (BANK_M)          // (none has them: can't be, but BANK_M is the likeliest)
+    and 7
+    ld (cpbank), a
+    // the bank found paged in again, and its 4 bytes put back
+1:  ld a, (cpbank)
+    ld bc, 0x7ffd
+    out (c), a
+    ld hl, 0xC000
+    ld de, cpmark
+    ld b, 4
+1:  ld a, (de)
+    ld (hl), a
+    inc hl
+    inc de
+    djnz 1B
+    ld a, (cpcount)
+    cp 8
+    ld a, 255
+    jr z, .found                // all have them: the paging can't be changed, a 48K snapshot
+    ld a, (cpbank)
+
+.found
+    ld (ix + 4), a
+    ld hl, sna_on_entry
+    ld (ix + 2), hl
+    ld (ix + 1), ACTION_CP_BEGIN
+    call waitpico
+.block
+    call CP_CODE
+    ld (ix + 1), ACTION_CP_NEXT
+    call waitpico
+    or a
+    jr z, .block
+    ld a, (ix + 3)
+    or a
+    jr z, 1F
+    ld a, (ix + 2)
+    ld bc, 0x7ffd
+    out (c), a
+    // the sound chip's volumes back as they were
+1:  ld hl, save128_extra.ay + 8
+    ld e, 8
+1:  ld bc, 0xfffd
+    out (c), e
+    ld a, (hl)
+    ld b, 0xbf
+    out (c), a
+    inc hl
+    inc e
+    ld a, e
+    cp 11
+    jr nz, 1B
+    // the copy used the other registers too: the game's back (as the snapshot has them)
+    exx
+    ld hl, (sna_on_entry + SNAHEADER.HLx)
+    ld de, (sna_on_entry + SNAHEADER.DEx)
+    ld bc, (sna_on_entry + SNAHEADER.BCx)
+    exx
+    ld (ix + 5), 4              // a checkpoint: the pico has the name
+    ld (ix + 1), ACTION_SNA_SAVE
+    call waitpico
+    jp nmientry.exitnoscreenrestore     // the screen was not touched
+
+cpmark: BLOCK 4
+cpkeep: BLOCK 16
+cpcount: BYTE 0
+cptry: BYTE 0
+cpbank: BYTE 0
+CP_SP: WORD 0                       // the stack while the copy runs (the pico's code keeps it here)
+CP_CODE:
+    ENT
+cpsave_end:
+    SAVEBIN "cpsave.bin", cpsave_bin, CP_CODE - cpsave
+CP_AT equ cpsave
+CP_SIZE equ CP_CODE - cpsave
+
+// For a test build only (cmake -DPICOMENU_CP_OLD=1): the autosave as Rev 2.5.0 made it, to
+// compare the pause the game has (Diagnostics)
+    ORG 0x9000
+cpold_bin:
+    DISP loadscreen
+cpold:
+    call screentopico
+    call savesnapshot
+    ld ix, 0
+    ld (ix + 5), 4              // a checkpoint: the pico has the name
+    ld (ix + 1), ACTION_SNA_SAVE
+    call waitpico
+    jp nmientry.exitnoscreenrestore
+cpold_end:
+    ENT
+    SAVEBIN "cpold.bin", cpold_bin, cpold_end - cpold
+CP_OLD_SIZE equ cpold_end - cpold
+    DISPLAY "Autosave copy: ", /D, CP_SIZE, " bytes, blocks of ", /D, CP_DATA_SIZE / 14 * 14
+    ASSERT CP_CODE + 7 + 4 + (CP_DATA_SIZE / 14) * CP_GROUP_CODE + 5 <= CP_LIMIT
+    ASSERT CP_DATA + CP_DATA_SIZE <= 0x4000 && CP_DATA >= 0x3900 && CP_DATA >= stack_top
+
+
+// ---- Hotkeys (Picomenu.ini's nmi_button = hotkeys) ----
+// The button pressed sends the NMI at once, and the pico puts this in spare_space and makes
+// nmientry call it in place of startmenu (so it is not in the 16K). While the button is held
+// (hotkey_held, which the pico keeps) a key pressed is a hotkey: the pico says what it opens
+// (ACTION_HOTKEY), and that is opened with no menu; closing it goes back to the game
+// (STARTUP_ACTION_HOTKEY). The button let go with no key opens the menu as always.
+    ORG 0xA000
+hotkeys_bin:
+    DISP spare_space
+hotkeys:
+    // a key the game had held (as the button went down) is not a hotkey: wait for it to go
+1:  ld a, (hotkey_held)
+    or a
+    jp z, startmenu
+    call getkeypress
+    or a
+    jr nz, 1B
+.wait
+    ld a, (hotkey_held)
+    or a
+    jp z, startmenu             // let go with no key: the menu
+    call getkeypress
+    or a
+    jr z, .wait
+    cp 255
+    jr z, .wait                 // (two keys)
+    push af
+    call getkeypress            // a second scan must agree (as waitforkeypress)
+    pop bc
+    cp b
+    jr nz, .wait
+    ld ix, 0
+    ld (ix + 2), a
+    ld (ix + 1), ACTION_HOTKEY
+    call waitpico
+    push af
+    call waitforkeyrelease
+    pop af
+    or a
+    jr z, .wait                 // not a hotkey
+    ld hl, start_up_action
+    ld (hl), STARTUP_ACTION_HOTKEY
+    dec a
+    jr nz, 1F
+    ld hl, (3)                  // (ix + 3): the handler
+    jp (hl)
+1:  dec a
+    jr nz, .list
+    // pause: the game's screen with a line at the bottom until a key is pressed
+    ld a, 0x4F
+    ld (text_attr), a
+    ld de, 23 * 256
+    ld hl, .pausemsg
+    call putline
+    xor a
+    ld (text_attr), a
+    jr 1F
+.list
+    ld (ix + 2), 0
+    ld (ix + 1), ACTION_HELP_PAGE
+    call waitpico
+    call previewfrompico
+1:  call waitforkeypress
+    jp waitforkeyrelease        // (then back to the game)
+
+.pausemsg: DZ " Paused: a key carries on"
+hotkeys_end:
+    ENT
+    SAVEBIN "hotkeys.bin", hotkeys_bin, hotkeys_end - hotkeys
+HOTKEYS_AT equ hotkeys
+HOTKEYS_SIZE equ hotkeys_end - hotkeys
+    ASSERT hotkeys_end <= spare_space + MOVE_INFO    // (the screen's pieces go above it)

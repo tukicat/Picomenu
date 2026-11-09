@@ -20,7 +20,8 @@ mkdir -p "$O"
 # a HardFault on a 16 or 32-bit access that is not aligned), with the memory lent to FatFs put at
 # an odd address (as list_pool was in a test build, when copying a folder stopped the Pico)
 if [ -n "$SIM_SANITIZE" ]; then SAN="-fsanitize=alignment -fno-sanitize-recover=all"; SIM_FFFLAGS="$SIM_FFFLAGS -DFF_HOST_ODD_POOL"; else SAN=""; fi
-CC="gcc $SAN"; CXX="g++ $SAN"
+# SIM_DEFS: more -D for the firmware (SIM_DEFS=-DPICOMENU_CP_OLD=1: autosaves the Rev 2.5.0 way)
+CC="gcc $SAN $SIM_DEFS"; CXX="g++ $SAN $SIM_DEFS"
 # the NMI ROM as nmi.c / nmi.h, the same way the firmware build makes it
 (cd "$O" && sjasmplus --nologo --sym=nmirom.sym "$P/../nmirom/nmirom.asm" >/dev/null && python3 "$P/asm_to_c_file.py" >/dev/null)
 INC="-I$H/stubs -I$O -I$P -I$P/FatFs_SPI/ff15/source -I$P/FatFs_SPI/include -I$P/littlefs-lib -I$P/z80/API -I$P/z80/zeta"

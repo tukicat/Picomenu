@@ -2,6 +2,87 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.6.0 (2026-11-07)
+Changes since Rev 2.5.0. There are two firmware files, as for 2.5.0:
+- `picomenu-Rev2.6.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.6.0 (tapeloader v260)`;
+- `picomenu-Rev2.6.0-W.uf2` for a Pico W: `Rev 2.6.0 W (tapeloader v260)`.
+
+Diagnostics shows "Rev 2.6.0" or "Rev 2.6.0 W". The high score tables are in the Pico W firmware; the hotkeys, the faster autosaves and now Erase all assets are in both. Going from 2.5.0 to 2.6.0 keeps the internal flash and the Bluetooth pairing (T-U works for both firmwares).
+
+### Faster autosaves
+- **A 128K autosave pauses the game for about a third less time:** 545 ms on a grey +2, against 852 ms with 2.5.0 (48K: about 0.2 s). The SD card is still written after the game carries on.
+- **A faster copy:** the Spectrum copies its memory out with a routine the Pico writes for each block (`LD SP` / `POP` / `PUSH`, 12.5 T a byte, was 13), in blocks of 1,792 bytes (about 80 requests for 128K, was 263).
+- **The Pico answers at once:** while a snapshot is being sent (an autosave, or a save from the menu) the main loop answers each request straight away, with no 1 ms sleep and no WiFi, Bluetooth or USB polls between them. On the hardware these waits were about 270 ms of the old 852.
+- **No hash:** the bank paged at 0xC000 is found by marking 4 bytes there and looking for them in each bank (put back afterwards), not by a hash of the memory. If every bank has them the paging is locked (a 48K machine, or a 128 locked in 48K mode) and a 48K `.sna` is saved.
+- **The screen is not stashed first** for an autosave (it was copied before the menu's code).
+- **Silent:** the sound chip's three volumes are 0 during the pause (so a note doesn't hang), and put back after; the snapshot keeps the game's own.
+- **Diagnostics: `# Last autosave pause`**, such as `128K: 545 ms, longest 552 ms`, from the button's NMI to the last byte.
+
+### Hotkeys
+- **`[Buttons] nmi_button = original | hotkeys`** (O - Options too). `original` is the button as before.
+- **With `hotkeys`** a press on its own opens the menu, and **holding the button and pressing a key** opens that straight away: **B** Browse Games, **F** Browse Games in `/Favourites`, **Z** Search ZXDB, **I** Instructions, **S** the save slots, **G** Screen grab, **A** Autosave, **P** Pokes, **V** the Virtual Tape Player, **T** the high score table (Pico W), **H** pause (a bar `Paused: a key carries on`), **1** and **4** reset into 128K and 48K, **SPACE** the list of hotkeys. Another key does nothing.
+- **What a hotkey opens goes back to the game** when it is left (X or BREAK). From the menu everything works as before.
+- A game key held as the button goes down is let go of first, so it isn't taken as a hotkey.
+- With the menu up, a press saves the menu's screen as a `.png` (as a double press does with `original`). There is no 1-second hold, double press or long-press reset with `hotkeys`: 1 and 4 are the resets.
+- **Help: a Hotkeys page** (SPACE shows it). Each Help page now shows on its own (Diagnostics, from Options), so the page numbers are gone.
+
+### High score tables (Pico W)
+- **T on A - Autosave** (or the hotkey T) opens `High scores: <game>`: where its table is, whether it is saved, and **F** Find the table, **S** Save the table now, **R** Put the saved table back, **C** Forget it (its files go), X Back.
+- **F finds it from a name or a score in the table.** Type the name you put into the game (the easiest to remember) or your score, and ENTER. Letters and digits are found in any character set the game uses (each one a fixed step from A or 0; the last may have bit 7 set), text with both as ASCII, and a score as packed BCD and as a 16- or 24-bit number too. Up to 9 finds are listed, the most table-like first, each with a preview; **1-9** picks one.
+- **The whole table is worked out from the find:** the entries around it the same size apart (up to 64 bytes an entry, at least 3 entries, at most 512 bytes), and each entry's other half: a name's score, or a score's name. Words in the game's menus line up like names but have no scores, so they are not taken for the table (Renegade's control menu was, in a test). The table runs from the first entry's name to the last's score. **S** saves it as the game's table.
+- **The files,** in `/High Scores` on the SD card: `<game>.txt` says where the table is (`address = 32623`, `length = 105`; a text file that can be shared), `<game>.bin` is the table, and `<game>.bak` the one before the last save. `<game>` is the game's file name (a save slot or an autosave is its game's), so `Renegade.tap` uses `Renegade.txt` and `Renegade.bin`.
+- **Saved only when asked.** Leaving a game whose table has changed from the one saved (Browse Games, Recently played, Reload, a save slot or autosave, a reset) asks **`Save the high scores before leaving this game?`**: Y saves it (keeping the old one as `.bak`), N doesn't, BREAK goes back to the game (only from Browse Games: the others have already started). An unchanged table, or memory that doesn't look like the table (another game is in), asks nothing. S on the screen saves at any time.
+- **Put back by itself:**
+  - a snapshot (from Browse Games, a save slot, an autosave) gets the table in its memory before it starts;
+  - a `.tap` or `.tzx` game loaded from the menu, put in with T (the Spectrum's own LOAD), or played by Bluetooth gets it about 5 seconds after the tape last gave a block or the Bluetooth stopped (a short NMI the game doesn't see; the Bluetooth stays on);
+  - a multi-load game, once no level has loaded for 5 seconds.
+- **Checked before it goes in:** the memory there must look like that game's table (enough different values, and most of it the same bytes or in the same character ranges), or nothing is written and it is tried again after more of the tape. Cleared memory, text, code and other games don't pass. R puts it back without the check.
+- **The table on the screen redrawn:** a game that shows its table at once (Commando shows it as it starts, and draws it again only after a game), from a snapshot or as a tape finishes loading, would show the old names. So when the saved table goes in, the old table's text is looked for on the screen: drawn in the game's own font (found in its memory: each place holding a glyph that is on the screen votes for where the font starts) or the Spectrum's (from `48.rom`), a character to each cell, at any pixel row. Where it is found, only the characters that change are drawn again, in the same font (`.` and other characters the font doesn't have are taken from the screen). A snapshot's screen is changed before it starts; a tape game's memory is first copied (as for an autosave, a short pause), and the table and the screen are written in the same NMI, the screen only if every byte there is still as it was (the game may have moved on). Not found clearly, a character it can't draw, or the Bluetooth playing: the screen is left alone.
+- Only the 48K paged in is looked at: a 128K game that keeps its table in another bank isn't found.
+- **The Spectrum runs code the Pico writes:** the ROM's `picoscreen` calls it at the Pico's word (status 0x80), to read and write the game's memory with `LDIR`.
+
+### Erase all assets
+- **In the standard firmware too** (it was in the Pico W firmware only): E in Tools, with the same screens, six categories and `1-6 On/off`.
+- **The Pico W firmware has a 7th category, High scores:** `/High Scores/<game>.txt`, `.bin` and `.bak`. 1-7 tick or untick; a game with only high score files is listed too. The standard firmware has no high score tables, so it doesn't look for these files or erase them.
+
+### The standard firmware
+- **Erase all assets** (see above).
+- **More room:**
+  - Picomenu.ini's defaults and the example `Instructions.txt` that T-D writes are kept packed (2,301 bytes in 1,486), as are the ROM's new routines (the autosave copy, the hotkeys); the packer now finds the best mix of copies and new bytes (the unpacker is the same).
+  - The tape converter (`tzxconv.h`, the tape player around the Z80 emulator) is built for size (`-Os`) in the standard firmware: 6.4 KB smaller. The Z80 emulator itself stays built for speed (`-O2`; for size it would be only 40 bytes smaller and about 30% slower). Converting is a little slower than in 2.5.0: Green Beret 25.7 s to 26.0 s, Athena 80.6 s to 88.9 s (measured with `tools/tzxconv/bench`). The Pico W firmware's converter is unchanged.
+  - Its screens for what only the Pico W firmware has (T-F, T-B, ZXDB) share one message: `This needs a Pico W, with the Pico W firmware of PicoMenu (picomenu-...-W.uf2) on it.`
+- The program is 252,628 bytes (1,324 left; 2.5.0 had 2,160).
+
+### NMI ROM
+- **`cpsave`,** the autosave's copy (345 bytes), and **`hotkeys`** (141 bytes) are assembled outside the 16K and put in by the Pico when they are needed, over menu code they don't use.
+- **`picoscreen` can run the Pico's code** (status `PICO_RUN`, 0x80) and asks again after it.
+- **Every load from the menu asks the Pico first** through `picoscreen` (the high score question): status 2 goes back to the game.
+- New requests: `ACTION_CP_BEGIN` (0x33), `ACTION_CP_NEXT` (0x34), `ACTION_HOTKEY` (0x35), `ACTION_HS_CHECK` (0x36).
+- 2 bytes free.
+
+### Licences
+- **No change:** no third-party code was added; the high score finder (`pico/hiscore.h`), the hotkeys and the autosave copy are PicoMenu's own, under the GPL v3. THIRD-PARTY-NOTICES.txt says so (title Rev 2.6.0).
+- **The additional permission** for the cyw43 driver and BTstack (at the top of LICENSE) is unchanged.
+- **High score tables** are a few bytes of a game's memory saved on your own card; `.txt` files say only where a table is.
+- ZXDB requests say `PicoMenu/2.6.0`.
+
+### Tests
+- **New simulator commands:** `checkpoint stay`, `memkeep` and `expectsnap` (a saved snapshot compared byte for byte with the memory and the paging), `page` (a game's OUT to 0x7FFD), `markclash` (another bank given the marks), `hkbutton` (the button held for hotkeys), `pokestr`, `snapsave` (the machine saved as a `.sna`), and `SIM_PROF` (where the T states went).
+- **New scripts:**
+  - `autosavecopy128`: an autosave compared with the memory; a bank paged by the game; marks found in another bank; locked paging saved as 48K; the sound's volumes; Diagnostics;
+  - `autosavecopy48`;
+  - `hotkeys48`: the button alone, B then X, SPACE, H, F, a key that isn't one, a grab with the menu up, Options, A then X, 4 then N;
+  - `hiscore48`: finding by name and by score, S, the question at a load (BREAK, N, Y and the `.bak`), at a reset, no question when unchanged, R, C, hotkey T, a tape's table put back;
+  - `hiscoreauto48`: autosaves don't save the table; loading an autosave asks, and gets the table;
+  - `hiscoretapein48`: a tape put in with T and loaded with LOAD "" gets its table by itself;
+  - `hiscorebt48`: a Bluetooth tape gets it with the radio still on.
+  - `hiscoreredraw48`: Commando's snapshot (one of the tapes, not in the source) gets the saved table on its title screen, in its own font;
+  - `hiscoreredrawtape48`: a tape game showing its table in the ROM's font gets it redrawn when the table is put back.
+- **The simulator can be built as the standard firmware's screens** (`SIM_DEFS=-DPICOMENU_NO_HISCORE`): `assets48` then shows six categories and erases all but the high scores.
+- **Updated:** `assets48` (high scores), `tapefiles` (the packed Picomenu.ini and Instructions.txt), `levelloader48` and `options48` (Options' new item).
+- The finder's PC checks: two character sets, random memory, text, zeros and the 48K ROM never taken for a table, and Renegade's memory. The redraw's: Commando's screen, a table in the ROM's font, a blank screen and a screen without the table (nothing drawn).
+- 95 scripts, all passing; `tools/nettest` passes. Pico W program 768,428 bytes (heap 5,276); standard 252,628 bytes (heap 5,816).
+
 ## Rev 2.5.0 (2026-11-05)
 Changes since Rev 2.4.0. There are two firmware files, as for 2.4.0:
 - `picomenu-Rev2.5.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.5.0 (tapeloader v250)`;

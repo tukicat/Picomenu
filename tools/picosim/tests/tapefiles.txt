@@ -113,6 +113,13 @@ expect Recordings/      made
 expect SD card created.
 expect Picomenu.ini            made
 expect ROMS/            made
+# the texts it writes (kept packed in the firmware)
+expectfile sd /Picomenu.ini|# PicoMenu settings
+expectfile sd /Picomenu.ini|nmi_button = original
+expectfile sd /Picomenu.ini|auto_off = on
+expectfile sd /Picomenu.ini|[Screen grab order]
+expectfile sd /Picomenu.ini|Standard Screen Number
+expectfile sd /Scraper/Instructions.txt|; Game information for the PicoMenu
 # ROMS is made hidden: Browse Games lists it only with L-All
 key x
 wait 30

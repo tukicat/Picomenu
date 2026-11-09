@@ -82,6 +82,47 @@ void nmi_rom_unpack(uint8_t* to) {
 """)
     print(f"NMI ROM {len(romdata)} bytes, packed {len(packed)}")
 
+    # the autosave's copy (cpsave in nmirom.asm), which the pico puts in the ROM for an autosave
+    cpsave = pathlib.Path('cpsave.bin').read_bytes()
+    assert len(cpsave) == symbols["CP_SIZE"]
+    cplz = compress(cpsave)
+    assert decompress(cplz, len(cpsave)) == cpsave
+    fp.write("const uint8_t CP_SAVE_LZ[] = {")
+    fp.write(", ".join(f"0x{b:02x}" for b in cplz))
+    fp.write("};\n\n")
+    print(f"Autosave copy {len(cpsave)} bytes")
+
+    # Texts the firmware writes to the SD card when it is set up (Picomenu.ini, the example
+    # Instructions.txt), packed too: taken from the C strings in settings.h and sdsetup.h
+    import re
+    def c_string(path, name):
+        src = pathlib.Path(__file__).resolve().parent.joinpath(path).read_text()
+        m = re.search(r'static const char ' + name + r'\[\] =\s*((?:\s*"(?:[^"\\]|\\.)*"\s*)+);', src)
+        body = ''.join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1)))
+        return body.encode('latin1').decode('unicode_escape').encode('latin1')
+    texts = [c_string('settings.h', 'DEFAULT_SETTINGS') + c_string('settings.h', 'ORDER_HEADING'),
+             c_string('sdsetup.h', 'EXAMPLE')]
+    allt = b''.join(texts)
+    packed = compress(allt)
+    assert decompress(packed, len(allt)) == allt
+    fp.write("const uint8_t SETUP_TEXTS_LZ[] = {")
+    fp.write(", ".join(f"0x{b:02x}" for b in packed))
+    fp.write("};\n\n")
+    setup_sizes = [len(t) for t in texts]
+    print(f"Set up texts {len(allt)} bytes, packed {len(packed)}")
+    hk = pathlib.Path('hotkeys.bin').read_bytes()
+    assert len(hk) == symbols["HOTKEYS_SIZE"]
+    hklz = compress(hk)
+    assert decompress(hklz, len(hk)) == hk
+    fp.write("const uint8_t HOTKEYS_LZ[] = {")
+    fp.write(", ".join(f"0x{b:02x}" for b in hklz))
+    fp.write("};\n\n")
+    cpold = pathlib.Path('cpold.bin').read_bytes()
+    assert len(cpold) == symbols["CP_OLD_SIZE"]
+    fp.write("#if PICOMENU_CP_OLD\nconst uint8_t CP_OLD_BIN[] = {")
+    fp.write(", ".join(f"0x{b:02x}" for b in cpold))
+    fp.write("};\n#endif\n\n")
+
     print(f"exit op code: {romdata[exitnmi]}\n")
     if romdata[exitnmi] != 201:
         print("exit is not simple ret")
@@ -116,6 +157,29 @@ with open("nmi.h", "w") as fp:
 
 
     fp.write(f"#define EXITNMI 0x{exitnmi:x}\n")
+    # the autosave's copy (cpsave): where it goes, where the pico writes the copy of each block and
+    # where that puts it
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t CP_SAVE_LZ[];\nextern const uint8_t CP_OLD_BIN[];\n#endif\n")
+    # the set up texts (SETUP_TEXTS_LZ): Picomenu.ini's defaults and order heading, then the example
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t SETUP_TEXTS_LZ[];\n#endif\n")
+    fp.write(f"#define SETUP_INI_SIZE {setup_sizes[0]}\n#define SETUP_EXAMPLE_SIZE {setup_sizes[1]}\n")
+    # the pico's own code (picoscreen's PICO_RUN, and the high score table at the menu's NMI)
+    fp.write(f"#define PICO_CODE_AT 0x{symbols['PICO_CODE']:x}\n#define WAITPICO 0x{symbols['waitpico']:x}\n")
+    fp.write(f"#define PICO_RUN 0x{symbols['PICO_RUN']:x}\n")
+    fp.write(f"#define EXIT_NO_SCREEN 0x{symbols['nmientry.exitnoscreenrestore']:x}\n")
+    fp.write(f"#define SPARE_AT 0x{symbols['SPARE_SPACE']:x}\n")
+    # hotkeys (nmirom.asm): the code the pico puts in for the button, and what the hotkeys open
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t HOTKEYS_LZ[];\n#endif\n")
+    for k, sym in (("HOTKEYS_AT", "HOTKEYS_AT"), ("HOTKEYS_SIZE", "HOTKEYS_SIZE"), ("HK_HELD", "hotkey_held"),
+                   ("HK_CALLMENU", "nmientry.callmenu"), ("HK_BROWSE", "startmenu.handle_load"),
+                   ("HK_ZXDB", "startmenu.handle_zxdb"), ("HK_INFO", "startmenu.handle_info"),
+                   ("HK_SAVE", "startmenu.handle_save"), ("HK_GRAB", "startmenu.handle_grab"),
+                   ("HK_RESET128", "startmenu.handle_reset128"), ("HK_RESET48", "startmenu.handle_reset48"),
+                   ("HK_TAPE", "startmenu.handle_tape"), ("HK_AUTOSAVE", "startmenu.handle_checkpoints"),
+                   ("HK_POKE", "startmenu.handle_poke")):
+        fp.write(f"#define {k} 0x{symbols[sym]:x}\n")
+    for k in ("CP_AT", "CP_SIZE", "CP_OLD_SIZE", "CP_CODE", "CP_SP", "CP_DATA", "CP_DATA_SIZE", "CP_LIMIT", "CP_GROUP_CODE"):
+        fp.write(f"#define {k} 0x{symbols[k]:x}\n")
     fp.write(f"#define STARTUP_COMMAND_OFFSET 0x{startup_command:x}\n")
     fp.write(f"#define STARTUP_PARAM1_OFFSET 0x{startup_param1:x}\n")
     fp.write(f"#define STARTUP_PARAM2_OFFSET 0x{startup_param2:x}\n") 

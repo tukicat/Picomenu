@@ -36,7 +36,7 @@ namespace options {
 enum Id : uint8_t {
     THEME, SHOW_ALL, DETAILS, SORT, FOLDERS, START_DRIVE, START_FOLDER,
     SAVE_TYPE, SAVE_SCREEN, SLOTS_ON_LOAD, GRAB_FORMAT, CHECKPOINTS,
-    LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K,
+    LONG_PRESS, SAVE_PRESS, DOUBLE_PRESS, NMI_BUTTON, LOADING_GRAB, WASTE_BIN, LEVEL_LOADERS, LOCK_48K,
     // the WiFi and Bluetooth page (W): the WiFi's typed, the Bluetooth's chosen
     WIFI_SSID, WIFI_PASSWORD, WIFI_WEB_PASSWORD,
     BT_VOLUME, BT_AUTO_CONNECT, BT_AUTO_PLAY, BT_AUTO_OFF, COUNT
@@ -67,6 +67,7 @@ static const Item ITEMS[COUNT] = {
     { "long_press", settings::SEC_BUTTONS, "[Buttons] hold to reset (s)" },
     { "save_press", settings::SEC_BUTTONS, "[Buttons] save: hold or double" },
     { "double_press", settings::SEC_BUTTONS, "[Buttons] a double press" },
+    { "nmi_button", settings::SEC_BUTTONS, "[Buttons] original or hotkeys" },
     { "loading_grab", settings::SEC_CONVERTING, "[Converting] grab the screen" },
     { "waste_bin", settings::SEC_BIN, "[Waste Bin] erase to the bin" },
     { "level_loaders", settings::SEC_TAPES, "[Tapes] multi-load levels" },
@@ -141,6 +142,7 @@ inline void value_text(const Edit& e, uint8_t id, char* out, size_t size) {
         break;
     case SAVE_PRESS: w = s.save_on_hold ? "hold" : "double"; break;
     case DOUBLE_PRESS: w = s.double_press ? "on" : "off"; break;
+    case NMI_BUTTON: w = s.hotkeys ? "hotkeys" : "original"; break;
     case LOADING_GRAB: w = s.loading_grab ? "on" : "off"; break;
     case WASTE_BIN: w = s.waste_bin ? "on" : "off"; break;
     case LEVEL_LOADERS: w = s.level_loaders ? "patch" : "off"; break;
@@ -187,6 +189,7 @@ inline void cycle(Edit& e, uint8_t id, const char* folder_now) {
         break;
     case SAVE_PRESS: s.save_on_hold = !s.save_on_hold; break;
     case DOUBLE_PRESS: s.double_press = !s.double_press; break;
+    case NMI_BUTTON: s.hotkeys = !s.hotkeys; break;
     case LOADING_GRAB: s.loading_grab = !s.loading_grab; break;
     case WASTE_BIN: s.waste_bin = !s.waste_bin; break;
     case LEVEL_LOADERS: s.level_loaders = !s.level_loaders; break;

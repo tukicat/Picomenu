@@ -23,6 +23,7 @@ cmake_minimum_required(VERSION 3.13)
 
 set(WIFI_ENABLE 0 CACHE BOOL "1: the Pico W build (F - File transfer over WiFi in Tools); its own uf2")
 set(PICOMENU_LOG 0 CACHE STRING "1: the firmware sends its log messages on the USB serial port (about 6 KB more)")
+set(PICOMENU_CP_OLD 0 CACHE STRING "1: autosaves copied the Rev 2.5.0 way (to compare the pause on Diagnostics)")
 
 # The Pico W build: the WiFi chip's driver and firmware and lwIP are about 300 KB, and HTTPS
 # for ZXDB (mbedtls) about 60 KB more, so the program may be bigger, and the internal flash's
@@ -80,7 +81,7 @@ add_custom_command(
 add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/nmi.h ${CMAKE_CURRENT_BINARY_DIR}/nmi.c
         COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/asm_to_c_file.py
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/nmirom.bin ${CMAKE_CURRENT_BINARY_DIR}/nmirom.sym ${CMAKE_CURRENT_SOURCE_DIR}/asm_to_c_file.py
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/nmirom.bin ${CMAKE_CURRENT_BINARY_DIR}/nmirom.sym ${CMAKE_CURRENT_SOURCE_DIR}/asm_to_c_file.py ${CMAKE_CURRENT_SOURCE_DIR}/settings.h ${CMAKE_CURRENT_SOURCE_DIR}/sdsetup.h
 )
 
 
@@ -155,6 +156,7 @@ target_compile_definitions(picoface PRIVATE
         PICO_PRINTF_SUPPORT_EXPONENTIAL=0
         # the messages on the USB serial port: cmake -DPICOMENU_LOG=1 for a build with them
         PICOMENU_LOG=${PICOMENU_LOG}
+        PICOMENU_CP_OLD=${PICOMENU_CP_OLD}
         )
 
 # Add any user requested libraries
@@ -177,9 +179,16 @@ set_source_files_properties(piohandler.S picoface.cxx PROPERTIES
 # picoface.cxx is built for size like the rest (it was -O3): about 55 KB smaller, room for the
 # tape converter. Its stack was measured again for this.
 set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-Os")
-# The tape converter's emulation (tzxconv.h and the Z80 emulator) is built for speed: -O2 is
-# about 30% faster than -Os on the Pico and hardly bigger
-set_source_files_properties(tzxconv_pico.cxx z80/Z80.c PROPERTIES COMPILE_OPTIONS "-O2")
+# The tape converter's emulation is built for speed: the Z80 emulator at -O2 is about 30% faster
+# than -Os on the Pico and hardly bigger. The converter around it (tzxconv.h) is too, in the Pico W
+# build; in the standard one it is -Os, 6 KB smaller (room for Erase all assets) and only a little
+# slower (Green Beret 1%, Athena 10%, measured with tools/tzxconv/bench)
+set_source_files_properties(z80/Z80.c PROPERTIES COMPILE_OPTIONS "-O2")
+if("${WIFI_ENABLE}")
+    set_source_files_properties(tzxconv_pico.cxx PROPERTIES COMPILE_OPTIONS "-O2")
+else()
+    set_source_files_properties(tzxconv_pico.cxx PROPERTIES COMPILE_OPTIONS "-Os")
+endif()
 
 pico_add_extra_outputs(picoface)
 

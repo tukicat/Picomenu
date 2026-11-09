@@ -68,6 +68,7 @@ struct Settings {
     uint16_t long_press_ms = LONG_PRESS_DEFAULT;    // the reset (0: off)
     bool double_press = true;           // a double press does something (false: off)
     bool save_on_hold = true;           // save_press: hold (a 1 s hold saves, a double press grabs) or double
+    bool hotkeys = false;               // nmi_button: original (the presses above) or hotkeys (held, with a key)
     // [Converting]
     bool loading_grab = true;
     // [Waste Bin]
@@ -268,6 +269,12 @@ struct Parser {
                 static const char* const W[] = { "off", "on", "grab", nullptr };
                 if ((i = pick(v, vn, W)) < 0) return false;
                 s.double_press = i != 0;
+                return true;
+            }
+            if (same(k, kn, "nmi_button")) {
+                static const char* const W[] = { "original", "hotkeys", nullptr };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.hotkeys = i == 1;
                 return true;
             }
             if (same(k, kn, "save_press")) {
@@ -501,6 +508,9 @@ static const char DEFAULT_SETTINGS[] =
     "save_press = hold\r\n"
     "# on or off\r\n"
     "double_press = on\r\n"
+    "# original or hotkeys (hold the\r\n"
+    "# button and press a key)\r\n"
+    "nmi_button = original\r\n"
     "\r\n"
     "[Converting]\r\n"
     "# on or off\r\n"

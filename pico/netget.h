@@ -31,7 +31,7 @@ not, see <https://www.gnu.org/licenses/>.
 
 namespace netget {
 
-static const char USER_AGENT[] = "PicoMenu/2.5.0 (Picoface for the ZX Spectrum)";
+static const char USER_AGENT[] = "PicoMenu/2.6.0 (Picoface for the ZX Spectrum)";
 static const size_t HOST_MAX = 64, PATH_MAX_ = 480, URL_MAX = 560;
 
 // https://host[:port]/path (http:// too, for tests). False if it is not one.

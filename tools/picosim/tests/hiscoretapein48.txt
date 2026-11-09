@@ -1,0 +1,40 @@
+# High scores with a tape put in (T in Browse Games, LOAD "" typed: the Spectrum's own ROM loads
+# it): the tape's name is the game, and its table is put back by itself 5 s after the tape last
+# gave a block, as the memory there looks like it
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+sd /High Scores/tapein.txt {HERE}/hs-tapein.txt
+sd /High Scores/tapein.bin {HERE}/hs-tapein.bin
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+# (5 s on with no load: BASIC has no table there, nothing is put in)
+clock 6000
+wait 20
+expectmem 0xF000 0x00
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 300
+expectmem 30000 0x55
+key a
+wait 200
+expectmem 30007 0x99
+# the game sets up its table
+pokestr 0xF000 PICOFAKE
+clock 6000
+wait 20
+expectmem 0xF000 0x50
+expectmem 0xF006 0x43
+expectmem 0xF007 0x45

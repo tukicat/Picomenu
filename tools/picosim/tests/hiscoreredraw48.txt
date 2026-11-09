@@ -1,0 +1,26 @@
+# A snapshot showing its high score table (Commando shows it as soon as it starts, and draws it
+# again only after a game): the saved table goes into the snapshot, and the table on its screen
+# is drawn again in the game's own font (found in its memory), only where the names and scores
+# change. Commando is one of the tapes ({TAPES}, not in the source).
+sd /48.rom {ROM48}
+sd /Games/Commando.z80 {TAPES}/Commando.z80
+sd /High Scores/Commando.txt {HERE}/hs-commando.txt
+sd /High Scores/Commando.bin {HERE}/hs-commando.bin
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 100
+# the table: SCOTT 075000 first
+expectmem 29362 0x53
+expectmem 29372 0x37
+# the screen: S over K at row 48 (0x40D1 ...), 7 over 6 in the score
+expectmem 0x40D1 110
+expectmem 0x40D2 110
+expectmem 0x40D3 108
+# the rest of the screen as it was (the title)
+expectmem 0x4000 0

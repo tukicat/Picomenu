@@ -1,0 +1,106 @@
+# A tape game showing its high score table when it is put back by itself (as hiscoretapein48):
+# its memory is copied first (as an autosave), the table found on the screen (here drawn at pixel
+# row 101 in the ROM's font, from 48.rom), and drawn again with the saved names in the same NMI
+# that puts the table back.
+flash /48.rom {ROM48}
+sd /Tapes/tapein.tap {HERE}/tapein.tap
+sd /High Scores/tapein.txt {HERE}/hs-tapein.txt
+sd /High Scores/tapein.bin {HERE}/hs-tapein.bin
+boot
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 50
+key t
+wait 20
+key 1
+wait 20
+key t
+wait 50
+# (5 s on with no load: BASIC has no table there, nothing is put in)
+clock 6000
+wait 20
+expectmem 0xF000 0x00
+key j
+key SYM+p
+key SYM+p
+key ENTER
+wait 300
+expectmem 30000 0x55
+key a
+wait 200
+expectmem 30007 0x99
+# the game sets up its table, and shows it
+pokestr 0xF000 PICOFAKE
+poke 19850 0
+poke 20106 124
+poke 20362 66
+poke 18602 66
+poke 18858 124
+poke 19114 64
+poke 19370 64
+poke 19626 0
+poke 19851 0
+poke 20107 62
+poke 20363 8
+poke 18603 8
+poke 18859 8
+poke 19115 8
+poke 19371 62
+poke 19627 0
+poke 19852 0
+poke 20108 60
+poke 20364 66
+poke 18604 64
+poke 18860 64
+poke 19116 66
+poke 19372 60
+poke 19628 0
+poke 19853 0
+poke 20109 60
+poke 20365 66
+poke 18605 66
+poke 18861 66
+poke 19117 66
+poke 19373 60
+poke 19629 0
+poke 19854 0
+poke 20110 126
+poke 20366 64
+poke 18606 124
+poke 18862 64
+poke 19118 64
+poke 19374 64
+poke 19630 0
+poke 19855 0
+poke 20111 60
+poke 20367 66
+poke 18607 66
+poke 18863 126
+poke 19119 66
+poke 19375 66
+poke 19631 0
+poke 19856 0
+poke 20112 68
+poke 20368 72
+poke 18608 112
+poke 18864 72
+poke 19120 68
+poke 19376 66
+poke 19632 0
+poke 19857 0
+poke 20113 126
+poke 20369 64
+poke 18609 124
+poke 18865 64
+poke 19121 64
+poke 19377 126
+poke 19633 0
+clock 6000
+wait 20
+expectmem 0xF000 0x50
+expectmem 0xF006 0x43
+expectmem 0xF007 0x45
+expectmem 20112 60

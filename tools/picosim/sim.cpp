@@ -89,6 +89,8 @@ void initFileSystem();
 #include "nmi.h"                     // the assembled NMI ROM's addresses (EXITNMI), as piohandler.S takes them
 static uint8_t rom48[16384], rom128[2][16384];
 static uint8_t bank[8][16384];
+void host_hotkeys_button(bool down);
+static uint8_t kept_bank[8][16384], kept48[49152], kept_7ffd = 0;   // memkeep, for expectsnap
 static bool m128 = false, nmi = false, locked = false;
 static uint8_t p7ffd = 0, rows[8];
 static Z80 cpu;
@@ -96,6 +98,10 @@ static uint64_t frames = 0;
 // (debug logs, SIM_PCLOG and SIM_EARLOG in the environment: looked up once, not on every read)
 static const bool sim_pclog = getenv("SIM_PCLOG") != nullptr;
 static const bool sim_earlog = getenv("SIM_EARLOG") != nullptr;
+// SIM_PROF=<file>: where a checkpoint's T-states went, by the PC of each instruction
+static const bool sim_prof = getenv("SIM_PROF") != nullptr;
+static uint64_t prof_pc[65536];
+static uint16_t prof_last = 0;
 static uint64_t tstates = 0;            // T-states run before the current z80_run (the EAR's clock)
 static int requests = 0, tape_requests = 0, ear_answers = 0;   // ear: the hook told to load from EAR (4)
 static const uint16_t TAPE_MBOX = 0x3FF8;
@@ -229,7 +235,7 @@ static void run_frames(uint32_t n) {
                 else tape_requests++;
             }
             if (!nmi) host_level_loaders_poll();       // as the firmware's main loop
-            if (!nmi) host_checkpoint_poll(false);
+            if (!nmi && host_checkpoint_poll(false)) z80_nmi(&cpu);     // (a tape game's high score table put back)
         }
         frames++;
     }
@@ -482,14 +488,27 @@ int main(int argc, char** argv) {
                 // find the interrupt mode)
                 long t = 0, frame = 0;
                 for (long guard = 0; (nmi || (rom_state.flags & 2)) && guard < 2000000; guard++) {
-                    long r = (long) z80_run(&cpu, 100);
+                    long r = (long) z80_run(&cpu, sim_prof ? 1 : 100);
+                    if (sim_prof) prof_pc[prof_last] += (uint64_t) r;
+                    prof_last = Z80_PC(cpu);
                     t += r;
                     frame += r;
                     if (frame >= 69888) { frame -= 69888; z80_int(&cpu, true); z80_run(&cpu, 32); z80_int(&cpu, false); }
                     if (rom_data[16384] == 255) { requests++; processNmiRequest(); }
                 }
                 printf("checkpoint: the game waited %ld T-states (%.0f ms at 3.5 MHz)\n", t, t / 3500.0);
+                printf("checkpoint: 7FFD %02X\n", p7ffd);
+                if (sim_prof) {
+                    FILE* pf = fopen(getenv("SIM_PROF"), "w");
+                    for (int a = 0; a < 65536 && pf; a++) if (prof_pc[a]) fprintf(pf, "%d %llu\n", a, (unsigned long long) prof_pc[a]);
+                    if (pf) fclose(pf);
+                    memset(prof_pc, 0, sizeof(prof_pc));
+                }
             } else printf("checkpoint not taken\n");
+            if (strcmp(p1, "stay") != 0) run_frames(5);     // checkpoint stay: the game not run on (dumpmem)
+        } else if (c == "hkbutton") {       // hkbutton 1|0: the button down or up (Picomenu.ini's nmi_button = hotkeys)
+            host_hotkeys_button(atoi(p1) != 0);
+            if ((rom_state.flags & 2) && !nmi) z80_nmi(&cpu);
             run_frames(5);
         } else if (c == "nmi2" || c == "nmihold") {
             // two quick presses of the button, or held a second: the save screen or the grab
@@ -543,9 +562,18 @@ int main(int argc, char** argv) {
         } else if (c == "poke") {           // poke <address> <byte>: (debugging) write the Spectrum's RAM as paged now
             unsigned a = (unsigned) strtoul(p1, nullptr, 0);
             if (a >= 0x4000 && a < 0x10000) slot((uint16_t) a)[a & 0x3FFF] = (uint8_t) strtoul(p2, nullptr, 0);
+        } else if (c == "pokestr") {        // pokestr <address> <text>: (debugging) the text's bytes (spaces too, to the end of the line) into RAM
+            unsigned a = (unsigned) strtoul(p1, nullptr, 0);
+            const char* t = strstr(line, p1) + strlen(p1);
+            if (*t == ' ') t++;
+            for (; *t != '\0' && *t != '\n' && *t != '\r' && a < 0x10000; t++, a++) {
+                if (a >= 0x4000) slot((uint16_t) a)[a & 0x3FFF] = (uint8_t) *t;
+            }
         } else if (c == "jump") {           // jump <pc> <a>: (debugging) carry on at pc with A set
             Z80_PC(cpu) = (zuint16) strtoul(p1, nullptr, 0);
             Z80_A(cpu) = (zuint8) strtoul(p2, nullptr, 0);
+        } else if (c == "page") {           // page <value>: (debugging) as a game's OUT to port 0x7FFD (BANK_M left alone)
+            if (m128 && !locked) { p7ffd = (uint8_t) strtoul(p1, nullptr, 0); if (p7ffd & 0x20) locked = true; }
         } else if (c == "tracepaging") {    // tracepaging 1|0: print each write to port 0x7FFD
             trace_paging = atoi(p1) != 0;
         } else if (c == "dumpmem") {        // dumpmem <file>: the 64K the Z80 sees now (ROM as served) to a file
@@ -620,6 +648,64 @@ int main(int argc, char** argv) {
             if (o) { fwrite(d.data(), 1, got, o); fclose(o); }
             printf("got %s (%zu bytes)\n", p3, got);
             if (!got) failures++;
+        } else if (c == "markclash") {      // markclash <bank>: that bank gets at 0xC000 the 4 bytes the autosave's copy
+                                            // (cpsave) will put in the bank paged in, as if it had them already
+            uint8_t* cur = bank[p7ffd & 7];
+            uint8_t k = 0x5A;
+            for (int i = 0; i < 4; i++, k = (uint8_t) (k + 0x69)) bank[atoi(p1) & 7][i] = cur[i] ^ k;
+        } else if (c == "snapsave") {       // snapsave <file on PC>: the 48K machine as it is now, as a .sna (to put on the card with sd)
+            uint8_t h[27];
+            auto w16 = [&](int at, uint16_t v) { h[at] = (uint8_t) v; h[at + 1] = (uint8_t) (v >> 8); };
+            uint16_t sp = (uint16_t) (Z80_SP(cpu) - 2);
+            h[0] = cpu.i; w16(1, Z80_HL_(cpu)); w16(3, Z80_DE_(cpu)); w16(5, Z80_BC_(cpu)); w16(7, Z80_AF_(cpu));
+            w16(9, Z80_HL(cpu)); w16(11, Z80_DE(cpu)); w16(13, Z80_BC(cpu)); w16(15, Z80_IY(cpu)); w16(17, Z80_IX(cpu));
+            h[19] = cpu.iff2 ? 4 : 0; h[20] = (uint8_t) ((cpu.r & 0x7F) | (cpu.r7 & 0x80)); w16(21, Z80_AF(cpu));
+            w16(23, sp); h[25] = cpu.im; h[26] = 7;
+            std::vector<uint8_t> m(49152);
+            for (unsigned a = 0x4000; a < 0x10000; a++) m[a - 0x4000] = slot((uint16_t) a)[a & 0x3FFF];
+            if (sp >= 0x4000) { m[sp - 0x4000] = (uint8_t) Z80_PC(cpu); if (sp + 1u < 0x10000) m[sp + 1 - 0x4000] = (uint8_t) (Z80_PC(cpu) >> 8); }
+            FILE* f = fopen(p1, "wb");
+            if (f) { fwrite(h, 1, 27, f); fwrite(m.data(), 1, m.size(), f); fclose(f); }
+            else { printf("FAIL snapsave %s\n", p1); failures++; }
+        } else if (c == "memkeep") {        // memkeep: the RAM and the paging now, for expectsnap
+            memcpy(kept_bank, bank, sizeof(bank));
+            kept_7ffd = p7ffd;
+            for (unsigned a = 0x4000; a < 0x10000; a++) kept48[a - 0x4000] = slot((uint16_t) a)[a & 0x3FFF];
+        } else if (c == "expectsnap") {     // expectsnap <path on the SD card>: a .sna (48K) or .z80 (v3, 128K) has the RAM memkeep kept
+            std::string path = line + 11;
+            while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' ')) path.pop_back();
+            std::vector<uint8_t> d(256 * 1024);
+            FIL fil; UINT n = 0;
+            if (f_open(&fil, path.c_str(), FA_READ) == FR_OK) { f_read(&fil, d.data(), d.size(), &n); f_close(&fil); }
+            d.resize(n);
+            long bad = 0; std::string what;
+            if (n == 49179) {
+                for (unsigned i = 0; i < 49152; i++) bad += d[27 + i] != kept48[i];
+                what = "48K .sna";
+            } else if (n > 32 && d[6] == 0 && d[7] == 0) {
+                unsigned hl = d[30] | d[31] << 8, p = 32 + hl;
+                int pages = 0;
+                while (p + 3 <= n) {
+                    unsigned ln = d[p] | d[p + 1] << 8, pg = d[p + 2];
+                    p += 3;
+                    std::vector<uint8_t> m;
+                    if (ln == 0xFFFF) { m.assign(d.begin() + p, d.begin() + p + 16384); p += 16384; }
+                    else {
+                        unsigned e = p + ln;
+                        while (p < e) {
+                            if (d[p] == 0xED && p + 1 < e && d[p + 1] == 0xED) { m.insert(m.end(), d[p + 2], d[p + 3]); p += 4; }
+                            else m.push_back(d[p++]);
+                        }
+                    }
+                    if (pg >= 3 && pg <= 10 && m.size() == 16384) { pages++; for (unsigned i = 0; i < 16384; i++) bad += m[i] != kept_bank[pg - 3][i]; }
+                    else bad += 16384;
+                }
+                if (pages != 8) bad++;
+                if ((d[35] & 7) != (kept_7ffd & 7)) { bad++; printf("port 7FFD %02X, the bank was %d\n", d[35], kept_7ffd & 7); }
+                what = "128K .z80";
+            } else { bad = 1; what = "not a snapshot"; }
+            if (bad == 0) printf("PASS expectsnap %s (%s)\n", path.c_str(), what.c_str());
+            else { printf("FAIL expectsnap %s (%s: %ld bytes differ)\n", path.c_str(), what.c_str(), bad); failures++; }
         } else if (c == "ay") {             // ay <register> <value>: as the game wrote it
             ay_reg[atoi(p1) & 15] = (uint8_t) strtoul(p2, nullptr, 0);
         } else if (c == "expectay") {       // expectay <register> <value>
