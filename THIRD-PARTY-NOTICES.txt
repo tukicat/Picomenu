@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.6.0
+THIRD-PARTY NOTICES - PicoMenu Rev 2.6.1
 ========================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware

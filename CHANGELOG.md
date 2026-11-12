@@ -2,6 +2,17 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
+## Rev 2.6.1 (2026-11-12)
+A fix on top of Rev 2.6.0, nothing else changed. Two firmware files, as before:
+- `picomenu-Rev2.6.1.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.6.1 (tapeloader v261)`;
+- `picomenu-Rev2.6.1-W.uf2` for a Pico W: `Rev 2.6.1 W (tapeloader v261)`.
+
+Going from 2.6.0 to 2.6.1 keeps the internal flash and the Bluetooth pairing.
+
+### 128K tapes that looped on a standard Pico
+- **What went wrong:** some 128K tapes (Aliens: Neoplasma, Dreamwalker 128K, Old Tower 128K) loaded a few blocks and then started again from the beginning, over and over, on a standard Pico (by number and with T - Tape); a Pico W loaded them. Each tape block is put into the Spectrum's memory by the NMI ROM, started by an NMI from the Pico, which held the NMI line low for 3 ms. On a standard Pico a second NMI sometimes came in those 3 ms (the line seems not to stay cleanly low on that board). The NMI ROM then started again over itself, the game's registers it keeps were overwritten with its own, and the game was handed them on the way back: it crashed, the Spectrum reset, and the tape trap typed `LOAD ""` again. Only bigger blocks (over 1,792 bytes) were caught, as they keep the NMI ROM busy longer.
+- **The fix:** the NMI line is held low only until the NMI has been taken (a few microseconds; the Z80 only needs the falling edge), and from then on any further NMI while the NMI ROM runs returns at once (its first bytes at 0x66 are made `RETN`; the NMI ROM is put back afresh for the next NMI). This is in both firmwares.
+
 ## Rev 2.6.0 (2026-11-07)
 Changes since Rev 2.5.0. There are two firmware files, as for 2.5.0:
 - `picomenu-Rev2.6.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.6.0 (tapeloader v260)`;

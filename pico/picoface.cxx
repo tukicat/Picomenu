@@ -866,9 +866,9 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
 // " W" after the number: the Pico W build (Update PicoMenu only takes the same kind: fwupdate.h)
 #ifdef WIFI_ENABLE
-static const char FIRMWARE_ID[] = "Rev 2.6.0 W (tapeloader v260)";
+static const char FIRMWARE_ID[] = "Rev 2.6.1 W (tapeloader v261)";
 #else
-static const char FIRMWARE_ID[] = "Rev 2.6.0 (tapeloader v260)";
+static const char FIRMWARE_ID[] = "Rev 2.6.1 (tapeloader v261)";
 #endif
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
@@ -13888,7 +13888,24 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         }
         rom_state.flags |= 2;
         gpio_put(PIN_NMI, false);
+#ifdef PICOFACE_HOST
         sleep_ms(3);
+#else
+        // (Rev 2.6.1) A second NMI while the NMI ROM runs starts it again over itself: the game's
+        // registers are lost and it crashes on the way out. On a standard Pico the line held low
+        // for 3 ms sometimes gave one (a 128K tape's big blocks, loaded through the NMI ROM, then
+        // looped). So the line is held low only until the NMI is taken (the bus handler sets
+        // nmi_active at the fetch from 0x66, a few us; at most 3 ms as before), and once the Z80
+        // is past 0x66/0x67 they become RETN: a second NMI returns at once. (nmi_rom_unpack puts
+        // the NMI ROM back as it was for the next NMI.)
+        uint32_t nmi_t0 = time_us_32();
+        while (!rom_state.nmi_active && time_us_32() - nmi_t0 < 3000) { }
+        if (rom_state.nmi_active) {
+            busy_wait_us(20);       // (some 70 T-states: the NOP and the next instruction)
+            nmi_rom_data[0x66] = 0xED;
+            nmi_rom_data[0x67] = 0x45;
+        }
+#endif
         gpio_put(PIN_NMI, true);
         return true;
     }
