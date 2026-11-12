@@ -56,8 +56,6 @@ The firmware build relies on the following being installed and on the path (the 
 - Raspberry Pi Pico SDK 
 - VSCode and VSCode Pico plugin.
 
-PC tools, not needed for the firmware: `tools/tzxconv` runs the tape converter on a PC and has its tests; `tools/picosim` runs the firmware and the NMI ROM together on a PC with an emulated Spectrum, for testing the menus (see the README in each).
-
 ![View Screem](images/3-view-screen.png)
 
 ## License
