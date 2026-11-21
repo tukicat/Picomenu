@@ -14,36 +14,36 @@ wait 50
 key 1
 wait 50
 expect Saved games: Alpha
-expect E   Erase a slot
-expect 3 Saved game
-expect 5 zone
-# E, an empty slot
-key e
+expect V-Full size  E-Erase
+expect Slot 3: Saved game
+# E on an empty slot (O: slot 2)
+key o
 wait 20
-expect Erase which slot? 1-9
-key 2
+key e
 wait 20
 expect That slot is empty
-# E 3, N: still there
-key e
+# E on slot 3 (P), N: still there
+key p
 wait 20
-key 3
+key e
 wait 20
 expect Erase slot 3?
 key n
 wait 20
 expectnot Erase slot 3?
-expect 3 Saved game
-# E 3, Y: to the Waste Bin
+expect Slot 3: Saved game
+# E on 3, Y: to the Waste Bin
 key e
-wait 20
-key 3
 wait 20
 key y
 wait 40
 expect Moved to the Waste Bin
-expectnot 3 Saved game
-expect 5 zone
+expect Slot 3: empty
+key p
+wait 20
+key p
+wait 20
+expect Slot 5: zone
 nofile sd /Save Games/Alpha/Slot 3.z80
 get sd /Waste Bin/Slot 3.z80 {OUT}/sa-bin.z80
 # 0: the game itself
@@ -57,7 +57,7 @@ expect Reload: Alpha
 key r
 wait 50
 expect Saved games: Alpha
-expect 5 zone
+expect Slot 5: zone
 key BREAK
 wait 30
 expect B-Browse Games
@@ -91,9 +91,8 @@ wait 50
 key 1
 wait 50
 expect Saved games: Alpha
+expect Slot 5: zone
 key e
-wait 20
-key 5
 wait 20
 key y
 wait 40

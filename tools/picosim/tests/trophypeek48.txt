@@ -1,0 +1,201 @@
+# Memory trophies (Pico W): "peek = <address> <test> [value]" lines in a game's trophies, looked
+# at checks times a second by an NMI while the game runs (tr_poll, tr_peek_code). One from the
+# file (two peeks, match = any, held = 3), one made on Y's screen (C, 4: an address, a test, a
+# number, seconds), one tried out (T: its banner, not won), and R: how often they are looked at.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-peek.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23310 0
+poke 23311 0
+poke 23312 0
+poke 23300 0
+poke 23302 7
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+expect Held
+expect 0 of 1
+expect Checks 4/s
+# C, 4: 23300 at least 5, at once, named as given (Memory 23300)
+key c
+wait 20
+expect 4  a value at an address
+key 4
+wait 20
+expect The address (16384-65535):
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 0
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect When 23300 (a byte):
+key 3
+wait 20
+expect When 23300 >=
+expect The number (in decimal):
+key 5
+wait 10
+key ENTER
+wait 20
+expect For how many seconds must it
+key ENTER
+wait 20
+expect 23300 >= 5
+expect Memory 23300_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23300 >= 5
+expectfile sd /Trophies/Alpha.txt|checks = 4
+# C, 4: 23302 changes, tried out with T
+key c
+wait 20
+key 4
+wait 20
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 0
+wait 10
+key 2
+wait 10
+key ENTER
+wait 20
+key 7
+wait 20
+key ENTER
+wait 20
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect 0 of 3
+key a
+wait 20
+key a
+wait 20
+expect 23302 changed
+key t
+wait 20
+expect Trying it: play, and see
+expect Try
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+# looked at a while (the first read of 23302 is 7), then it changes: the try's banner, not won
+# (the simulator's clock is moved on by hand: the frames run faster than the real time)
+clock 3000
+wait 20
+clock 1000
+wait 20
+poke 23302 8
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TRY IT OUT: IT WORKS!
+expect (a try: not counted as won)
+wait 400
+expectnot TRY IT OUT
+# 23300 at 5: Memory 23300 won
+poke 23300 5
+clock 3000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Memory 23300
+wait 400
+expectnot TROPHY UNLOCKED!
+expectfile sd /Trophies/Alpha.won|won = 
+# Held: 23312 at 9 for less than 3 s does not win it; for 3 s it does
+poke 23312 9
+clock 3000
+wait 20
+clock 1000
+wait 20
+poke 23312 0
+clock 1000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+poke 23312 9
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Held
+wait 400
+trophies off
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 2 of 3
+key a
+wait 20
+key a
+wait 20
+expect Last read: 8
+# R: how often, 4 a second -> never -> once a second
+key r
+wait 20
+expect Checks 0/s
+expectfile sd /Trophies/Alpha.txt|checks = 0
+key r
+wait 20
+expect Checks 1/s
+expectfile sd /Trophies/Alpha.txt|checks = 1
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

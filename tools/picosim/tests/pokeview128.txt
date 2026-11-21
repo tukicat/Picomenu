@@ -1,0 +1,50 @@
+# V on the poke list with a 128K game: T into the Trophy creator and back.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+sd /Poke List/Athena.pok {HERE}/pv-athena.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key p
+wait 30
+key l
+wait 30
+key v
+wait 30
+key 1
+wait 30
+expect Poke: [128K]Infinite lives
+expect  1 49152   0    0    53   -
+shot {OUT}/pv128-view.scr
+key t
+wait 20
+key 2
+wait 30
+expect Creator: Athena
+expect 30000_
+shot {OUT}/pv128-creator.scr
+key 3
+wait 10
+shot {OUT}/pv128-creator2.scr
+key BREAK
+wait 20
+key BREAK
+wait 20
+key x
+wait 30
+expect 1-0 Poke V-View D-Del N/P X-Back
+expectnot R-Checks
+expectnot C-Make one
+shot {OUT}/pv128-back.scr

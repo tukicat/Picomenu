@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES - PicoMenu Rev 2.6.1
+THIRD-PARTY NOTICES - PicoMenu Rev 2.7.0
 ========================================
 
 PicoMenu is a fork of picoFace (hardware and original firmware by Brian Apps). The firmware
@@ -54,8 +54,9 @@ PicoMenu; only the Pico W build uses it. The sjasmplus assembler that builds the
 loader of the snapshot-to-tape converter, tools/z80tap/loader.asm) is a separate tool you
 install yourself and is not part of the source or the firmware.
 
-PicoMenu's own code, under the GPL v3 with the rest of this fork, includes: the LZSS packer
-and unpacker of the NMI ROM and the Help text (pico/lzss_pack.py, asm_to_c_file.py), the
+PicoMenu's own code, under the GPL v3 with the rest of this fork, includes: the packer
+and unpacker of the NMI ROM and the Help text (LZ77 with Elias gamma codes: pico/blob_pack.py,
+asm_to_c_file.py), the
 .png writer and reader of the screen grabs (pico/menushot.h; stored, uncompressed, with its
 own CRC-32 and Adler-32), the snapshot-to-tape converter and its loader (pico/z80tap.h,
 tools/z80tap), the settings and Options (pico/settings.h, options.h) and the simulator's test
@@ -68,6 +69,10 @@ net.cxx, netget.h, zxdb.h, unzip.h, tools/nettest, tools/make_netroots.py,
 tools/picosim/net_host.cpp). The old picoFace web server (http_server.cxx), which only that build used,
 is gone. No new third-party code was added for Rev 2.6.0: its high score finder (pico/hiscore.h),
 hotkeys and faster autosave copy (in nmirom/nmirom.asm and pico/picoface.cxx) are PicoMenu's own.
+No new third-party code was added for Rev 2.7.0 either: its trophies (pico/trophies.h and
+pico/picoface.cxx), the reset mod, the autosave and save slot pictures, the poke list's view,
+Poke Finder and delete (pico/picoface.cxx, pico/extras.h, nmirom/nmirom.asm), the new packer
+(pico/blob_pack.py) and the simulator's new tests and made-up .pok files are PicoMenu's own.
 
 The Spectrum ROM images and any games or snapshots you use with the
 Picoface are not covered by any licence here. None are in this source: the

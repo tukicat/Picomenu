@@ -1,0 +1,100 @@
+# F on the Poke screen (Pico W): the Poke Finder. Watch an address, M makes a poke (a value),
+# P another address in the same cheat (ENTER with no value: the player chooses), its name,
+# saved before the Y of the game's .pok, and back to the Poke screen.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Poke List/Alpha.pok {HERE}/pv-alpha.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 3
+poke 23341 1
+nmi
+wait 30
+key p
+wait 30
+expect Poke Finder
+key f
+wait 30
+expect Poke Finder: Alpha
+expect 5  an address you know: watch
+shot {OUT}/pf-find.scr
+key 5
+wait 20
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 0
+wait 6
+key ENTER
+wait 30
+expect 23340: read 1 time
+expect M-Make a poke
+key m
+wait 20
+expect 23340 now has 3. Value to poke:
+key 9
+wait 6
+key ENTER
+wait 20
+expect 23340 = 9  (was 3)
+expect P-Add another
+key p
+wait 20
+key a
+wait 20
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 1
+wait 6
+key ENTER
+wait 30
+expect 23341: read 1 time
+key m
+wait 20
+key ENTER
+wait 20
+expect 23341: the player chooses
+key ENTER
+wait 20
+expect Poke 23340_
+shot {OUT}/pf-name.scr
+key ENTER
+wait 20
+expect goes in the game's .pok.
+key ENTER
+wait 30
+expect Poke Finder
+expect Look it up in ZXDB
+expectfile sd /Poke List/Alpha.pok|NPoke 23340
+expectfile sd /Poke List/Alpha.pok|M  8 23340   9   3
+expectfile sd /Poke List/Alpha.pok|Z  8 23341 256   1
+expectfile sd /Poke List/Alpha.pok|N Infinite lives
+key l
+wait 30
+expect Poke 23340
+key x
+wait 20
+key x
+wait 20

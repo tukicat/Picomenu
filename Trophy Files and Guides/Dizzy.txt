@@ -1,0 +1,41 @@
+; PicoMenu's trophies for this game: made with Y on the menu, or written here.
+; Each one: [Trophy], name = (18 letters), about = (60 letters), and what wins it:
+;   score = 50000   a new score of 50000 or more in its high score table
+;   top = 1         a new score above the top one the table came with
+;   place = 3       a new score in the top 3 of the table
+;   peek = 23610 >= 3   its memory: an address (decimal, or $5C3A), w for a word,
+;                   & 127 for some of its bits only, then = <> >= <= > <
+;                   and a number, or changed, up, down
+;                   65000d6: 6 bytes as a number's digits; rises 400: up by 400
+;   (up to 4 peeks, all true; match = any: one of them; held = 5: for 5 seconds;
+;   within = 2: each counts as true for 2 seconds after, and rises within them)
+;   need = Top 3: Swimming   won once that trophy of this game is won too: a need
+;                   line for each (or names with commas between); all of them
+; checks = 1 (at the top): its memory is looked at once a second (0 never, up to 10).
+
+checks = 1
+[Trophy]
+name = Light my fire....
+about = You lit the cauldron
+peek = 40285 >= 128
+
+[Trophy]
+name = Eggcellent
+about = You picked up an extra life
+peek = 62700 up by 1
+
+[Trophy]
+name = Dizzyingly Good
+about = Play for 5 minutes without losing a life
+peek = 62700 not down
+held = 300
+
+[Trophy]
+name = I've got the key..
+about = Pick up the graveyard key
+peek = 59253 = 137
+
+[Trophy]
+name = A bridge to far
+about = Collapse the bridge and make the game incompetable
+peek = 38385 < 128

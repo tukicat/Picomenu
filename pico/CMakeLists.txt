@@ -23,12 +23,14 @@ cmake_minimum_required(VERSION 3.13)
 
 set(WIFI_ENABLE 0 CACHE BOOL "1: the Pico W build (F - File transfer over WiFi in Tools); its own uf2")
 set(PICOMENU_LOG 0 CACHE STRING "1: the firmware sends its log messages on the USB serial port (about 6 KB more)")
+set(PICOMENU_TLOG 0 CACHE STRING "1: a few messages about the tape trap and NMIs on the USB serial port (a test build)")
 set(PICOMENU_CP_OLD 0 CACHE STRING "1: autosaves copied the Rev 2.5.0 way (to compare the pause on Diagnostics)")
 
 # The Pico W build: the WiFi chip's driver and firmware and lwIP are about 300 KB, and HTTPS
 # for ZXDB (mbedtls) about 60 KB more, so the program may be bigger, and the internal flash's
-# file system (littlefs) is smaller: 1280 KB from the end of the flash, not 1800 KB (1400 KB
-# up to 2.4.0: going to 2.5.0 the flash's file system is made afresh, its files lost). The
+# file system (littlefs) is smaller: 1216 KB from the end of the flash, not 1800 KB (1400 KB
+# up to 2.4.0, 1280 KB up to 2.6.x: going to 2.5.0, and to 2.7.0, the flash's file system is made
+# afresh, its files lost, and the Bluetooth speaker paired again). The
 # network's name and password are in Picomenu.ini.
 if("${WIFI_ENABLE}")
         message(STATUS "Pico W build: WiFi file transfer")
@@ -37,7 +39,7 @@ if("${WIFI_ENABLE}")
         set(WIFI_LIBS pico_cyw43_arch_lwip_poll pico_lwip_netbios pico_btstack_classic pico_btstack_cyw43 pico_btstack_sbc_encoder
                 pico_lwip_mbedtls pico_mbedtls)
         set(WIFI_SOURCES wifi.cxx webpage.cxx bt.cxx net.cxx miniz_tinfl.c)
-        set(PICOMENU_FS_KB 1280)
+        set(PICOMENU_FS_KB 1216)
         # BTstack keeps the speaker's pairing in 8 KB of the flash, just before the file system
         set(PICOMENU_RESERVE_KB 8)
 else()
@@ -145,6 +147,12 @@ if("${WIFI_ENABLE}")
 endif()
 
 
+# The SD card's read-ahead (FatFs_SPI/src/glue.c): 2 sectors in both builds (the standard one
+# had 8: a 4 KB read at a time while a tape's blocks are served)
+if(NOT "${WIFI_ENABLE}")
+        target_compile_definitions(picoface PRIVATE READAHEAD_SECTORS=2)
+endif()
+
 target_compile_definitions(picoface PRIVATE
         Z80_STATIC
         # the internal flash's file system: its size, from the end of the 2 MB (littlefs-lib, fwupdate.h)
@@ -156,6 +164,7 @@ target_compile_definitions(picoface PRIVATE
         PICO_PRINTF_SUPPORT_EXPONENTIAL=0
         # the messages on the USB serial port: cmake -DPICOMENU_LOG=1 for a build with them
         PICOMENU_LOG=${PICOMENU_LOG}
+        PICOMENU_TLOG=${PICOMENU_TLOG}
         PICOMENU_CP_OLD=${PICOMENU_CP_OLD}
         )
 
@@ -184,6 +193,8 @@ set_source_files_properties(picoface.cxx PROPERTIES COMPILE_OPTIONS "-Os")
 # build; in the standard one it is -Os, 6 KB smaller (room for Erase all assets) and only a little
 # slower (Green Beret 1%, Athena 10%, measured with tools/tzxconv/bench)
 set_source_files_properties(z80/Z80.c PROPERTIES COMPILE_OPTIONS "-O2")
+# littlefs's debug and warning messages (printf with its file and line: nothing reads them) left out
+set_source_files_properties(littlefs-lib/lfs.c PROPERTIES COMPILE_DEFINITIONS "LFS_NO_DEBUG;LFS_NO_WARN")
 if("${WIFI_ENABLE}")
     set_source_files_properties(tzxconv_pico.cxx PROPERTIES COMPILE_OPTIONS "-O2")
 else()

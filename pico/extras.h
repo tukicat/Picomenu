@@ -193,19 +193,42 @@ struct PokPoke {
     uint16_t address;
     uint16_t value;         // 0 to 255, or 256 for "ask"
     uint8_t bank;           // 0 to 7, or 8 for none
+    uint8_t orig;           // what the file says was there before (0 to 255)
 };
+static_assert(sizeof(PokPoke) == 6, "a poke takes 6 bytes");
 
-static const int POK_MAX_CHEATS = 40;
-static const int POK_MAX_POKES = 200;
+static const int POK_MAX_CHEATS = 200;
+static const int POK_MAX_POKES = 400;
 static const int POK_PER_CHEAT = 16;        // the most one cheat can have
-static const int POK_NAME_MAX = 64;         // the longest name kept (the poke list scrolls what does not fit)
+static const int POK_NAME_MAX = 64;         // the longest name shown (the poke list scrolls what does not fit)
 
+// A cheat: its name is not kept but read from the file when it is shown (pok_name), from at,
+// where its N line's name starts. 8 bytes each, so a .pok of 200 cheats fits.
 struct PokCheat {
-    char name[POK_NAME_MAX + 1];
+    uint32_t at;
     uint16_t first;
     uint8_t count;
     bool ask;               // has a value the player must choose
 };
+static_assert(sizeof(PokCheat) == 8, "a cheat takes 8 bytes");
+
+// A name as read from the file (from a cheat's at): to the end of its line, the spaces
+// before and after it trimmed, and anything not printable shown as '?'. Returns its length.
+inline size_t pok_name_clean(const char* in, size_t got, char* out, size_t max) {
+    size_t i = 0;
+    while (i < got && in[i] == ' ') {
+        i++;
+    }
+    size_t n = 0;
+    for (; i < got && in[i] != '\r' && in[i] != '\n' && n < max; i++, n++) {
+        out[n] = (in[i] >= 32 && in[i] <= 126) ? in[i] : '?';
+    }
+    while (n > 0 && out[n - 1] == ' ') {
+        n--;
+    }
+    out[n] = '\0';
+    return n;
+}
 
 class PokFile {
 public:
@@ -229,6 +252,7 @@ public:
         uint8_t buf[64];
         char line[96];
         size_t len = 0;
+        uint32_t pos = 0, linestart = 0;     // (where in the file: a cheat's name is read from there)
         bool skipline = false;
         bool done = false;
         for (;;) {
@@ -236,15 +260,19 @@ public:
             if (got <= 0) {
                 break;
             }
-            for (int i = 0; i < got && !done; i++) {
+            for (int i = 0; i < got && !done; i++, pos++) {
                 char c = (char) buf[i];
                 if (c == '\n' || c == '\r') {
-                    if (len > 0 && !skipline) {
+                    if (len > 0 && (!skipline || line[0] == 'N')) {
                         line[len] = '\0';
-                        done = take_line(line);
+                        done = take_line(line, linestart);
                     }
                     len = 0;
                     skipline = false;
+                }
+                else if (len == 0 && !skipline) {
+                    linestart = pos;
+                    line[len++] = c;
                 }
                 else if (len < sizeof(line) - 1) {
                     line[len++] = c;
@@ -257,9 +285,9 @@ public:
                 break;
             }
         }
-        if (!done && len > 0 && !skipline) {
+        if (!done && len > 0 && (!skipline || line[0] == 'N')) {
             line[len] = '\0';
-            take_line(line);
+            take_line(line, linestart);
         }
         end_cheat();
         return ncheats;
@@ -295,7 +323,7 @@ private:
     }
 
     // true at the end of the file ("Y")
-    bool take_line(const char* line) {
+    bool take_line(const char* line, uint32_t at) {
         char kind = line[0];
         if (kind == 'Y') {
             return true;
@@ -307,18 +335,7 @@ private:
                 return false;
             }
             PokCheat& c = cheats[ncheats];
-            const char* s = line + 1;
-            while (*s == ' ') {
-                s++;
-            }
-            size_t n = 0;
-            for (; *s != '\0' && n < (size_t) POK_NAME_MAX; s++, n++) {
-                c.name[n] = (*s >= 32 && *s <= 126) ? *s : '?';
-            }
-            while (n > 0 && c.name[n - 1] == ' ') {
-                n--;
-            }
-            c.name[n] = '\0';
+            c.at = at + 1;
             c.first = (uint16_t) npokes;
             c.count = 0;
             c.ask = false;
@@ -335,6 +352,7 @@ private:
                 k.address = (uint16_t) address;
                 k.value = (uint16_t) value;
                 k.bank = bank >= 8 ? 8 : (uint8_t) bank;
+                k.orig = (uint8_t) (original > 255 ? 0 : original);
                 cheats[current].count++;
                 if (value == 256) {
                     cheats[current].ask = true;
@@ -352,16 +370,21 @@ private:
 // Writing the poke list for the NMI ROM
 
 // ACTION_POKE_LIST: dest[0] count (at most 10), dest[1] non-zero if more follow,
-// then a word for each name's offset from base, then the names. base is the
-// start of the NMI ROM's data; dest is an offset into it.
-inline void poke_list_page(const PokFile& pok, int start, uint8_t* base, uint16_t dest) {
+// then a word for each name's offset from base, then the title (the list's, at dest + 22:
+// "Poke list", and how many cheats were left out if any were), then the names. base is the
+// start of the NMI ROM's data; dest is an offset into it. name(i, out, max) gives cheat i's
+// name (read from the file).
+template <class Name>
+inline void poke_list_page(const PokFile& pok, int start, uint8_t* base, uint16_t dest, Name name) {
     uint16_t strings = (uint16_t) (dest + 2 + 2 * 10);
+    int t = pok.skipped > 0 ? snprintf((char*) base + strings, 32, "Poke list (%d not shown)", pok.skipped)
+        : snprintf((char*) base + strings, 32, "Poke list");
+    strings = (uint16_t) (strings + (t > 31 ? 31 : t) + 1);
     int count = 0;
     for (int i = start; i < pok.ncheats && count < 10; i++, count++) {
         base[dest + 2 + 2 * count] = (uint8_t) (strings & 0xFF);
         base[dest + 2 + 2 * count + 1] = (uint8_t) (strings >> 8);
-        size_t n = strlen(pok.cheats[i].name);
-        memcpy(base + strings, pok.cheats[i].name, n + 1);
+        size_t n = name(i, (char*) base + strings, (size_t) POK_NAME_MAX);
         strings = (uint16_t) (strings + n + 1);
     }
     base[dest] = (uint8_t) count;

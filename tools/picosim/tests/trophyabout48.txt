@@ -1,0 +1,173 @@
+# What a trophy means (about =, 60 letters): typed with E on Y's list (put in the file in place of
+# its about = line, or after its name when it has none, the rest of the file as it was), shown
+# on two lines on Y and on the banner (four rows now).
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-about.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23300 0
+poke 23301 0
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Light my Fire
+expect ENTER-Edit
+key e
+wait 20
+expect What Light my Fire means
+expect 60 letters left
+key y
+wait 6
+key o
+wait 6
+key u
+wait 6
+key SPACE
+wait 6
+key l
+wait 6
+key i
+wait 6
+key t
+wait 6
+key SPACE
+wait 6
+key t
+wait 6
+key h
+wait 6
+key e
+wait 6
+key SPACE
+wait 6
+key c
+wait 6
+key a
+wait 6
+key u
+wait 6
+key l
+wait 6
+key d
+wait 6
+key r
+wait 6
+key o
+wait 6
+key n
+wait 6
+key SPACE
+wait 6
+key o
+wait 6
+key n
+wait 6
+key SPACE
+wait 6
+key t
+wait 6
+key h
+wait 6
+key e
+wait 6
+key SPACE
+wait 6
+key f
+wait 6
+key i
+wait 6
+key r
+wait 6
+key s
+wait 6
+key t
+wait 6
+key SPACE
+wait 6
+key s
+wait 6
+key c
+wait 6
+key r
+wait 6
+key e
+wait 6
+key e
+wait 6
+key n
+wait 6
+wait 30
+expect you lit the cauldron on the
+expect first screen_
+key ENTER
+wait 30
+expect Saved what it means
+expect you lit the cauldron on the
+expect first screen
+expectfile sd /Trophies/Alpha.txt|about = you lit the cauldron on the first screen
+# again: its line put in place of
+key e
+wait 20
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key r
+wait 6
+key o
+wait 6
+key o
+wait 6
+key m
+wait 6
+wait 20
+key ENTER
+wait 30
+expectfile sd /Trophies/Alpha.txt|about = you lit the cauldron on the first room
+expectfile sd /Trophies/Alpha.txt|name = Light my Fire
+expectfile sd /Trophies/Alpha.txt|about = Open door B
+shot /tmp/claude-0/shots/about-y.scr
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+poke 23300 1
+clock 1000
+wait 20
+clock 5000
+wait 40
+expect TROPHY UNLOCKED!
+expect Light my Fire
+expect you lit the cauldron on the
+expect first room
+shot /tmp/claude-0/shots/about-banner.scr
+wait 400
+trophies off

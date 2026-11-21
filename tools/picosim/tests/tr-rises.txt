@@ -1,0 +1,8 @@
+checks = 4
+
+[Trophy]
+name = Good Arm!
+about = A grenade that scores 400
+peek = 23300 down
+peek = 23310d6 rises 400
+within = 2

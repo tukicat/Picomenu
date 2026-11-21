@@ -31,8 +31,11 @@ wait 30
 key a
 wait 30
 expect Autosave: Athena
-expect 2 20 seconds ago
-key 2
+expect 0:00 0:20
+key 8
+wait 20
+expect Autosave from 20 seconds ago
+key ENTER
 wait 300
 expectnot Autosave:
 nmi

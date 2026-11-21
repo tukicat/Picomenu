@@ -1,0 +1,57 @@
+# reset_pin = 28 set, but the pin not wired to the reset line (or on the wrong pin): the reset
+# does nothing, which the paging test after it finds (the 128K memory still locked), so the game
+# is not loaded and the one before carries on; the next try says the reset pin didn't reset the
+# Spectrum (the picoFace's reset button for now), and any key goes back to the game. Then wired:
+# Reset to 128K is a real reset even with the paging unlocked.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/reset-pin.ini
+sd /Games/A Mikie.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+sd /Games/B Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+resetwire 0
+page 0x30
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 2
+wait 80
+wait 10
+clock 200
+wait 10
+clock 2100
+wait 50
+wait 300
+expectresets 0
+expectlocked 1
+expectnot Athena
+# the next try: said
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 80
+expect Can't load: 128K memory locked
+expect didn't reset the Spectrum last
+key n
+wait 30
+expectlocked 1
+# wired, and the paging unlocked by hand: Reset to 128K is still a real reset
+resetwire 1
+hardreset
+expectlocked 0
+nmi
+wait 30
+key 1
+wait 30
+key y
+wait 30
+clock 200
+wait 10
+expectresets 1
+clock 2100
+wait 100
+expectlocked 0

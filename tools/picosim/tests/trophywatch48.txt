@@ -1,0 +1,92 @@
+# Search 5, watching an address you know (Pico W): its value read when it is chosen, again each
+# time the Trophy creator is opened (a change marked), N to read again, M a trophy on it, S stop.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 3
+poke 23341 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+shot {OUT}/watchf.scr
+expect 5  an address you know: watch
+key 5
+wait 20
+expect The address to watch:
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 0
+wait 6
+key ENTER
+wait 30
+expect 23340: read 1 time
+expect Now 3  (as a word 259)
+shot {OUT}/watch1.scr
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23340 2
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 23340: read 2 times
+expect Now 2  (as a word 258)
+expect changed
+key n
+wait 30
+expect 23340: read 3 times
+shot {OUT}/watch2.scr
+key m
+wait 20
+expect is at least
+key BREAK
+wait 20
+key BREAK
+wait 20
+key BREAK
+wait 20
+key f
+wait 20
+expect 23340: read 3 times
+key s
+wait 20
+expect Stopped watching
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30

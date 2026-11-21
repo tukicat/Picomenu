@@ -1,0 +1,16 @@
+checks = 4
+
+[Trophy]
+name = Door A
+about = Open door A
+peek = 23300 = 1
+
+[Trophy]
+name = Door B
+about = Open door B
+peek = 23301 = 1
+
+[Trophy]
+name = Both Doors
+about = Open both doors
+need = Door A, Door B

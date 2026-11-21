@@ -1,0 +1,190 @@
+# The "done once" search's Again round (Pico W): a counter (a day: 0, then 1, then 2) found among
+# things that change once a day and then stay (a street's layout: 10, then 77, then 3) or change
+# again by another step (5, 6, then 9). G keeps only those changed once more by the same step, and
+# the trophy it suggests is "is at least" what it has got to.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23344 0
+poke 23345 10
+poke 23346 5
+poke 23343 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key 3
+wait 20
+expect G  again: changed once more
+expect way again (0, 1, then 2).
+shot {OUT}/again-keys.scr
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 0
+poke 23345 10
+poke 23346 5
+poke 23343 2
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 6
+poke 23343 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 6
+poke 23343 4
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 6
+poke 23343 5
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+expect Once: 5 rounds (3 after)
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 2
+poke 23345 3
+poke 23346 9
+poke 23343 6
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key g
+wait 200
+expect Once: 6 rounds (1 again)
+expect 23344: 1 before, 2 after
+expectnot 23345:
+expectnot 23346:
+shot {OUT}/again-list.scr
+key 1
+wait 20
+expect Recommended:
+expect Won when 23344 is at least 2
+key BREAK
+wait 20
+key BREAK
+wait 20
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key s
+wait 20

@@ -1,0 +1,503 @@
+# Making trophies easier (Pico W): the "something that happens once" search (Before rounds, then
+# After rounds; what it had before and after, and the test it suggests: here bit 7 set, so "is at
+# least 128"), the check before a trophy is saved (what wins it in words, what it means: E), a
+# trophy true at its very first look not won ("True at the start"), and the score search (the
+# score typed each round; its digits found; "rises by" with its seconds to rise in).
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 74
+poke 23341 1
+poke 23342 5
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+expect 3  something done once (a
+shot {OUT}/help-find.scr
+key 3
+wait 20
+expect it happened yet?
+key a
+wait 20
+expect First a Before round: B
+key b
+wait 200
+expect Once: 1 rounds (0 after)
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23341 2
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23341 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+# the fire lit
+poke 23340 202
+poke 23342 6
+poke 23341 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23341 4
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23341 7
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key b
+wait 20
+expect Before rounds come first: A
+key BREAK
+wait 20
+expect 23340: 74 before, 202 after
+key 1
+wait 20
+expect Recommended:
+expect Won when 23340 is at least 128
+expect only bit 7 changed
+shot {OUT}/help-once.scr
+key ENTER
+wait 20
+expect For how many seconds must it
+key ENTER
+wait 20
+expect Memory 23340_
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key l
+wait 6
+key i
+wait 6
+key t
+wait 6
+expect lit_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+expect Won when 23340 is at least
+expect 23340 >= 128
+shot {OUT}/help-check.scr
+key e
+wait 20
+expect What lit means
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key y
+wait 6
+key o
+wait 6
+key u
+wait 6
+key SPACE
+wait 6
+key l
+wait 6
+key i
+wait 6
+key t
+wait 6
+key SPACE
+wait 6
+key t
+wait 6
+key h
+wait 6
+key e
+wait 6
+key SPACE
+wait 6
+key f
+wait 6
+key i
+wait 6
+key r
+wait 6
+key e
+wait 6
+key ENTER
+wait 30
+expect you lit the fire
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23340 >= 128
+expectfile sd /Trophies/Alpha.txt|about = you lit the fire
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+trophies off
+nmi
+wait 30
+key y
+wait 30
+expect Trophies: Alpha
+expect QA Choose  X-Back
+expectnot C-Make
+expect True at the start: check it
+shot {OUT}/help-suspect.scr
+key c
+wait 20
+expectnot Make a trophy
+key x
+wait 30
+key x
+wait 30
+poke 23340 74
+trophies on
+clock 1000
+wait 20
+clock 1000
+wait 20
+poke 23340 202
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect lit
+expect you lit the fire
+wait 400
+trophies off
+poke 23350 48
+poke 23351 48
+poke 23352 48
+poke 23353 52
+poke 23354 48
+poke 23355 48
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key s
+wait 20
+expect Search stopped
+key 4
+wait 20
+expect What is the score now?
+key 4
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 200
+expect A score: 1 rounds
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23350 48
+poke 23351 48
+poke 23352 48
+poke 23353 54
+poke 23354 48
+poke 23355 48
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key 6
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23350 48
+poke 23351 48
+poke 23352 49
+poke 23353 48
+poke 23354 48
+poke 23355 48
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key 1
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 200
+expect A score: 3 rounds
+expect 23350, 6 digits (chars)
+shot {OUT}/help-score.scr
+key 1
+wait 20
+expect The score: 23350, 6 digits
+expect 2  rises by a number quickly
+key 2
+wait 20
+expect The number (in decimal):
+key 4
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 20
+expect Within how many seconds must
+key ENTER
+wait 20
+expect Combo 400_
+key ENTER
+wait 30
+expect Won when 23350 (6 digits)
+expect rises by 400 or more, within 2
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23350d6 rises 400
+expectfile sd /Trophies/Alpha.txt|within = 2
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+poke 23350 48
+poke 23351 48
+poke 23352 49
+poke 23353 50
+poke 23354 48
+poke 23355 48
+clock 1000
+wait 20
+clock 3000
+wait 20
+clock 3000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+poke 23350 48
+poke 23351 48
+poke 23352 49
+poke 23353 54
+poke 23354 48
+poke 23355 48
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Combo 400
+wait 400
+trophies off

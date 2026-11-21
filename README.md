@@ -8,6 +8,8 @@ Picomenu has been developed for and tested on a Spectrum +2 (Grey). It should wo
 
 [![picomenu Video](https://img.youtube.com/vi/EOnCzTOS64U/0.jpg)](https://www.youtube.com/watch?v=EOnCzTOS64U)
 
+*Installing 2.7.0:** the Pico W firmware's internal flash file system is now 1216 KB (was 1280 KB), so going from 2.6.x to 2.7.0 on a Pico W **clears the internal flash**. Please backup anything on the internal flash of your Pico W before flashing the new firmware.
+
 ## User Guide
 
 A full interactive user guide is provided in .pdf form. This guide includes full instructions on how to use Picomenu and links to YouTube videos outlining its main features. 
@@ -24,10 +26,12 @@ Picomenu can be used to:
 * Save games, with dedicated save game slots
 * Autosave (be can set to 20, 40 or 60 intervals).
 * Apply pokes to loaded games, typed in or from a `.pok` file.
+* A poke finder - the abilty to search memory locations using inbuilt tools and create your own pokes (Pico W).
 * Reset into 48K or 128K from the menu.
 * Update PicoMenu's own firmware from a `.uf2` in the root of the SD card (T-Tools then U on the menu; if it fails, BOOTSEL still works).
 * Fetch games, `.pok`  files and game information from ZXDB (Pico W only)
 * Load `.tap` and `.tzx` files in realtime using Bluetooth (Pico W only and where you have a Bluetooth mod fitted to your Spectrum)
+* The ability to create "Trophy" achivements using inbuilt tools to find memory location. These trophies then acvitate as an achievement when playing the game - the trophies you achieve are then saved (Pico W). 
 
 ![The NMI menu](images/1-nmi-menu.png)
 

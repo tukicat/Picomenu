@@ -1,0 +1,87 @@
+# The Poke Finder with no .pok for the game: it asks first (N: not saved; Y: Alpha.pok made),
+# and M saves and makes the pokes now.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 3
+nmi
+wait 30
+key p
+wait 30
+key f
+wait 30
+key 5
+wait 20
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 0
+wait 6
+key ENTER
+wait 30
+key m
+wait 20
+key 7
+wait 6
+key ENTER
+wait 20
+key ENTER
+wait 20
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key L
+wait 6
+key i
+wait 6
+key v
+wait 6
+key e
+wait 6
+key s
+wait 6
+key ENTER
+wait 20
+expect This game has no .pok yet.
+expect Make Alpha.pok?
+key n
+wait 20
+expect Not saved: no .pok made
+key ENTER
+wait 20
+key y
+wait 20
+expect Poke lives
+key m
+wait 40
+expect Look it up in ZXDB
+expectfile sd /Poke List/Alpha.pok|NPoke lives
+expectfile sd /Poke List/Alpha.pok|Z  8 23340   7   3
+expectfile sd /Poke List/Alpha.pok|Y
+expectmem 23340 7
+key x
+wait 20

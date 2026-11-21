@@ -1,0 +1,176 @@
+# The edit screen (Pico W): ENTER on a trophy in the Trophy creator shows everything about it, a
+# numbered line each; a peek changed (its address, its test kept with ENTER, its number), a peek
+# deleted (D, its number), seconds held, a rename, and a score trophy's score, each saved.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-edit.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect ENTER-Edit
+key ENTER
+wait 20
+expect Edit: Two peeks
+expect 1 Name: Two peeks
+expect 3 Peek: 23340 >= 128
+expect 4 Peek: 23341 = 5
+expect 5 Match: all true at once
+expect 6 Within: 1 seconds
+expect 7 Held: none (at once)
+shot {OUT}/edit.scr
+key 3
+wait 20
+expect Change a peek
+expect 23340_
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 2
+wait 6
+key ENTER
+wait 20
+expect ENTER-Keep
+shot {OUT}/edit-test.scr
+key ENTER
+wait 20
+expect 128_
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key 2
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 20
+expect Peek changed
+expect 3 Peek: 23342 >= 200
+expectfile sd /Trophies/Alpha.txt|peek = 23342 >= 200
+key d
+wait 20
+expect Delete which peek?
+key 4
+wait 20
+expect Peek deleted
+expectnot 23341
+expect 4 Within: 1 seconds
+key 5
+wait 20
+expect Seconds it must stay true
+key 3
+wait 6
+key 0
+wait 6
+key ENTER
+wait 20
+expect 5 Held: 30 seconds
+expectfile sd /Trophies/Alpha.txt|held = 30
+key 4
+wait 20
+expect 4 Within: 2 seconds
+key 1
+wait 20
+expect Rename a trophy
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key f
+wait 6
+key i
+wait 6
+key r
+wait 6
+key e
+wait 6
+key ENTER
+wait 20
+expect Edit: fire
+expectfile sd /Trophies/Alpha.txt|name = fire
+expectfile sd /Trophies/Alpha.txt|within = 2
+key x
+wait 20
+expect ENTER-Edit
+key a
+wait 20
+key ENTER
+wait 20
+expect Edit: Score 5000
+expect 3 Score to reach: 5000
+key 3
+wait 20
+expect The score to reach:
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key 9
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key 0
+wait 6
+key ENTER
+wait 20
+expect 3 Score to reach: 9000
+expectfile sd /Trophies/Alpha.txt|score = 9000
+key x
+wait 20
+key x
+wait 30

@@ -1,0 +1,113 @@
+# Trophies won by others (need =): one from the file (Door A and Door B), and one made on Y's
+# screen (C, 5: SPACE ticks the others, ENTER, a name). Each is won, with its banner, once all
+# those it needs are; Y shows how many of them are.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-needs.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23300 0
+poke 23301 0
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+expect Both Doors
+expect 0 of 3
+key a
+wait 20
+key a
+wait 20
+expect Open both doors
+expect Won with 2 other trophies
+expect 0 of 2 won so far
+# C, 5: Door A ticked, the name it is given
+key c
+wait 20
+expect 5  all of the ones you tick
+key 5
+wait 20
+expect Won when all those ticked are:
+expect [ ] Door A
+key ENTER
+wait 20
+expect SPACE ticks the ones it needs
+key SPACE
+wait 20
+expect [X] Door A
+key ENTER
+wait 20
+expect Won with 1 other trophy
+expect Collector_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect Made: Y shows it when it is won
+expectfile sd /Trophies/Alpha.txt|need = Door A
+expect 0 of 4
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+# Door A: it and Collector
+poke 23300 1
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Door A
+expect and 1 more
+wait 400
+# Door B: it and Both Doors
+poke 23301 1
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Door B
+expect and 1 more
+wait 400
+trophies off
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 4 of 4
+key a
+wait 20
+key a
+wait 20
+expect 2 of 2 won so far
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

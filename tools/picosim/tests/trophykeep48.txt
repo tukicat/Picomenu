@@ -1,0 +1,125 @@
+# "not down" with held (Pico W): five minutes without a life lost, here 10 seconds. A life lost
+# starts the count again; a life gained doesn't; time in a menu doesn't count, and what the trophy
+# had seen carries on after it. Made in the Trophy creator: C, 4, the address, K, 10 seconds.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23370 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key c
+wait 20
+key 4
+wait 20
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 7
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect K  keeps up: doesn't go down
+key k
+wait 20
+expect For how many seconds must it
+key 1
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect Memory 23370_
+key ENTER
+wait 30
+expect Won when 23370 doesn't go
+expect down, for 10 seconds.
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23370 not down
+expectfile sd /Trophies/Alpha.txt|held = 10
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+# a life lost at 5 seconds: the count starts again
+poke 23370 2
+clock 1000
+wait 20
+poke 23370 3
+# a life gained: still counting
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+expectnot TROPHY UNLOCKED!
+# 20 seconds in the menu: not counted
+nmi
+wait 30
+clock 20000
+wait 20
+key x
+wait 30
+clock 1000
+wait 20
+clock 300
+wait 60
+expectnot TROPHY UNLOCKED!
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+clock 300
+wait 60
+expect TROPHY UNLOCKED!
+expect Memory 23370
+wait 400
+trophies off

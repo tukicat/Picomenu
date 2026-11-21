@@ -16,11 +16,11 @@
 
 import pathlib
 
-# PicoMenu: the ROM is kept compressed in the firmware (LZSS, about 4 KB smaller), and
+# PicoMenu: the ROM is kept compressed in the firmware (blob_pack.py, about 5 KB smaller), and
 # nmi_rom_unpack() puts it in the ROM space each time the menu opens.
 import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from lzss_pack import compress, decompress
+from blob_pack import compress, decompress
 
 romdata = pathlib.Path('nmirom.bin').read_bytes()
 
@@ -45,41 +45,49 @@ with open("nmi.c", "w") as fp:
 
     packed = compress(romdata)
     assert decompress(packed, len(romdata)) == romdata
-    fp.write("static const uint8_t NMI_ROM_LZ[] = {")
+    fp.write("static const uint8_t NMI_ROM_Z[] = {")
     for i in range(0, len(packed)):
         if i % 16 == 0:
             fp.write("\n    ")
         fp.write(f"0x{packed[i]:02x}, ")
     fp.write("\n};\n\n")
     fp.write(f"const uint32_t NMI_ROM_SIZE = {len(romdata)};\n\n")
-    fp.write("""// Unpacks LZSS (lzss_pack.py): a flag byte for each 8 items; a set bit is a byte as it is, a
-// clear one a match of 2 bytes, offset 1-4096 in the top 12 bits, length 3-18 in the low 4.
-// Used for the NMI ROM and the Help text.
-void lzss_unpack(const uint8_t* c, uint8_t* to, uint32_t n) {
-    uint32_t o = 0;
+    fp.write("""// Unpacks blob_pack.py's packing: LZ77 with Elias gamma codes. Bits come from bytes of their
+// own (the top bit first) as they are needed, among the literal and offset bytes. Until n bytes
+// are out: bit 0, a literal byte; bit 1, a match: gamma(length - 1), gamma(((offset - 1) >> 8)
+// + 1), then the low byte of offset - 1. Used for the NMI ROM, its routines, the Help text and
+// the set up texts.
+void blob_unpack(const uint8_t* c, uint8_t* to, uint32_t n) {
+    uint32_t o = 0, bits = 0, left = 0;
+#define BLOB_BIT() (left == 0 ? (bits = *c++, left = 7, (bits >> 7) & 1) : (--left, (bits >> left) & 1))
     while (o < n) {
-        uint8_t flags = *c++;
-        for (int bit = 0; bit < 8 && o < n; bit++) {
-            if (flags & (1u << bit)) {
-                to[o++] = *c++;
-            } else {
-                uint32_t v = c[0] | ((uint32_t) c[1] << 8);
-                c += 2;
-                uint32_t off = (v >> 4) + 1;
-                uint32_t len = (v & 15) + 3;
-                while (len-- > 0 && o < n) {
-                    to[o] = to[o - off];
-                    o++;
-                }
-            }
+        if (!BLOB_BIT()) {
+            to[o++] = *c++;
+            continue;
+        }
+        uint32_t v[2];
+        for (int g = 0; g < 2; g++) {
+            uint32_t k = 0;
+            while (!BLOB_BIT()) k++;
+            uint32_t x = 1;
+            while (k-- > 0) x = (x << 1) | BLOB_BIT();
+            v[g] = x;
+        }
+        uint32_t len = v[0] + 1;
+        uint32_t off = (((v[1] - 1) << 8) | *c++) + 1;
+        while (len-- > 0 && o < n) {
+            to[o] = to[o - off];
+            o++;
         }
     }
+#undef BLOB_BIT
 }
 
 void nmi_rom_unpack(uint8_t* to) {
-    lzss_unpack(NMI_ROM_LZ, to, NMI_ROM_SIZE);
+    blob_unpack(NMI_ROM_Z, to, NMI_ROM_SIZE);
 }
 """)
+
     print(f"NMI ROM {len(romdata)} bytes, packed {len(packed)}")
 
     # the autosave's copy (cpsave in nmirom.asm), which the pico puts in the ROM for an autosave
@@ -87,7 +95,7 @@ void nmi_rom_unpack(uint8_t* to) {
     assert len(cpsave) == symbols["CP_SIZE"]
     cplz = compress(cpsave)
     assert decompress(cplz, len(cpsave)) == cpsave
-    fp.write("const uint8_t CP_SAVE_LZ[] = {")
+    fp.write("const uint8_t CP_SAVE_Z[] = {")
     fp.write(", ".join(f"0x{b:02x}" for b in cplz))
     fp.write("};\n\n")
     print(f"Autosave copy {len(cpsave)} bytes")
@@ -105,7 +113,7 @@ void nmi_rom_unpack(uint8_t* to) {
     allt = b''.join(texts)
     packed = compress(allt)
     assert decompress(packed, len(allt)) == allt
-    fp.write("const uint8_t SETUP_TEXTS_LZ[] = {")
+    fp.write("const uint8_t SETUP_TEXTS_Z[] = {")
     fp.write(", ".join(f"0x{b:02x}" for b in packed))
     fp.write("};\n\n")
     setup_sizes = [len(t) for t in texts]
@@ -114,7 +122,7 @@ void nmi_rom_unpack(uint8_t* to) {
     assert len(hk) == symbols["HOTKEYS_SIZE"]
     hklz = compress(hk)
     assert decompress(hklz, len(hk)) == hk
-    fp.write("const uint8_t HOTKEYS_LZ[] = {")
+    fp.write("const uint8_t HOTKEYS_Z[] = {")
     fp.write(", ".join(f"0x{b:02x}" for b in hklz))
     fp.write("};\n\n")
     cpold = pathlib.Path('cpold.bin').read_bytes()
@@ -139,7 +147,7 @@ with open("nmi.h", "w") as fp:
     fp.write("#ifndef __ASSEMBLER__\n")
     fp.write("extern const uint32_t NMI_ROM_SIZE;\n")
     fp.write("#ifdef __cplusplus\nextern \"C\"\n#endif\nvoid nmi_rom_unpack(uint8_t* to);\n")
-    fp.write("#ifdef __cplusplus\nextern \"C\"\n#endif\nvoid lzss_unpack(const uint8_t* src, uint8_t* to, uint32_t n);\n")
+    fp.write("#ifdef __cplusplus\nextern \"C\"\n#endif\nvoid blob_unpack(const uint8_t* src, uint8_t* to, uint32_t n);\n")
     fp.write("#endif\n")
 
 
@@ -159,24 +167,27 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define EXITNMI 0x{exitnmi:x}\n")
     # the autosave's copy (cpsave): where it goes, where the pico writes the copy of each block and
     # where that puts it
-    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t CP_SAVE_LZ[];\nextern const uint8_t CP_OLD_BIN[];\n#endif\n")
-    # the set up texts (SETUP_TEXTS_LZ): Picomenu.ini's defaults and order heading, then the example
-    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t SETUP_TEXTS_LZ[];\n#endif\n")
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t CP_SAVE_Z[];\nextern const uint8_t CP_OLD_BIN[];\n#endif\n")
+    # the set up texts (SETUP_TEXTS_Z): Picomenu.ini's defaults and order heading, then the example
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t SETUP_TEXTS_Z[];\n#endif\n")
     fp.write(f"#define SETUP_INI_SIZE {setup_sizes[0]}\n#define SETUP_EXAMPLE_SIZE {setup_sizes[1]}\n")
     # the pico's own code (picoscreen's PICO_RUN, and the high score table at the menu's NMI)
     fp.write(f"#define PICO_CODE_AT 0x{symbols['PICO_CODE']:x}\n#define WAITPICO 0x{symbols['waitpico']:x}\n")
     fp.write(f"#define PICO_RUN 0x{symbols['PICO_RUN']:x}\n")
     fp.write(f"#define EXIT_NO_SCREEN 0x{symbols['nmientry.exitnoscreenrestore']:x}\n")
     fp.write(f"#define SPARE_AT 0x{symbols['SPARE_SPACE']:x}\n")
+    fp.write(f"#define TROPHY_ITEM 0x{symbols['startmenu.trophyitem']:x}\n")
+    fp.write(f"#define TROPHY_MAKER_ITEM 0x{symbols['startmenu.trophymakeritem']:x}\n")
     # hotkeys (nmirom.asm): the code the pico puts in for the button, and what the hotkeys open
-    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t HOTKEYS_LZ[];\n#endif\n")
+    fp.write("#ifndef __ASSEMBLER__\nextern const uint8_t HOTKEYS_Z[];\n#endif\n")
     for k, sym in (("HOTKEYS_AT", "HOTKEYS_AT"), ("HOTKEYS_SIZE", "HOTKEYS_SIZE"), ("HK_HELD", "hotkey_held"),
                    ("HK_CALLMENU", "nmientry.callmenu"), ("HK_BROWSE", "startmenu.handle_load"),
                    ("HK_ZXDB", "startmenu.handle_zxdb"), ("HK_INFO", "startmenu.handle_info"),
                    ("HK_SAVE", "startmenu.handle_save"), ("HK_GRAB", "startmenu.handle_grab"),
                    ("HK_RESET128", "startmenu.handle_reset128"), ("HK_RESET48", "startmenu.handle_reset48"),
                    ("HK_TAPE", "startmenu.handle_tape"), ("HK_AUTOSAVE", "startmenu.handle_checkpoints"),
-                   ("HK_POKE", "startmenu.handle_poke")):
+                   ("HK_POKE", "startmenu.handle_poke"), ("HK_TROPHIES", "startmenu.handle_trophies"),
+                   ("TOOLS_FLAG", "startmenu.intools")):
         fp.write(f"#define {k} 0x{symbols[sym]:x}\n")
     for k in ("CP_AT", "CP_SIZE", "CP_OLD_SIZE", "CP_CODE", "CP_SP", "CP_DATA", "CP_DATA_SIZE", "CP_LIMIT", "CP_GROUP_CODE"):
         fp.write(f"#define {k} 0x{symbols[k]:x}\n")
@@ -196,6 +207,9 @@ with open("nmi.h", "w") as fp:
     fp.write(f"#define NMI_CHARBANK 0x{symbols['charbank']:x}\n")
     # the game's sound chip volumes, kept while the menu is up, and where they go in a 128K save
     fp.write(f"#define NMI_AYVOLS 0x{symbols['ayvols']:x}\n")
+    # the NMI's saved registers and the top of its stack (a test build checks the two copies agree)
+    fp.write(f"#define NMI_SNA_ON_ENTRY 0x{symbols['sna_on_entry']:x}\n")
+    fp.write(f"#define NMI_STACK_TOP 0x{symbols['stack_top']:x}\n")
     fp.write(f"#define SAVE128_AY_AT {symbols['save128_extra.ay'] - symbols['sna_on_entry']}\n")     # the menus' font (the pico draws with it too)
     fp.write(f"#define INFO_HOUSE 0x{symbols['INFO_HOUSE']:x}\n")
     fp.write(f"#define INFO_HOUSE_SIZE {symbols['INFO_HOUSE_SIZE']}\n")

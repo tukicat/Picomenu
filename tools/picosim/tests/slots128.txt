@@ -26,7 +26,7 @@ wait 50
 key 1
 wait 50
 expect Saved games: Athena
-expect 1 Saved game        .z80
+expect Slot 1: Saved game (last)
 key 1
 wait 200
 nmi
@@ -35,4 +35,4 @@ expect Reload: Athena Slot 1
 key s
 wait 30
 expect Save slots: Athena
-expect last
+expect Slot 1: Saved game (last)

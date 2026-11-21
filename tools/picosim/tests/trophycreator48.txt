@@ -1,0 +1,193 @@
+# Your trophies and the Trophy creator (Pico W): Y on the menu shows the running game's trophies
+# only; Y in Tools (and the hotkey Y) is the Trophy creator, which makes and changes them. Opened
+# with the hotkey, X goes straight back to the game. N renames one: its win is kept, and need =
+# lines naming it follow it.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/tr-hotkeys.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-needs.txt
+boot
+wait 50
+hkbutton 1
+wait 20
+hkbutton 0
+wait 40
+expect Y-Your trophies
+key t
+wait 30
+expect Y-Trophy creator
+expect X-Back
+key x
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23300 0
+poke 23301 0
+hkbutton 1
+wait 20
+key y
+wait 60
+hkbutton 0
+wait 20
+expect Creator: Alpha
+expect C-Make
+expect ENTER-Edit
+expect Both Doors
+key x
+wait 30
+expectnot Creator: Alpha
+expectnot Search ZXDB
+expectnot Trophy creator
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+poke 23300 1
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Door A
+wait 400
+trophies off
+hkbutton 1
+wait 20
+key y
+wait 60
+hkbutton 0
+wait 20
+expect Creator: Alpha
+key n
+wait 20
+expect Rename a trophy
+expect Now: Door A
+expect Door A_
+key DELETE
+wait 6
+key DELETE
+wait 6
+expect Door_
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key g
+wait 6
+key a
+wait 6
+key t
+wait 6
+key e
+wait 6
+key SPACE
+wait 6
+key a
+wait 6
+expect gate a_
+key ENTER
+wait 30
+expect Renamed: still won
+expect gate a
+expectfile sd /Trophies/Alpha.txt|name = gate a
+expectfile sd /Trophies/Alpha.txt|need = gate a, Door B
+expect 1 of 3
+key a
+wait 20
+key a
+wait 20
+expect 1 of 2 won so far
+# a name another one has: refused
+key q
+wait 20
+key q
+wait 20
+key n
+wait 20
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key DELETE
+wait 6
+key d
+wait 6
+key o
+wait 6
+key o
+wait 6
+key r
+wait 6
+key SPACE
+wait 6
+key b
+wait 6
+key ENTER
+wait 30
+expect This game has one called that
+key BREAK
+wait 30
+key x
+wait 30
+expectnot Creator: Alpha
+expectnot Search ZXDB
+hkbutton 1
+wait 20
+hkbutton 0
+wait 40
+key y
+wait 30
+expect Trophies: Alpha
+expect gate a
+expect QA Choose  X-Back
+expectnot C-Make
+key c
+wait 20
+key n
+wait 20
+expectnot Make a trophy
+expectnot Rename a trophy
+key x
+wait 30
+expect Y-Your trophies
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+expect C-Make
+key x
+wait 30
+expect Y-Trophy creator
+key x
+wait 30
+expect Y-Your trophies
+key x
+wait 30
+expectnot Y-Your trophies

@@ -46,33 +46,47 @@ clock 20000
 checkpoint
 get sd /Autosave/Alpha/Autosave 1.sna {OUT}/rw1.sna
 get sd /Autosave/Alpha/Autosave 3.sna {OUT}/rw3.sna
-# A: the three, newest first, by their age in the game
+# A: the three as pictures, newest first (on the left), by their age in the game; the newest is
+# chosen, large above the row
 nmi
 wait 30
 key a
 wait 30
 expect Autosave: Alpha
-expect 1 0 seconds ago
-expect 2 20 seconds ago
-expect 3 40 seconds ago
-# V, 3: its screen; any key back to the list
-key v
+expect 0:00 0:20 0:40
+expect Autosave from 0 seconds ago
+expect O P Choose  ENTER Go back to it
+# P P 8: the oldest chosen (5 and 8 work as O and P; past the end stays there); O back one; V: its screen full size, any key back
+key p
 wait 20
-expect View which? 1-3
-key 3
+key p
+wait 20
+key 8
+wait 20
+expect Autosave from 40 seconds ago
+key o
+wait 20
+expect Autosave from 20 seconds ago
+key 8
+wait 20
+key v
 wait 30
 expectnot Autosave: Alpha
 key SPACE
 wait 30
 expect Autosave: Alpha
+expect Autosave from 40 seconds ago
 # BREAK: back to the menu
 key BREAK
 wait 30
 expect B-Browse Games
-# 2: carry on from 20 seconds ago, with no question; checkpoint 3 (the newest) goes
+# 8, ENTER: carry on from 20 seconds ago, with no question; checkpoint 3 (the newest) goes
 key a
 wait 30
-key 2
+expect Autosave from 0 seconds ago
+key 8
+wait 20
+key ENTER
 wait 300
 expectnot Autosave:
 expectnot B-Browse
@@ -82,9 +96,8 @@ expect Reload: Alpha
 # the game is back where checkpoint 2 was: it is now, and the older one 20 seconds before
 key a
 wait 30
-expect 1 0 seconds ago
-expect 2 20 seconds ago
-expectnot 3 
+expect 0:00 0:20
+expectnot 0:40
 key x
 wait 30
 key x
@@ -96,9 +109,7 @@ nmi
 wait 30
 key a
 wait 30
-expect 1 0 seconds ago
-expect 2 20 seconds ago
-expect 3 40 seconds ago
+expect 0:00 0:20 0:40
 key x
 wait 30
 key x
@@ -108,23 +119,23 @@ nmi
 wait 30
 key a
 wait 30
+key 8
+wait 20
 key m
 wait 20
-expect Move which? 1-3
-key 2
-wait 20
-expect To which save slot? 1-9
+expect Move it to which save slot?
+expect 1-9  X-Back
 key 3
 wait 40
 expect Moved to slot 3
-expect 2 40 seconds ago
-expectnot 3 40 seconds ago
+expect 0:00 0:40
+expectnot 0:20
 get sd /Save Games/Alpha/Slot 3.sna {OUT}/cp-slot3.sna
 nofile sd /Autosave/Alpha/Autosave 2.sna
 # M again, to slot 3 (used now): asks first; Y goes over it
-key m
+key o
 wait 20
-key 1
+key m
 wait 20
 key 3
 wait 20
@@ -173,14 +184,14 @@ wait 30
 key a
 wait 30
 expect Autosave is off for this game.
-expect O   Turn autosave on
-# O turns it on for this game after all (every 20 s, as Picomenu.ini says)
-key o
+expect A Turn autosave on
+# A turns it on for this game after all (every 20 s, as Picomenu.ini says)
+key a
 wait 20
 expect Autosave on for this game
 expect No autosaves yet.
 expect One is saved every 20 seconds.
-expect O   Turn autosave off
+expect A Turn autosave off
 key x
 wait 30
 key x

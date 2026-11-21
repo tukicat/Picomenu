@@ -1,0 +1,168 @@
+# A high score table kept lowest first (Paperboy: KEV 1450 ... PIX 12480, at 58984): read and
+# turned round, so its trophies work. The table as the game came is noted first; then a new 2000
+# goes in (lowest first, KEV's 1450 gone): Score 1540 is won, Top Three isn't.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Paperboy.z80 {TAPES}/Paperboy.z80
+sd /High Scores/Paperboy.txt {HERE}/hs-paperboy.txt
+sd /Trophies/Paperboy.txt {HERE}/tr-paperboy.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key y
+wait 30
+expect Trophies: Paperboy
+expect 0 of 2
+key x
+wait 30
+key x
+wait 30
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Save the high scores
+key y
+wait 50
+key y
+wait 300
+expectfile sd /Trophies/Paperboy.won|base = 12480 11780 8420 8200 6990 5200 1560 1560
+expectfile sd /Trophies/Paperboy.won|last = 12480 11780 8420 8200 6990 5200 1560 1560
+# a new 2000, lowest first
+poke 58984 36
+poke 58985 33
+poke 58986 36
+poke 58987 0
+poke 58988 0
+poke 58989 1
+poke 58990 5
+poke 58991 6
+poke 58992 0
+poke 58993 45
+poke 58994 53
+poke 58995 45
+poke 58996 0
+poke 58997 0
+poke 58998 1
+poke 58999 5
+poke 59000 6
+poke 59001 0
+poke 59002 48
+poke 59003 33
+poke 59004 45
+poke 59005 0
+poke 59006 0
+poke 59007 1
+poke 59008 5
+poke 59009 6
+poke 59010 0
+poke 59011 51
+poke 59012 35
+poke 59013 47
+poke 59014 0
+poke 59015 0
+poke 59016 2
+poke 59017 0
+poke 59018 0
+poke 59019 0
+poke 59020 33
+poke 59021 36
+poke 59022 48
+poke 59023 0
+poke 59024 0
+poke 59025 5
+poke 59026 2
+poke 59027 0
+poke 59028 0
+poke 59029 51
+poke 59030 47
+poke 59031 36
+poke 59032 0
+poke 59033 0
+poke 59034 6
+poke 59035 9
+poke 59036 9
+poke 59037 0
+poke 59038 45
+poke 59039 42
+poke 59040 36
+poke 59041 0
+poke 59042 0
+poke 59043 8
+poke 59044 2
+poke 59045 0
+poke 59046 0
+poke 59047 33
+poke 59048 32
+poke 59049 42
+poke 59050 0
+poke 59051 0
+poke 59052 8
+poke 59053 4
+poke 59054 2
+poke 59055 0
+poke 59056 37
+poke 59057 39
+poke 59058 39
+poke 59059 0
+poke 59060 1
+poke 59061 1
+poke 59062 7
+poke 59063 8
+poke 59064 0
+poke 59065 48
+poke 59066 41
+poke 59067 56
+poke 59068 0
+poke 59069 1
+poke 59070 2
+poke 59071 4
+poke 59072 8
+poke 59073 0
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Save the high scores
+key y
+wait 50
+key y
+wait 300
+expectfile sd /Trophies/Paperboy.won|last = 12480 11780 8420 8200 6990 5200 2000 1560
+expectfile sd /Trophies/Paperboy.won|won =
+trophies on
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Score 1540
+expect A score of 1540 or more
+wait 400
+trophies off
+nmi
+wait 30
+key y
+wait 30
+expect 1 of 2
+key x
+wait 30
+key x
+wait 30

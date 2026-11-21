@@ -1,0 +1,59 @@
+# D on the poke list (Pico W): which cheat (1-0), Y deletes it from the game's .pok (its N line
+# and its pokes), N keeps it; the list is read again.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Poke List/Alpha.pok {HERE}/pv-alpha.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key p
+wait 30
+key l
+wait 30
+expect 1-0 Poke V-View D-Del N/P X-Back
+expect Choose a value
+key d
+wait 30
+expect Delete which cheat? 1-0
+key 2
+wait 20
+expect Delete this cheat?
+expect Choose a value
+key n
+wait 20
+expect Delete which cheat? 1-0
+key 2
+wait 20
+shot {OUT}/pd-sure.scr
+key y
+wait 30
+expect Deleted.
+key ENTER
+wait 30
+expect Infinite lives
+expect In bank 1
+expectnot Choose a value
+expectfile sd /Poke List/Alpha.pok|Z 8 23341 0 39
+expectfile sd /Poke List/Alpha.pok|N In bank 1
+expectfile sd /Poke List/Alpha.pok|Y
+key d
+wait 30
+key x
+wait 30
+expect 1-0 Poke V-View D-Del N/P X-Back
+key x
+wait 20
+key x
+wait 20

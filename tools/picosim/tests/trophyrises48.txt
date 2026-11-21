@@ -1,0 +1,169 @@
+# Memory trophies' digits, "rises" and "within" (Pico W): a score kept as 6 characters read as one
+# number (23310d6), "rises 400" (up by 400 within the trophy's 2 seconds), and "within = 2" (a
+# grenade thrown counts for 2 seconds after). A throw alone, or a throw with 200 points, does not
+# win it; a throw with 400 points does. Then one made on Y's screen: D (digits), 0 (rises), W.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Trophies/Alpha.txt {HERE}/tr-rises.txt
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23300 5
+poke 23310 48
+poke 23311 48
+poke 23312 48
+poke 23313 48
+poke 23314 48
+poke 23315 48
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+expect Good Arm!
+expect 23300 down and 1 more in 2s
+# C, 4: 23320, D five times (6 digits), 0 (rises), 400, at once, named as given
+key c
+wait 20
+key 4
+wait 20
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 2
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect When 23320 (a byte):
+expect 0  rises by a number or more
+key d
+wait 10
+expect When 23320d2 (2 digits):
+key d
+wait 10
+key d
+wait 10
+key d
+wait 10
+key d
+wait 10
+expect When 23320d6 (6 digits):
+key 0
+wait 20
+expect When 23320d6 rises
+key 4
+wait 10
+key 0
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect Within how many seconds must
+key 0
+wait 10
+key ENTER
+wait 20
+expect 23320d6 rises 400
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23320d6 rises 400
+# W: within 1 s, then 2 s
+key w
+wait 20
+expect Its peeks true within 1s
+key w
+wait 20
+expect Its peeks true within 2s
+expectfile sd /Trophies/Alpha.txt|within = 2
+expect W-Within
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+clock 1000
+wait 20
+# a throw, no points: not won
+poke 23300 4
+clock 1000
+wait 20
+clock 3000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+# 200 points (000200), a throw a second after: not won (a rise of 200)
+poke 23313 50
+clock 1000
+wait 20
+poke 23300 3
+clock 1000
+wait 20
+clock 3000
+wait 20
+clock 3000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+# a throw, and 400 points with it (000600, as 0-9 not characters now): won
+poke 23300 2
+clock 300
+wait 20
+poke 23310 0
+poke 23311 0
+poke 23312 0
+poke 23313 6
+poke 23314 0
+poke 23315 0
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Good Arm!
+wait 400
+expectfile sd /Trophies/Alpha.won|won = 
+trophies off
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 1 of 2
+expect Last read: 2
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

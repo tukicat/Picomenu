@@ -653,6 +653,90 @@ inline bool table_matches(const uint8_t* ram, const uint8_t* saved, size_t len) 
     return m.ok();
 }
 
+// The top two scores of a table (the trophies: Top of the Table, So Close!): a field of digits
+// at the same place in every entry, its values going down from the first entry. The field is
+// ASCII digits (a space for a leading 0, bit 7 on the last one), digits as 0-9, or packed BCD;
+// the one with the most digits in the most entries wins; ASCII is looked for first, then
+// 0-9, then BCD (ASCII's digits are BCD's too). False if none (a table
+// kept lowest first, or a score as a number).
+// (all: the first TOP_KEEP scores, highest first, for the trophies)
+static const int TOP_KEEP = 10;
+struct Top2 { uint32_t top = 0, second = 0; uint8_t entries = 0; uint32_t all[TOP_KEEP] = {}; uint8_t kept = 0; };
+// (Most games keep their table highest first; a few, Paperboy, lowest first: both are read, and
+// a lowest-first one turned round, so top, second and all[] are always highest first. Highest
+// first wins a tie.)
+inline bool scores_top2(const uint8_t* t, int len, Top2& out) {
+    int best = 0;
+    for (int enc = 0; enc < 3; enc++) {
+        const int lmin = enc == 2 ? 2 : 3, lmax = enc == 2 ? 4 : 8;
+        for (int l = lmin; l <= lmax; l++) {
+            for (int s = l; s <= STRIDE_MAX; s++) {
+                for (int o = 0; o < s && o + l <= len; o++) {
+                    // (the whole of the score: not one that goes on in the byte after it)
+                    if (enc != 2 && o + l < len) {
+                        const uint8_t after = t[o + l];
+                        if (enc == 0 ? ((after & 0x7F) >= '0' && (after & 0x7F) <= '9') : after <= 9) continue;
+                    }
+                    for (int up = 0; up < 2; up++) {
+                        // (up: lowest first. vals: highest first, the first TOP_KEEP; lowest first,
+                        // the last TOP_KEEP read, round and round)
+                        uint32_t prev = up ? 0 : 0xFFFFFFFFu, vals[TOP_KEEP];
+                        int n = 0;
+                        bool varied = false;
+                        for (int at = o; at + l <= len; at += s) {
+                            uint32_t v = 0;
+                            bool ok = true;
+                            for (int i = 0; i < l && ok; i++) {
+                                const uint8_t b = t[at + i];
+                                if (enc == 2) {
+                                    if ((b >> 4) > 9 || (b & 15) > 9) ok = false;
+                                    else v = v * 100 + (uint32_t) ((b >> 4) * 10 + (b & 15));
+                                } else {
+                                    int d;
+                                    if (enc == 0) {
+                                        const uint8_t c = i == l - 1 ? (uint8_t) (b & 0x7F) : b;
+                                        d = c == ' ' && v == 0 ? 0 : c >= '0' && c <= '9' ? c - '0' : -1;
+                                    } else {
+                                        d = b <= 9 ? b : -1;
+                                    }
+                                    if (d < 0) ok = false;
+                                    else v = v * 10 + (uint32_t) d;
+                                }
+                            }
+                            if (!ok || v == 0 || (up ? v < prev : v > prev)) break;    // (a 0: the table has ended)
+                            if (n > 0 && v != prev) varied = true;
+                            if (!up) {
+                                if (n < TOP_KEEP) vals[n] = v;
+                            } else {
+                                vals[n % TOP_KEEP] = v;
+                            }
+                            prev = v;
+                            n++;
+                        }
+                        const int digits = enc == 2 ? l * 2 : l;
+                        // (digits as 0-9 and BCD are easily seen in other bytes: 5 entries for them)
+                        if (n >= (enc == 0 ? ENTRIES_MIN : 5) && varied) {
+                            const int score = n * digits;
+                            if (score > best) {
+                                best = score;
+                                out.entries = (uint8_t) (n > 255 ? 255 : n);
+                                out.kept = (uint8_t) (n < TOP_KEEP ? n : TOP_KEEP);
+                                for (int k = 0; k < out.kept; k++) {
+                                    out.all[k] = up ? vals[(n - 1 - k) % TOP_KEEP] : vals[k];
+                                }
+                                out.top = out.all[0];
+                                out.second = out.kept > 1 ? out.all[1] : 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (best > 0) return true;      // (ASCII first: its digits are BCD's too)
+    }
+    return false;
+}
+
 // The .txt that says where the table is (address and length, decimal)
 inline int write_def(char* out, size_t outsize, uint16_t addr, uint16_t len) {
     return snprintf(out, outsize,

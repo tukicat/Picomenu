@@ -51,6 +51,7 @@ static const size_t BAD_TEXT = 24;      // letters of a line that was not unders
 struct Settings {
     // [Display]
     bool light = false;                 // theme = light: the menus black on white
+    uint8_t trophy_sound = 1;           // a trophy won (a Pico W): 0 off, 1 short, 2 long
     // [Browse]
     uint8_t show_all = SHOW_OFF;
     uint8_t details = SHOW_OFF;
@@ -69,6 +70,7 @@ struct Settings {
     bool double_press = true;           // a double press does something (false: off)
     bool save_on_hold = true;           // save_press: hold (a 1 s hold saves, a double press grabs) or double
     bool hotkeys = false;               // nmi_button: original (the presses above) or hotkeys (held, with a key)
+    uint8_t reset_pin = 0;              // reset_pin: the Pico pin wired to the Spectrum's reset (28), 0 off (2.7.0 test)
     // [Converting]
     bool loading_grab = true;
     // [Waste Bin]
@@ -277,6 +279,14 @@ struct Parser {
                 s.hotkeys = i == 1;
                 return true;
             }
+            if (same(k, kn, "reset_pin")) {
+                // off, or 28: GPIO 28 switches a transistor across the reset button (all the
+                // other pins are the picoFace's, or the Pico W's radio)
+                static const char* const W[] = { "off", "28", nullptr };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.reset_pin = i == 1 ? 28 : 0;
+                return true;
+            }
             if (same(k, kn, "save_press")) {
                 static const char* const W[] = { "double", "hold", nullptr };
                 if ((i = pick(v, vn, W)) < 0) return false;
@@ -296,6 +306,12 @@ struct Parser {
                 static const char* const W[] = { "dark", "light", nullptr };
                 if ((i = pick(v, vn, W)) < 0) return false;
                 s.light = i == 1;
+                return true;
+            }
+            if (same(k, kn, "trophy_sound")) {
+                static const char* const W[] = { "off", "short", "long", nullptr };
+                if ((i = pick(v, vn, W)) < 0) return false;
+                s.trophy_sound = (uint8_t) i;
                 return true;
             }
             return false;
@@ -476,6 +492,9 @@ static const char DEFAULT_SETTINGS[] =
     "[Display]\r\n"
     "# dark or light\r\n"
     "theme = dark\r\n"
+    "# a trophy won (Pico W): off,\r\n"
+    "# short or long\r\n"
+    "trophy_sound = short\r\n"
     "\r\n"
     "[Browse]\r\n"
     "# off, on or last\r\n"
@@ -511,6 +530,9 @@ static const char DEFAULT_SETTINGS[] =
     "# original or hotkeys (hold the\r\n"
     "# button and press a key)\r\n"
     "nmi_button = original\r\n"
+    "# off or 28: a Pico pin wired to\r\n"
+    "# the Spectrum's reset (a transistor)\r\n"
+    "reset_pin = off\r\n"
     "\r\n"
     "[Converting]\r\n"
     "# on or off\r\n"

@@ -1,0 +1,41 @@
+; PicoMenu's trophies for this game: made with Y on the menu, or written here.
+; Each one: [Trophy], name = (18 letters), about = (60 letters), and what wins it:
+;   score = 50000   a new score of 50000 or more in its high score table
+;   top = 1         a new score above the top one the table came with
+;   place = 3       a new score in the top 3 of the table
+;   peek = 23610 >= 3   its memory: an address (decimal, or $5C3A), w for a word,
+;                   & 127 for some of its bits only, then = <> >= <= > <
+;                   and a number, or changed, up, down; up by 1: up by exactly 1;
+;                   not down: it hasn't gone down (with held = 300: for 5 minutes)
+;                   65000d6: 6 bytes as a number's digits; rises 400: up by 400
+;   (up to 4 peeks, all true; match = any: one of them; held = 5: for 5 seconds;
+;   within = 2: each counts as true for 2 seconds after, and rises within them)
+;   need = Top 3: Swimming   won once that trophy of this game is won too: a need
+;                   line for each (or names with commas between); all of them
+; checks = 1 (at the top): its memory is looked at once a second (0 never, up to 10).
+
+[Trophy]
+name = Field Marshal
+about = First place in the table
+place = 1
+
+[Trophy]
+name = General
+about = Into the top 5 of the table
+place = 5
+
+[Trophy]
+name = Lieutenant general
+about = Into the top 10 of the table
+place = 10
+
+[Trophy]
+name = Hoarder
+about = Hold 30 or more grenades
+peek = 64999 >= 30
+
+[Trophy]
+name = Call of duty
+about = Finish the first four stages with three lives left
+peek = 64997 >= 5
+peek = 64998 >= 3

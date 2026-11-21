@@ -1,0 +1,3 @@
+; Paperboy (1986, Elite): ten entries of 9 bytes, the name (A = 33) and 6 digits (0-9), lowest first
+address = 58984
+length = 90

@@ -1,0 +1,9 @@
+checks = 4
+
+[Trophy]
+name = Held
+about = A word or a byte, 3 s
+peek = 23310w >= 1000
+peek = 23312 = 9
+match = any
+held = 3

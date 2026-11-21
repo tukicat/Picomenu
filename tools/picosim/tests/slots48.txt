@@ -1,6 +1,8 @@
-# Save slots. S on the menu shows the game's nine slots (/Save Games/<game>); a number saves to
-# one (asking before saving over one); L labels a slot (an empty one is saved with the label);
-# the button held a second opens them with no menu; V shows a slot's screen; E erases one (to the Waste Bin);
+# Save slots. S on the menu shows the game's nine slots (/Save Games/<game>) as pictures: the
+# chosen one large, the nine in a grid (an empty one a box with its number); O P Q A choose;
+# ENTER or a number saves to one (asking before saving over one); L labels the chosen slot (an
+# empty one is saved with the label); the button held a second opens them as a list, with no
+# menu; V shows the chosen slot's screen; E erases it (to the Waste Bin);
 # S goes on to the Save snapshot screen. Loading a game with slots asks: a slot, 0 the game
 # itself, or BREAK back to the list. A slot loaded is still the game's (S shows its slots).
 sd /48.rom {ROM48}
@@ -20,9 +22,14 @@ wait 30
 key s
 wait 30
 expect Save slots: Alpha
-expect 2 - empty -
-expect L-Label  V-View  E-Erase
-key 2
+expect Slot 1: empty - save here
+expect L-Label  V-Full size  E-Erase
+expect O P Q A Choose  ENTER Save
+# P: slot 2 chosen; ENTER saves there (empty: no question)
+key p
+wait 20
+expect Slot 2: empty - save here
+key ENTER
 wait 100
 get sd /Save Games/Alpha/Slot 2.sna {OUT}/slot2.sna
 ls sd /Save Games/Alpha
@@ -31,19 +38,15 @@ nmi
 wait 30
 key s
 wait 30
-expect 2 Saved game
-expect last
+expect Slot 2: Saved game (last)
 key 2
 wait 20
 expect Save over slot 2?
 key n
 wait 20
 expectnot Save over slot 2?
-# a label for slot 2
+# a label for slot 2 (the chosen one)
 key l
-wait 20
-expect Label which slot? 1-9
-key 2
 wait 20
 expect Label for slot 2:
 key z
@@ -57,14 +60,16 @@ wait 5
 key ENTER
 wait 30
 expect Label saved
-expect 2 zone
+expect Slot 2: zone (last)
 get sd /Save Games/Alpha/Slot 2 - zone.sna {OUT}/slot2.sna
 nofile sd /Save Games/Alpha/Slot 2.sna
-# a label for an empty slot saves it at once
+# a label for an empty slot saves it at once: A (down) to slot 5
+key a
+wait 20
+expect Slot 5: empty - save here
 key l
 wait 20
-key 5
-wait 20
+expect Label for slot 5:
 key b
 wait 5
 key ENTER
@@ -75,6 +80,8 @@ get sd /Save Games/Alpha/Slot 5 - b.sna {OUT}/slot5.sna
 nmihold
 wait 30
 expect Save slots: Alpha
+expect 5 b
+expect X-Exit
 expectnot B-Browse
 key 5
 wait 20
@@ -90,29 +97,43 @@ nmi
 wait 30
 key s
 wait 30
-expect 5 b
-key v
+expect Slot 5: b (last)
+# Q: up to slot 2; V its screen
+key q
 wait 20
-key 2
+expect Slot 2: zone
+key v
 wait 30
 expectnot Save slots
 key SPACE
 wait 30
 expect Save slots: Alpha
-key v
+# O O, P: slot 1 (O stops there), then 2; down twice to 8: empty, V says so
+key o
 wait 20
-key 7
+key o
+wait 20
+expect Slot 1: empty - save here
+key p
+wait 20
+key a
+wait 20
+key a
+wait 20
+expect Slot 8: empty - save here
+key v
 wait 30
 expect That slot is empty
-key e
+key q
 wait 20
-key 5
+expect Slot 5: b (last)
+key e
 wait 20
 expect Erase slot 5?
 key y
 wait 30
 expect Moved to the Waste Bin
-expect 5 - empty -
+expect Slot 5: empty - save here
 nofile sd /Save Games/Alpha/Slot 5 - b.sna
 get sd /Waste Bin/Slot 5 - b.sna {OUT}/slot5.sna
 # S: the Save snapshot screen
@@ -129,50 +150,47 @@ wait 50
 key 1
 wait 50
 expect Saved games: Alpha
-expect 2 zone
-expectnot - empty -
-expect 0   Start the game
-expect V   View a slot's screen
-# V: a slot's own screen, any key back to the question (not loading that slot)
+expect Slot 2: zone
+expect 0       Start the game
+expect V-Full size  E-Erase
+expect O P Q A Choose  ENTER Carry on
+# V: the chosen slot's own screen, any key back to the question (not loading that slot)
 key v
-wait 20
-expect View which slot? 1-9
-key 2
 wait 30
 expectnot Saved games: Alpha
 key 1
 wait 30
 expect Saved games: Alpha
-expectnot View which slot?
-# V then an empty slot, and V then BREAK: the question stays
-key v
+# an empty slot: V and ENTER say so, and the question stays
+key a
 wait 20
-key 9
+expect Slot 5: empty
+key v
+wait 30
+expect That slot is empty
+key ENTER
 wait 30
 expect That slot is empty
 expect Saved games: Alpha
-key v
+key q
 wait 20
-key BREAK
-wait 30
-expect Saved games: Alpha
-expectnot View which slot?
 # BREAK: back to the list
 key BREAK
 wait 50
 expect Browse Games
 expect 1-Alpha
-# 2: slot 2
+# ENTER: the chosen slot (2, the last one saved)
 key 1
 wait 50
-key 2
+expect Slot 2: zone
+key ENTER
 wait 150
 nmi
 wait 30
 key s
 wait 30
 expect Save slots: Alpha
-expect 2 zone
+expect Slot 2: zone
 key x
 wait 30
 # 0: the game itself

@@ -19,10 +19,11 @@ pokestr 0xE800 SCOTT   012345ANDY    010000
 checkpoint
 wait 20
 nofile sd /High Scores/Alpha.bin
-# leaving it (a reset): asked, as there is no .bin yet; Y makes it
+# leaving it (a reset, to 48K: on a 48K Spectrum Reset to 128K says there is no 128K memory)
+# asked, as there is no .bin yet; Y makes it
 nmi
 wait 30
-key 1
+key 4
 wait 30
 key y
 wait 60
@@ -51,7 +52,7 @@ nmi
 wait 30
 key a
 wait 40
-key 1
+key ENTER
 wait 60
 expect Save the high scores before
 expectnot BREAK  Back to the game

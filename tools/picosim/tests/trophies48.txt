@@ -1,0 +1,248 @@
+# Trophies (Pico W, Y - Your trophies): each game's own, in /Trophies/<game>.txt, made on Y's
+# screen (or written on a PC). What has been won, and the scores the game's high score table had,
+# are in /Trophies/<game>.won. This version's trophies are won by a new score in the table when
+# it is saved: a score of N or more, above the top score the table came with, or in the top N.
+# A trophy won shows a banner over the game's bottom rows a few seconds after the game is back
+# (the simulator: with trophies on). The game's I screen (and V in Browse) says how many are won.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /High Scores/Alpha.txt {HERE}/hs-alpha.txt
+boot
+nmi
+wait 30
+expect Y-Your trophies
+key t
+wait 30
+key y
+wait 30
+expect No game is running.
+key x
+wait 30
+key x
+wait 30
+# Alpha loaded: no trophies yet
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+expect No trophies for this game yet.
+# C, 1: a score to reach (15000), its name as given (Score 15000)
+key c
+wait 20
+expect What wins it?
+key 1
+wait 20
+expect The score to reach:
+key 1
+wait 10
+key 5
+wait 10
+key 0
+wait 10
+key 0
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect A score of 15000 or more
+expect Score 15000_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect Made: Y shows it when it is won
+expect Score 15000
+expect 0 of 1
+expectfile sd /Trophies/Alpha.txt|name = Score 15000
+expectfile sd /Trophies/Alpha.txt|score = 15000
+# C, 2: above the top score (named Top of the Table)
+key c
+wait 20
+key 2
+wait 20
+expect Top of the Table_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expectfile sd /Trophies/Alpha.txt|top = 1
+# C, 3: in the top 2, named by hand (DELETE then letters)
+key c
+wait 20
+key 3
+wait 20
+key 2
+wait 10
+key ENTER
+wait 20
+expect Top 2_
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key DELETE
+wait 10
+key r
+wait 10
+key u
+wait 10
+key n
+wait 10
+key n
+wait 10
+key e
+wait 10
+key r
+wait 10
+expect runner_
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect 0 of 3
+expectfile sd /Trophies/Alpha.txt|name = runner
+expectfile sd /Trophies/Alpha.txt|place = 2
+key x
+wait 30
+key x
+wait 60
+key x
+wait 30
+# a high score table (where Alpha.txt says): saved when leaving the game (loading it again,
+# "Save the high scores...?" Y). The first one saved is the table as the game came: nothing won
+pokestr 0xE800 SCOTT   012345ANDY    010000BEN     008000CLAIRE  006000DAVE    004000
+snapsave {OUT}/trophy-table.sna
+sd /Games/Alpha.sna {OUT}/trophy-table.sna
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Save the high scores
+key y
+wait 50
+key y
+wait 300
+expectfile sd /Trophies/Alpha.won|base = 12345 10000 8000 6000 4000
+expectfile sd /Trophies/Alpha.won|last = 12345 10000 8000 6000 4000
+# a new 11000, second: runner (in the top 2), not Score 15000 nor Top of the Table
+pokestr 0xE800 SCOTT   012345EVE     011000ANDY    010000BEN     008000CLAIRE  006000
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Save the high scores
+key y
+wait 50
+key y
+wait 300
+expectfile sd /Trophies/Alpha.won|last = 12345 11000 10000 8000 6000
+expectfile sd /Trophies/Alpha.won|won =
+# the banner, once the game has been back a few seconds; then the game's rows again
+trophies on
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect runner
+expect Into the top 2 of the table
+wait 400
+expectnot TROPHY UNLOCKED!
+trophies off
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 1 of 3
+key x
+wait 30
+key x
+wait 60
+key x
+wait 30
+# a new 20000 at the top: Score 15000 and Top of the Table
+pokestr 0xE800 FAY     020000SCOTT   012345EVE     011000ANDY    010000BEN     008000
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Save the high scores
+key y
+wait 50
+key y
+wait 300
+trophies on
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect and 1 more: Y on the menu
+wait 400
+trophies off
+# Y: 3 of 3; D deletes the one chosen (Top of the Table, the second)
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect 3 of 3
+expect Won
+key a
+wait 20
+expect Beat the table
+key d
+wait 20
+expect Delete Top of the Table?
+key y
+wait 30
+expect Deleted
+expect 2 of 2
+expectnot Top of the Table
+expectfile sd /Trophies/Alpha.txt|name = runner
+key x
+wait 30
+key x
+wait 30
+# I on the menu (the running game): its trophies on the first page
+key i
+wait 50
+expect Trophies 2/2
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30

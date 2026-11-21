@@ -1,0 +1,73 @@
+# The Poke Finder's W: a word value (0 to 65535) as two pokes, the low byte at the address and
+# the high byte after it. 23340-23341 hold 259 (3, 1); 9999 is 15 and 39.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Poke List/Alpha.pok {HERE}/pv-alpha.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 3
+poke 23341 1
+nmi
+wait 30
+key p
+wait 30
+key f
+wait 30
+key 5
+wait 20
+key 2
+wait 6
+key 3
+wait 6
+key 3
+wait 6
+key 4
+wait 6
+key 0
+wait 6
+key ENTER
+wait 30
+key m
+wait 20
+expect W-Word
+key w
+wait 20
+expect 23340w has 259. Word to poke:
+expect W-Byte
+key 9
+wait 6
+key 9
+wait 6
+key 9
+wait 6
+key 9
+wait 6
+shot {OUT}/pw-word.scr
+key ENTER
+wait 20
+expect 23340 = 15  (was 3)
+expect 23341 = 39  (was 1)
+key ENTER
+wait 20
+key ENTER
+wait 20
+key m
+wait 40
+expect Look it up in ZXDB
+expectmem 23340 15
+expectmem 23341 39
+expectfile sd /Poke List/Alpha.pok|M  8 23340  15   3
+expectfile sd /Poke List/Alpha.pok|Z  8 23341  39   1
+key x
+wait 20

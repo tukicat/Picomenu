@@ -1,0 +1,13 @@
+checks = 1
+
+[Trophy]
+name = Two peeks
+about = A test of the edit screen
+peek = 23340 >= 128
+peek = 23341 = 5
+within = 1
+
+[Trophy]
+name = Score 5000
+about = A score of 5000
+score = 5000

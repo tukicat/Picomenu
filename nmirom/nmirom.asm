@@ -414,6 +414,18 @@ ACTION_HOTKEY equ 0x35
 // The code the pico puts in to give a game its saved high score table (picoface.cxx's
 // hs_restore_code) has read what is there now: status 1 if it is like the table (it is put in)
 ACTION_HS_CHECK equ 0x36
+// Y - Your trophies (a Pico W): the pico draws the screen and takes the keys (picoscreen).
+// BYTE param1 = the key (0: opened). Status 0 the screen stays, 1 closed
+// From Tools (.intools set) or the hotkey Y it is the Trophy creator: making them as well.
+ACTION_TROPHIES equ 0x37
+// V on the poke list (a Pico W): a cheat's pokes shown, made, or one's address made a trophy,
+// on the pico's screens (picoscreen). BYTE param1 = the key (0: opened). Status 0 stays, 1 closed
+ACTION_POKE_VIEW equ 0x38
+// F on the Poke screen (a Pico W): the Poke Finder. Status 2: the Trophy creator's search, opened
+// as for finding a poke (picoscreen ACTION_TROPHIES); 1 closed (the standard firmware)
+ACTION_POKE_FIND equ 0x39
+// D on the poke list: the pico's screens delete a cheat from the game's .pok
+ACTION_POKE_DELETE equ 0x3A
 // Saves the game's screen (the pico has it from when the menu opened) in the folder
 // Scraper/Screen Grabs of the SD card, named after the game last loaded and the category.
 // WORD param1 = where the pico writes its message, "Saved as <name>" (40 bytes)
@@ -1206,6 +1218,11 @@ startmenu:
     call screenbelowmenu    // the game's screen again below the menu
     jp .showtopscreen
 
+// Y: Your trophies (a Pico W), the pico's screen; Y in Tools, the Trophy creator (the pico sees
+// .intools set; the hotkey Y comes here too, and the pico knows it)
+.handle_trophies:
+    ld c, ACTION_TROPHIES
+    BYTE 0x21               // (LD HL,nn: the LD C,n below is skipped)
 // V: the Virtual Tape Player (the tape position). The pico draws the screen and does what the keys say, until it
 // says the screen is closed
 .handle_tape:
@@ -1561,15 +1578,23 @@ startmenu:
     ld hl, .updatefail3
     jr .updatestop
 .updatedone:
+    // what to do now: four lines the Pico put in spare_space before it started (it can't
+    // after: its flash is the new firmware's), the reset buttons, or wait for its own reset
     call clearscreen
     ld de, 0x0401
     ld hl, .updatedonemsg
     call putstring
     ld de, 0x0601
-    ld hl, .updatedone2
+    ld hl, spare_space
     call putstring
     ld de, 0x0701
-    ld hl, .updatedone3
+    ld hl, spare_space + 32
+    call putstring
+    ld de, 0x0801
+    ld hl, spare_space + 64
+    call putstring
+    ld de, 0x0901
+    ld hl, spare_space + 96
 .updatestop:
     call putstring
     ld hl, .updatespin      // the Pico is about to restart: wait in RAM, not in its ROM
@@ -1676,7 +1701,9 @@ startmenu:
     MENU_ITEM 'a', 14, 2, .checkpointsmsg, .handle_checkpoints
     MENU_ITEM 't', 15, 2, .toolsmsg, .handle_tools
     MENU_ITEM 'z', 16, 2, .zxdbmsg, .handle_zxdb
-    MENU_ITEM 'x', 17, 2, .exitmsg,  .handle_exit
+.trophyitem                     // (the standard Pico's firmware sets its bit 7: not shown)
+    MENU_ITEM 'y', 17, 2, .trophymsg, .handle_trophies
+    MENU_ITEM 'x', 18, 2, .exitmsg,  .handle_exit
     MENU_END
 // T: Tools, the things used now and then. Each goes back to this menu when it is done
 // (.showtopscreen comes here while .intools is set); X goes back to the NMI menu.
@@ -1690,10 +1717,14 @@ startmenu:
     MENU_ITEM 'f', 8, 2, .wifimsg, .handle_wifi
     MENU_ITEM 'b', 9, 2, .btmsg, .handle_bt
     MENU_ITEM 'e', 10, 2, .assetsmsg, .handle_assets
-    MENU_ITEM 'x', 11, 2, .backmsg, .handle_toolsback
+.trophymakeritem                // (the standard Pico's firmware sets its bit 7: not shown)
+    MENU_ITEM 'y', 11, 2, .trophymakermsg, .handle_trophies
+    MENU_ITEM 'x', 12, 2, .backmsg, .handle_toolsback
     MENU_END
 .toolsmsg: DZ "Tools"
 .zxdbmsg: DZ "Search ZXDB"
+.trophymsg: DZ "Your trophies"
+.trophymakermsg: DZ "Trophy creator"
 .exitmsg: DZ "Exit"                 // (X on the menu: leave it, back to the game)
 .optionsmsg: DZ "Options"
 .batchmsg: DZ "Batch convert"
@@ -1734,8 +1765,6 @@ startmenu:
 .updatestep1: DZ "1 of 2  Copying the update"
 .updatestep2: DZ "2 of 2  Writing the PicoMenu"
 .updatedonemsg: DZ "Update complete"
-.updatedone2: DZ "Switch the Spectrum off"
-.updatedone3: DZ "and on again."
 .updatefailmsg: DZ "Update failed"
 .updatefail2: DZ "Hold BOOTSEL, plug in USB,"
 .updatefail3: DZ "copy the .uf2 to RPI-RP2."
@@ -2091,9 +2120,9 @@ changeromscreen:
 .startpos WORD 0
 .titlemsg DZ "Change Rom"
 .snap0 BYTE 0
-.exit equ pokescreen.listkeys + 20     // "Back" (the end of the poke list's keys)
+.exit equ pokescreen.listkeys + 28     // "Back" (the end of the poke list's keys)
 .next DZ "Next"
-.prev DZ "Previous"
+.prev equ loadscreen.prev            // the same text ("Prev")
 .writablemsg DZ "Writable [ ]"
 
 .menu     
@@ -2742,9 +2771,7 @@ loadscreen:
     xor a       // changing directory ends a search
     ld (.findtext), a
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 1), ACTION_SNAP_CHDIR
     call waitpico
     ld de, 0
@@ -2959,9 +2986,7 @@ loadscreen:
     jp z, .showthemenu
     ld ix, 0
     ld hl, .editbuf
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 1), ACTION_SNAP_MKDIR
     call waitpico
     or a
@@ -3068,9 +3093,7 @@ loadscreen:
     pop af
     jr c, .pickfailed
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 5), ACTION_SNAP_MOVE_OP_PICK
     ld (ix + 1), ACTION_SNAP_MOVE
     call waitpico
@@ -3083,9 +3106,7 @@ loadscreen:
 .movehere
     ld ix, 0
     ld hl, spare_space + MOVE_INFO
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 5), ACTION_SNAP_MOVE_OP_DESCRIBE
     ld a, (.moving)
     ld (ix + 6), a          // 1 moving, 2 copying (for a folder)
@@ -3222,9 +3243,7 @@ loadscreen:
     jp c, .pickfailed
     ld (.picked), hl
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, spare_space + MOVE_INFO
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_RENAME_OP_DESCRIBE
@@ -3252,9 +3271,7 @@ loadscreen:
     jp z, .refresh
     ld ix, 0
     ld hl, (.picked)
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, .editbuf
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_RENAME_OP_DO
@@ -3276,9 +3293,7 @@ loadscreen:
     jp c, .pickfailed
     ld (.picked), hl
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 1), ACTION_SNAP_PREVIEW
     call waitpico          // whatever it found, the information is shown
     cp 3                    // ... but V is only for games
@@ -3304,9 +3319,7 @@ loadscreen:
     call .pickfile
     jp c, .pickfailed
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, spare_space + MOVE_INFO
     ld (ix + 5), hl
     ld (ix + 1), ACTION_TAPE_INSERT
@@ -3332,9 +3345,7 @@ loadscreen:
     call .pickfile
     jp c, .pickfailed
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 5), ACTION_SNAP_MOVE_OP_FAVOURITE
     ld (ix + 1), ACTION_SNAP_MOVE
     call waitpico
@@ -3363,9 +3374,7 @@ loadscreen:
     jp c, .pickfailed
     ld (.picked), hl
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, spare_space + MOVE_INFO
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DESCRIBE
@@ -3376,7 +3385,7 @@ loadscreen:
     cp FILEOP_IS_ROM        // 6 to 10 are a ROM file or a protected folder
     jr c, 1F
     cp FILEOP_IS_PROTECTED + 1
-    jp c, .eraseprotected
+    jr c, .eraseprotected
 1:  or a
     jp nz, .refresh
     call clearscreen
@@ -3410,9 +3419,7 @@ loadscreen:
     call waitforkeyrelease
     ld ix, 0
     ld hl, (.picked)
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DO
     ld (ix + 1), ACTION_SNAP_ERASE
     call waitpico
@@ -3472,9 +3479,7 @@ loadscreen:
     jp .movedo
 1:  ld ix, 0
     ld hl, (.picked)
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, .editbuf
     ld (ix + 5), hl
     ld (ix + 7), ACTION_SNAP_ERASE_OP_DO
@@ -3512,9 +3517,7 @@ loadscreen:
 .sendfind:
     ld ix, 0
     ld hl, .findtext
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld (ix + 1), ACTION_SNAP_FIND
     call waitpico
     ld de, 0
@@ -3570,9 +3573,7 @@ loadscreen:
     pop af
     jp c, .pickfailed
     ld ix, 0
-    ld (ix + 2), hl
-    ld a, (.drive)
-    ld (ix + 4), a
+    call .pathdrive
     ld hl, spare_space + MOVE_INFO
     ld (ix + 5), hl
     ld (ix + 1), ACTION_SNAP_HIDE
@@ -3597,6 +3598,13 @@ loadscreen:
     ld (ix + 1), ACTION_SNA_SAVE_DIR
     jp waitpico
 
+// (ix = 0) hl, the path, as param1 and the drive being browsed as param3, for the actions
+// that take a path
+.pathdrive
+    ld (ix + 2), hl
+    ld a, (.drive)
+    ld (ix + 4), a
+    ret
 .drive BYTE 1                       // the SD card, unless there is none
 .startpos WORD 0
 .choosing BYTE 0                    // non-zero when choosing where to save
@@ -3621,13 +3629,13 @@ loadscreen:
 .emptymsg DZ "Empty"
 .hidewhich DZ "Hide or show which? 1-0"
 .snap0 BYTE 0
-.exit equ pokescreen.listkeys + 20     // "Back" (the end of the poke list's keys)
+.exit equ pokescreen.listkeys + 28     // "Back" (the end of the poke list's keys)
 .next equ changeromscreen.next         // the same text
 .prev DZ "Prev"
 .sdcard DZ "SD Card"
 .intflash DZ "Internal Flash"
 .up DZ "Up"
-.dotdot DZ ".."
+.dotdot equ .choosetitle + 18     // "..", the end of "Save snapshots in..."
 .find equ .labelfind         // the same text
 .clear DZ "Clear"
 .findtitle DZ "Find a game"
@@ -3976,15 +3984,18 @@ savesnapshotscreen:
 
 // Shows the type of file at the end of the Border line
 .showtype
+    ld hl, .typelabel
+    ld de, 0x0612
+    call putstring
     ld hl, .typeauto
     ld a, (.savetype)
     or a
     jr z, 2F
     ld b, a
-    ld de, 11
+    ld de, 5
 1:  add hl, de
     djnz 1B
-2:  ld de, 0x0612
+2:  ld de, 0x0618
     call putstring
     ld de, 0x0618           // auto, .sna, .z80, .szx or same: bright yellow
     ld b, 4
@@ -4129,11 +4140,12 @@ savesnapshotscreen:
 .help4 DZ "Shift 9 changes where it goes"
 .help5 DZ "Sym Shift R or T changes the"
 .help6 DZ "file type (.sna .z80 .szx)"
-.typeauto DZ "Type: auto"      // each 11 bytes
-.typesna DZ "Type: .sna"
-.typez80 DZ "Type: .z80"
-.typeszx DZ "Type: .szx"
-.typesame DZ "Type: same"
+.typelabel DZ "Type: "
+.typeauto DZ "auto"            // each 5 bytes
+.typesna DZ ".sna"
+.typez80 DZ ".z80"
+.typeszx DZ ".szx"
+.typesame DZ "same"
 .savetolabel DZ "Save to:"
 .saveerror DZ "Snapshot not saved"
 .namelabel equ loadscreen.folderlabel         // the same text
@@ -4491,7 +4503,7 @@ pokescreen:
 .listgot
     call clearscreen
     ld de, 0x0101
-    ld hl, .listtitle
+    ld hl, spare_space + 22     // the title, from the pico ("Poke list", and any cheats not shown)
     call putstring
     ld a, (spare_space)
     ld b, a
@@ -4531,7 +4543,7 @@ pokescreen:
     call .listnames
     xor a
     ld (text_attr), a
-    ld de, BAR_ROW * 256 + 2
+    ld de, BAR_ROW * 256
     ld hl, .listkeys
     call putstring
 .listkey
@@ -4544,6 +4556,10 @@ pokescreen:
     jr z, .listnext
     cp 'p'
     jr z, .listprev
+    cp 'v'
+    jr z, .listview
+    cp 'd'
+    jr z, .listdelete
     cp '0'
     jr c, .listkey
     cp '9' + 1
@@ -4563,6 +4579,21 @@ pokescreen:
     call waitforkeyrelease
     pop hl
     jr .listapply
+// D: delete a cheat (the pico's screens), then the list again from the start (read again)
+.listdelete
+    call waitforkeyrelease
+    ld c, ACTION_POKE_DELETE
+    xor a
+    call .picothentrophies
+    jp .handle_list
+
+.listview
+    call waitforkeyrelease
+    ld c, ACTION_POKE_VIEW
+    xor a
+    call .picothentrophies
+    jp .listshow
+
 .listexit
     call waitforkeyrelease
     jp .showtopscreen
@@ -4721,6 +4752,35 @@ pokescreen:
     xor a
     ret
 
+// F: the Poke Finder (the Trophy creator's search, its finds made cheats in the game's .pok)
+.handle_finder:
+    ld c, ACTION_POKE_FIND
+    xor a
+    call .picothentrophies
+    jp .showtopscreen
+
+// A pico's screen (c the action); status 2 then opens the Trophy creator (as NMI+Y does). Then
+// rows 22 and 23, which the pico's screens use and clearscreen leaves, have their pixels cleared
+.picothentrophies
+    call picoscreen
+    cp 2
+    jr nz, 3F
+    ld c, ACTION_TROPHIES
+    xor a
+    call picoscreen
+3:  ld hl, SCREEN + 0x10C0
+    ld c, 8
+1:  ld b, 64
+    push hl
+2:  ld (hl), 0
+    inc hl
+    djnz 2B
+    pop hl
+    inc h
+    dec c
+    jr nz, 1B
+    ret
+
 // Waits for a key like waitforkeypress, and meanwhile scrolls the names that are too long
 .listwait
     call getkeypress
@@ -4847,7 +4907,7 @@ pokescreen:
 .skipcount BYTE 0
 .askvalue BYTE 0
 .listtitle DZ "Poke list"
-.listkeys DZ "1-0 Poke N/P-Page X-Back"
+.listkeys DZ "1-0 Poke V-View D-Del N/P X-Back"
 .nopoklist DZ "No .pok in Poke List"
 .askinput WORD .asktitle, .asklabel, .askhelp1, .askhelp2
     BYTE 3, 0
@@ -4872,15 +4932,17 @@ pokescreen:
     MENU_ITEM 'p', 7, 2, .pokemsg, .handle_poke
     MENU_ITEM 'l', 9, 2, .listmsg, .handle_list
     MENU_ITEM 'z', 11, 2, .zxdbmsg, .handle_zxdb
-    MENU_ITEM 'x', 13, 2, .exitmsg,  .handle_exit
+    MENU_ITEM 'f', 13, 2, .findermsg, .handle_finder
+    MENU_ITEM 'x', 15, 2, .exitmsg,  .handle_exit
     MENU_END
 .listmsg equ .listtitle             // "Poke list"
 .zxdbmsg DZ "Look it up in ZXDB"
+.findermsg DZ "Poke Finder"
 .title DZ "Apply Poke"
 .addressmsg: DZ "Address: "
 .valuemsg: DZ "Value: "
 .pokemsg equ .title + 6                // "Poke", of "Apply Poke"
-.exitmsg equ .listkeys + 20            // "Back", of "1-0 Poke N/P-Page X-Back"
+.exitmsg equ .listkeys + 28            // "Back", of "1-0 Poke V-View D-Del N/P X-Back"
 
 
 
@@ -6526,7 +6588,7 @@ sna_header: BLOCK Z80X_SIZE
 
 // Messages that are the ends of longer ones (defined after those, so their places are known)
 startmenu.chamgemsg equ loadscreen.romnotice + 13   // "Change ROM", of "A ROM: use C-Change ROM"
-startmenu.backmsg equ pokescreen.listkeys + 20      // "Back", of "1-0 Poke N/P-Page X-Back"
+startmenu.backmsg equ pokescreen.listkeys + 28      // "Back", of "1-0 Poke V-View D-Del N/P X-Back"
 startmenu.pokemsg equ pokescreen.title + 6          // "Poke", of "Apply Poke"
 
 // Hotkeys: 1 while the button is held (the pico keeps it), see hotkeys

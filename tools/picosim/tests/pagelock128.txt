@@ -1,0 +1,56 @@
+# The 128K memory locked (port 0x7FFD bit 5, as 48 BASIC or a 48K game leaves it): a 128K game
+# picked in Browse Games, or Reset to 128K, would end in 48 BASIC. With no reset pin, PicoMenu
+# tests the paging first and says to press the reset button; any key goes back to the game.
+# A 48K game still loads, and once the paging works again (here: unlocked by hand, as after a
+# real reset) the 128K game loads.
+sd /48.rom {ROM48}
+sd /Games/A Mikie.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+sd /Games/B Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+page 0x30
+expectlocked 1
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 2
+wait 80
+expect Can't load: 128K memory locked
+expect reset button, then load again
+key n
+wait 30
+expectlocked 1
+expectnot Can't load
+# Reset to 128K: the same
+nmi
+wait 30
+key 1
+wait 30
+key y
+wait 80
+expect Can't load: 128K memory locked
+key n
+wait 30
+expectresets 0
+# a 48K game loads as before
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 200
+expectnot Can't load
+# the reset button: the paging works again, and the 128K game loads
+hardreset
+nmi
+wait 30
+key b
+wait 50
+key 2
+wait 300
+expectnot Can't load
+expectlocked 0

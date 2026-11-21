@@ -1,0 +1,11 @@
+checks = 1
+
+[Trophy]
+name = Score 1540
+about = A score of 1540 or more
+score = 1540
+
+[Trophy]
+name = Top Three
+about = Into the top 3 of the table
+place = 3

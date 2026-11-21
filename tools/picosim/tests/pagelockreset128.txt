@@ -1,0 +1,78 @@
+# The 128K memory locked, with the reset pin (reset_pin = 28: GPIO 28 switches a transistor across
+# the picoFace's reset button): a 128K game picked in Browse Games goes back to the game, the
+# Spectrum is reset (the pin held 150 ms, the paging then unlocked), and 2 s later the game loads
+# by itself. Reset to 128K is the reset alone. A load that doesn't need 128K never resets.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/reset-pin.ini
+sd /Games/A Mikie.z80 {TAPES}/Mikie_1985ImagineSpeedLock_1-48.z80
+sd /Games/B Athena.z80 {TAPES}/Athena_1987Imagine128KSpeedLock_4-128.z80
+boot
+page 0x30
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 2
+wait 80
+expectnot Can't load
+wait 10
+clock 200
+wait 10
+expectresets 1
+expectlocked 0
+wait 100
+clock 2100
+wait 300
+expectlocked 0
+expect7ffd 0x10
+expectresets 1
+# Reset to 128K, locked again: the reset alone
+page 0x30
+nmi
+wait 30
+key 1
+wait 30
+key y
+wait 30
+clock 200
+wait 10
+expectresets 2
+expectlocked 0
+clock 2100
+wait 150
+# a 48K game: no test, no reset
+page 0x30
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 200
+clock 2500
+wait 20
+expectresets 2
+# Recently played (the snapshot made ready first): reset, then it loads
+page 0x30
+nmi
+wait 30
+key e
+wait 50
+key 2
+wait 80
+clock 200
+wait 10
+expectresets 3
+clock 2100
+wait 300
+expectlocked 0
+expect7ffd 0x10
+# the long press, with the pin: a real reset (no snapshot), the paging unlocked
+page 0x30
+button long 3000
+wait 10
+clock 200
+wait 10
+expectresets 4
+expectlocked 0

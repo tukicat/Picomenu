@@ -1,0 +1,32 @@
+; PicoMenu's trophies for this game: made with Y on the menu, or written here.
+; Each one: [Trophy], name = (18 letters), about = (60 letters), and what wins it:
+;   score = 50000   a new score of 50000 or more in its high score table
+;   top = 1         a new score above the top one the table came with
+;   place = 3       a new score in the top 3 of the table
+;   peek = 23610 >= 3   its memory: an address (decimal, or $5C3A), w for a word,
+;                   & 127 for some of its bits only, then = <> >= <= > <
+;                   and a number, or changed, up, down; up by 1: up by exactly 1;
+;                   not down: it hasn't gone down (with held = 300: for 5 minutes)
+;                   65000d6: 6 bytes as a number's digits; rises 400: up by 400
+;   (up to 4 peeks, all true; match = any: one of them; held = 5: for 5 seconds;
+;   within = 2: each counts as true for 2 seconds after, and rises within them)
+;   need = Top 3: Swimming   won once that trophy of this game is won too: a need
+;                   line for each (or names with commas between); all of them
+; checks = 1 (at the top): its memory is looked at once a second (0 never, up to 10).
+
+[Trophy]
+name = Made a Monkey
+about = Make 500 credits
+peek = 53352w >= 5000
+peek = 53350w >= 1
+match = any
+
+[Trophy]
+name = Grand in the hand
+about = Made 1000 credits
+peek = 53350w >= 1
+
+[Trophy]
+name = On the way...
+about = Reach rating of "mostly harmless"
+peek = 53345 >= 9

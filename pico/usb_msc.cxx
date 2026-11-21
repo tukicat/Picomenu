@@ -33,6 +33,10 @@ void usb_msc_set_command_active(bool active) {
 }
 
 static bool hook_pico_idle() {
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+    // the log build: the card stays with the Spectrum, the PC only gets the serial log
+    return false;
+#endif
     return !command_active && !pico_sd_in_use();
 }
 

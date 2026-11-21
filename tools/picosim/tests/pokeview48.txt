@@ -1,0 +1,110 @@
+# V on the poke list (Pico W): a cheat's pokes (address, bank, value, what was there, what is
+# there now), ENTER making them (one asking for its value), one in another bank not made, and T
+# with a line's number making a trophy at its address in the Trophy creator.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Poke List/Alpha.pok {HERE}/pv-alpha.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23340 53
+poke 23341 39
+poke 23342 7
+nmi
+wait 30
+key p
+wait 30
+key l
+wait 30
+expect 1-0 Poke V-View D-Del N/P X-Back
+key v
+wait 30
+expect View which cheat? 1-0
+expect 1 Infinite lives
+key 1
+wait 30
+expect Poke: Infinite lives
+expect # Address Bank Poke Was  Now
+expect  1 23340   -    0    53   53
+expect  2 23341   -    0    39   39
+shot {OUT}/pokeview.scr
+key ENTER
+wait 30
+expect Poked 2: X goes back
+expect  1 23340   -    0    53   0
+key x
+wait 20
+expect View which cheat? 1-0
+key 2
+wait 30
+expect  1 23342   -    ask  7    7
+key ENTER
+wait 20
+expect Its value (0-255):
+key 9
+wait 6
+key 9
+wait 6
+key ENTER
+wait 30
+expect Poked 1: X goes back
+expect  1 23342   -    ask  7    99
+key x
+wait 20
+key 3
+wait 30
+expect  1 49152   1    9    0    -
+key ENTER
+wait 30
+expect Poked 0 (1 need a bank)
+key t
+wait 20
+expect Trophy from which line? 1-9
+key 1
+wait 20
+expect Not readable here: its bank
+key x
+wait 20
+key 1
+wait 30
+key t
+wait 20
+key 2
+wait 30
+expect Creator: Alpha
+expect 23341_
+shot {OUT}/pv-creator.scr
+key ENTER
+wait 20
+key 3
+wait 20
+key 1
+wait 6
+key ENTER
+wait 20
+key ENTER
+wait 20
+key ENTER
+wait 20
+key ENTER
+wait 30
+expectfile sd /Trophies/Alpha.txt|peek = 23341 >= 1
+key x
+wait 30
+expect 1-0 Poke V-View D-Del N/P X-Back
+expectnot R-Checks
+shot {OUT}/pv-back.scr
+key x
+wait 20
+key x
+wait 20

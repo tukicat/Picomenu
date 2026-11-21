@@ -22,7 +22,7 @@ with "# " is a heading (shown in yellow). Pages are 32 columns by 22 lines
 """
 import os, sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lzss_pack import compress, decompress
+from blob_pack import compress, decompress
 import os, re, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -95,8 +95,8 @@ with open(out_path, 'w', newline='\n') as f:
     for g in font:
         f.write('    {' + ', '.join('0x%02x' % b for b in g) + '},\n')
     f.write('};\n\n')
-    # PicoMenu: the pages are kept packed (lzss_pack.py), as "title\0text\0" one after the
-    # other; nmi_action_help_page unpacks them (lzss_unpack in nmi.c) to show one
+    # PicoMenu: the pages are kept packed (blob_pack.py), as "title\0text\0" one after the
+    # other; nmi_action_help_page unpacks them (blob_unpack in picoface.cxx) to show one
     blob = b''.join(title.encode('ascii') + b'\0' + ''.join(l + '\n' for l in lines).encode('ascii') + b'\0'
                     for title, lines in pages)
     packed = compress(blob)

@@ -1,0 +1,313 @@
+# Finding an address (Pico W, F on Y's screen): a value the game shows (each round: what it is
+# now), and something that happens (each round: was it happening when the menu was opened?); the
+# addresses that fit every round are kept, and one of the last few becomes a memory trophy.
+# Then P adds a peek to a trophy, M makes it "any", and B makes a test leave out bit 7 (& 127).
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+# "lives" at 23320: 3, then 7, then 5
+poke 23320 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+expect Find an address
+expect 1  a value it shows (lives,
+key 1
+wait 20
+expect What is the value now?
+key 3
+wait 10
+key ENTER
+wait 200
+expect A value: 1 rounds
+expect addresses left
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23320 7
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Find an address
+expect A value: 1 rounds
+key n
+wait 20
+key 7
+wait 10
+key ENTER
+wait 200
+expect A value: 2 rounds
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23320 5
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key 5
+wait 10
+key ENTER
+wait 200
+expect A value: 3 rounds
+expect 23320 (now 5)
+# 1: a trophy on it: at least 6
+key 1
+wait 20
+expect When 23320 (a byte):
+key 3
+wait 20
+key 6
+wait 10
+key ENTER
+wait 20
+key ENTER
+wait 20
+expect 23320 >= 6
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23320 >= 6
+# S stops it; something happening at 23330 (9 when it is, 1 when not), H N H N H
+key f
+wait 20
+key s
+wait 20
+expect Search stopped
+key 2
+wait 20
+expect it happening?
+poke 23330 9
+key h
+wait 200
+expect Happening: 1 rounds
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23330 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key n
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23330 9
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key h
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23330 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key n
+wait 200
+expect 23330: H 9, now 1
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23330 9
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key h
+wait 200
+expect Happening: 5 rounds
+expect 23330: H 9, now 9
+shot {OUT}/find-happen.scr
+# its number in it, as it was when happening: = 9
+key 1
+wait 20
+expect When 23330 =
+expect 9_
+key ENTER
+wait 20
+key ENTER
+wait 20
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expectfile sd /Trophies/Alpha.txt|peek = 23330 = 9
+# P: a peek more on it (23331 = 4), M: any of them
+expect Memory 23330
+key p
+wait 20
+expect Add a peek
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 1
+wait 10
+key ENTER
+wait 20
+key 1
+wait 20
+key 4
+wait 10
+key ENTER
+wait 30
+expect Peek added (M: all or any)
+expectfile sd /Trophies/Alpha.txt|peek = 23331 = 4
+key m
+wait 20
+expect Won when any peek is true
+expectfile sd /Trophies/Alpha.txt|match = any
+expectfile sd /Trophies/Alpha.txt|peek = 23320 >= 6
+# B: a test without bit 7 (23332 & 127 = 8), tried out with 136 (8 with bit 7)
+key c
+wait 20
+key 4
+wait 20
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 2
+wait 10
+key ENTER
+wait 20
+key b
+wait 20
+expect When 23332 & 127 (a byte):
+key 1
+wait 20
+key 8
+wait 10
+key ENTER
+wait 20
+key ENTER
+wait 20
+key ENTER
+wait 30
+expect Check it, then ENTER saves it:
+key ENTER
+wait 30
+expectfile sd /Trophies/Alpha.txt|peek = 23332 & 127 = 8
+key t
+wait 20
+expect Trying it: play, and see
+shot {OUT}/find-list.scr
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+poke 23332 0
+poke 23330 1
+poke 23331 0
+trophies on
+clock 3000
+wait 20
+poke 23332 136
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TRY IT OUT: IT WORKS!
+wait 400
+trophies off

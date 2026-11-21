@@ -46,6 +46,11 @@ not, see <https://www.gnu.org/licenses/>.
 //   ls sd|flash <dir>                  list a folder
 //   slice <frames>                     the converter runs so many frames a request (0: 120 ms)
 //   clock <ms>                         move the Pico's clock on (for screenshots of timers)
+//   expectlocked 0|1                   fail unless port 0x7FFD is locked (or not)
+//   expectresets <n>                   fail unless the reset pin (GPIO 28) reset the Spectrum n times
+//   resetwire 0|1                      GP28 wired to the Spectrum's reset line (1) or not
+//   hardreset                          the reset button: the Spectrum starts again, its paging unlocked
+//   expect7ffd <v>                     fail unless port 0x7FFD was last set to v
 //   get sd|flash <path> <file on PC>   copy a file off the card or flash (fails if it is not there)
 //   nofile sd|flash <path>             fail if the file is there
 // usage: sim [-128 rom0 rom1] 48.rom script
@@ -116,6 +121,7 @@ static int tape_in_takeovers = 0;
 void host_tape_poll();
 void host_level_loaders_poll();
 bool host_checkpoint_poll(bool take);
+extern "C" bool host_trophy_banner;
 void host_http(const char* request, size_t n, std::string& out);
 static std::string http_reply, http_auth;
 // The firmware waits for an NMI it asked for (the tape trap's "load memory"): the Spectrum
@@ -162,7 +168,10 @@ static zuint8 rd(void*, zuint16 a) {
     }
     return slot(a)[a & 0x3FFF];
 }
+static bool rom_trace = false;          // romtrace 1|0: opcode fetches from the ROM counted (0 prints them)
+static uint32_t rom_trace_n[16384];
 static zuint8 fetch_op(void* c, zuint16 a) {
+    if (rom_trace && !nmi && a < 0x4000) rom_trace_n[a]++;
     if (sim_pclog && !nmi && (a == 0x056C || a == 0x058F || a == 0x05A9 || a == 0x053F || a == 0x0556))
         printf("PC %04X at %.3f s\n", a, (tstates + cpu.cycles) / 3500000.0);
     if (a == 0x66 && (rom_state.flags & 2) && !nmi) { nmi = true; rom_state.nmi_active = 1; rom_state.flags &= ~2u; }
@@ -215,6 +224,21 @@ static void out(void*, zuint16 port, zuint8 v) {
     if (m128 && (port & 0x8002) == 0 && !locked) { p7ffd = v; if (v & 0x20) locked = true; }
     if (m128 && (port & 0xC002) == 0xC000) ay_sel = v;                      // 0xFFFD
     if (m128 && (port & 0xC002) == 0x8000 && ay_sel < 16) ay_reg[ay_sel] = v;   // 0xBFFD
+}
+
+// The reset pin (reset_pin = 28): high holds the Spectrum in reset, low lets it start again from 0,
+// its paging unlocked (as the real reset line does)
+static int resets = 0;
+static bool reset_wired = true;      // (resetwire 0: the pin not wired to the reset line)
+extern "C" void host_gpio_put(unsigned pin, bool v) {
+    if (pin != 28 || !reset_wired) return;
+    if (v) { printf("reset line: held\n"); return; }
+    printf("reset line: let go, the Spectrum starts again\n");
+    resets++;
+    p7ffd = 0;
+    locked = false;
+    nmi = false;
+    z80_power(&cpu, true);
 }
 
 static void run_frames(uint32_t n) {
@@ -574,6 +598,37 @@ int main(int argc, char** argv) {
             Z80_A(cpu) = (zuint8) strtoul(p2, nullptr, 0);
         } else if (c == "page") {           // page <value>: (debugging) as a game's OUT to port 0x7FFD (BANK_M left alone)
             if (m128 && !locked) { p7ffd = (uint8_t) strtoul(p1, nullptr, 0); if (p7ffd & 0x20) locked = true; }
+        } else if (c == "expectlocked") {   // expectlocked 0|1: fail unless port 0x7FFD's lock is so
+            bool want = atoi(p1) != 0;
+            if (locked != want) { printf("FAIL expectlocked %d (it is %d)\n", want, locked); failures++; }
+            else printf("PASS expectlocked %d\n", want);
+        } else if (c == "resetwire") {      // resetwire 0|1: GP28 wired to the reset line (1, as it starts) or not
+            reset_wired = atoi(p1) != 0;
+        } else if (c == "hardreset") {      // hardreset: the reset button pressed (the paging unlocked)
+            int r = resets;
+            host_gpio_put(28, false);
+            resets = r;
+            run_frames(150);
+        } else if (c == "expect7ffd") {     // expect7ffd <v>: fail unless port 0x7FFD was last set to v
+            unsigned want = (unsigned) strtoul(p1, nullptr, 0);
+            if (p7ffd != want) { printf("FAIL expect7ffd %02X (it is %02X)\n", want, p7ffd); failures++; }
+            else printf("PASS expect7ffd %02X\n", want);
+        } else if (c == "expectresets") {   // expectresets <n>: fail unless the reset pin reset the Spectrum n times
+            int want = atoi(p1);
+            if (resets != want) { printf("FAIL expectresets %d (%d)\n", want, resets); failures++; }
+            else printf("PASS expectresets %d\n", want);
+        } else if (c == "rawnmi") {         // rawnmi: an NMI the Pico did not send (a glitch on the line)
+            z80_nmi(&cpu);
+            run_frames(1);
+        } else if (c == "romtrace") {
+            rom_trace = atoi(p1) != 0;
+            if (rom_trace) memset(rom_trace_n, 0, sizeof(rom_trace_n));
+            else {
+                uint32_t tot = 0;
+                for (int i = 0; i < 16384; i++) tot += rom_trace_n[i];
+                printf("ROM fetches: %u\n", tot);
+                for (int i = 0; i < 16384; i++) if (rom_trace_n[i]) printf("  %04X x%u\n", i, rom_trace_n[i]);
+            }
         } else if (c == "tracepaging") {    // tracepaging 1|0: print each write to port 0x7FFD
             trace_paging = atoi(p1) != 0;
         } else if (c == "dumpmem") {        // dumpmem <file>: the 64K the Z80 sees now (ROM as served) to a file
@@ -602,6 +657,8 @@ int main(int argc, char** argv) {
             printf("open objects now %d\n", ff_open_objects());
         } else if (c == "wait") {
             run_frames(atoi(p1));
+        } else if (c == "trophies") {      // trophies on: a trophy won shows its banner (an NMI); off by default
+            host_trophy_banner = strcmp(p1, "on") == 0;
         } else if (c == "shot") {
             FILE* o = fopen(p1, "wb"); fwrite(screen(), 1, 6912, o); fclose(o);
         } else if (c == "text") {

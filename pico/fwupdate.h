@@ -49,14 +49,18 @@ static const uint32_t FLASH_BASE = 0x10000000;
 #ifndef PICOMENU_RESERVE_KB
 #define PICOMENU_RESERVE_KB 0
 #endif
-// the file system starts here: 2 MB - 1800 KB (the Pico W build: - 1280 KB, and the program
+// the file system starts here: 2 MB - 1800 KB (the Pico W build: - 1216 KB, and the program
 // ends 8 KB before it, where the Bluetooth pairing is kept)
 static const uint32_t APP_MAX = 2 * 1024 * 1024 - PICOMENU_FS_KB * 1024 - PICOMENU_RESERVE_KB * 1024;
 static const uint32_t APP_MIN = 0x10000;            // a Picoface image is far bigger than this
 static const uint32_t SECTOR = 4096;
 static const uint32_t PAGE = 256;
 static const uint32_t FAMILY_RP2040 = 0xE48BFF56;
-static const int MAX_BLOCKS = 192;                  // file system blocks the image can use: 191 x 4088 bytes (Map is in snap_load_buffer)
+// File system blocks the staged copy may use (Map is in snap_load_buffer): enough for the biggest
+// program, APP_MAX, as littlefs keeps at least 4064 bytes of it in a block (a block's pointers to
+// the ones before take 4 to 32 bytes). (Up to 2.7.0 test 20 it was 192, 191 x 4088 bytes: a
+// bigger image could not be staged, "Could not copy the firmware".)
+static const int MAX_BLOCKS = (int) (APP_MAX / 4064) + 2;
 static const size_t VERSION_MAX = 31;
 static const char MARKER[] = "tapeloader v";        // the firmware's version text starts like this (up to v65, and in the hidden id since)
 static const char MARKER_REV[] = "Rev ";            // from Rev 1.0: "Rev 1.0", digits and dots

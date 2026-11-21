@@ -2,16 +2,51 @@
 
 Changes on top of the original picoFace, in the order they were made. Base: `picoface-tapeloader`. This replaces the separate `.patch` files.
 
-## Rev 2.6.1 (2026-11-12)
-A fix on top of Rev 2.6.0, nothing else changed. Two firmware files, as before:
-- `picomenu-Rev2.6.1.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.6.1 (tapeloader v261)`;
-- `picomenu-Rev2.6.1-W.uf2` for a Pico W: `Rev 2.6.1 W (tapeloader v261)`.
+## Rev 2.7.0 (2026-11-18)
+Changes since Rev 2.6.0 (and the Rev 2.6.1 fix, which is in this release too). There are two firmware files:
+- `picomenu-Rev2.7.0.uf2` for a Pico: `FIRMWARE_ID` `Rev 2.7.0 (tapeloader v270)`;
+- `picomenu-Rev2.7.0-W.uf2` for a Pico W: `Rev 2.7.0 W (tapeloader v270)`.
 
-Going from 2.6.0 to 2.6.1 keeps the internal flash and the Bluetooth pairing.
+**Installing:** the Pico W firmware's internal flash file system is now 1216 KB (was 1280 KB), so going from 2.6.x to 2.7.0 on a Pico W **clears the internal flash** and the Bluetooth speaker has to be paired again; install it with BOOTSEL (2.6.x's T-U can't stage a program this size). The standard firmware can be updated with T-U.
 
-### 128K tapes that looped on a standard Pico
-- **What went wrong:** some 128K tapes (Aliens: Neoplasma, Dreamwalker 128K, Old Tower 128K) loaded a few blocks and then started again from the beginning, over and over, on a standard Pico (by number and with T - Tape); a Pico W loaded them. Each tape block is put into the Spectrum's memory by the NMI ROM, started by an NMI from the Pico, which held the NMI line low for 3 ms. On a standard Pico a second NMI sometimes came in those 3 ms (the line seems not to stay cleanly low on that board). The NMI ROM then started again over itself, the game's registers it keeps were overwritten with its own, and the game was handed them on the way back: it crashed, the Spectrum reset, and the tape trap typed `LOAD ""` again. Only bigger blocks (over 1,792 bytes) were caught, as they keep the NMI ROM busy longer.
-- **The fix:** the NMI line is held low only until the NMI has been taken (a few microseconds; the Z80 only needs the falling edge), and from then on any further NMI while the NMI ROM runs returns at once (its first bytes at 0x66 are made `RETN`; the NMI ROM is put back afresh for the next NMI). This is in both firmwares.
+### Trophies (Pico W)
+- **Each game has its own trophies,** in `/Trophies/<game>.txt` (shareable, up to 16 a game; the game's name as for its high score table), and what has been won in `/Trophies/<game>.won`. **Y - Your trophies** on the menu shows the running game's trophies (a cup and `Won`, `n of m`, what each means); I and V in Browse Games say `Trophies 2/5`.
+- **The banner:** a trophy won shows `TROPHY UNLOCKED!`, its name and what it means over the bottom four rows of the game's screen a few seconds later, with the sound and border stripes of a tape loading (`trophy_sound` = short, long or off), then the game carries on. Several at once: `and 2 more`.
+- **High score table trophies** (`score = N`, `top = 1`, `place = N`, 1 to 10): won by a new score in the game's table. The table is read from the game every 5 seconds while it has table trophies still to win, so they're won in the game a few seconds after the name is put in, without saving the table. Tables kept lowest first (Paperboy) are read too.
+- **Memory trophies** (`peek = <address> <test> [number]`): a byte, a word (`w`), a number kept as digits (`d6`, a score), or some of its bits (`& 127`), looked at `checks` times a second (0 to 10, R; a short NMI the game doesn't see). Tests `= <> >= <= > <`, changed, up, down, `up by N` (exactly), `rises N` (by N or more within a time), `not down`. Up to 4 peeks, all or any (`match = any`), `held = s` (time spent in a menu doesn't count) and `within = s`. A memory trophy true at its very first look isn't won ("True at the start: check it").
+- **Needs trophies** (`need = <name>`): won once all the others named are won.
+- **What it means** (`about =`, 60 letters), shown on Y and on its banner.
+- **The Trophy creator** (Tools Y, or the hotkey Y, which goes back to the game on X): make trophies (C), try them out (T: `TRY IT OUT: IT WORKS!`, not counted), check each before it's saved (what wins it in words), delete (D), rename (N, still won). **ENTER opens a trophy's edit screen:** every part on a numbered line, each changed by its number (a peek's address, test and number shown as they are), P adds a peek, D deletes one.
+- **Finding addresses** (F in the Trophy creator), a round at a time: 1 a value it shows, 2 something that happens (H/N), 3 something done once (Before and After rounds; the test it suggests: "is" the After value, or "is at least 128" when only bit 7 changed), 4 its score (typed each round; its digits found). For counters (a day, a lap, a level) in the done-once search: **L** keeps those that changed by exactly 1, **G** (Again) those that change once more by the same step; then "is at least" is suggested. **5 an address you know: watch** reads an address you type at once, then each time the creator is opened (NMI+Y) or N is pressed: its last 12 values, when each was read and which changed, the byte as a word and the 7 bytes after it; M makes a memory trophy on it, A another address, S stops.
+- The trophies of 2.7.0's first tests (ten fixed ones for the whole machine) are gone: each game's own replaced them.
+
+### Pokes
+- **Big `.pok` files** (both firmwares): the poke list holds up to 200 cheats and 400 pokes (it was 40 and 200). The cheats' names are no longer kept in memory but read from the file a page at a time. If a file has more, the list's title says how many were left out ("Poke list (10 not shown)"); before, they were dropped without a word.
+- **V - View** on the poke list (Pico W): a cheat's pokes, each with its address, bank, value (`ask`: typed), what the `.pok` says was there and what is there now (read from the game; `-` in a 128K bank not paged in). ENTER makes them; T and a line's number starts a memory trophy at that address in the Trophy creator.
+- **F - Poke Finder** on the Poke screen (Pico W): the Trophy creator's five searches, where an address found becomes a poke: its value (ENTER with none: the player chooses it each time; W: a word, 0 to 65535, as two pokes, low byte first; a score: one for each digit), P another address in the same cheat (up to 16), a name, then ENTER saves it in the game's `.pok` before its Y line (M: and makes it now). With no `.pok` it asks before making one. Then back to the Poke screen.
+- **D - Delete** on the poke list (Pico W): which cheat (1-0), Y deletes it (its N line and its pokes) from the game's `.pok`.
+
+### Autosave and save slots with pictures
+- **A - Autosave** shows the chosen autosave at half size, all of them (up to 6) in a row beneath at an eighth, and each one's age. O / P (or 5 / 8) choose, ENTER or 0 carries on from it, V shows it full size, M saves it to a slot, A turns autosave on or off for the game.
+- **The save slots** (S, and the "Saved games" question when a game with slots is loaded) show the chosen slot at half size and all nine in a 3x3 grid, with its label. O P Q A and the cursor keys move; ENTER saves (S) or carries on (the question; 0 starts the game); L, V and E act on the chosen slot. The quick save keeps its text list.
+
+### The reset mod (optional)
+- A wire from the picoFace's GP28 (physical pin 34) to the Spectrum's reset, and `reset_pin = 28` (O - Options, the last item, or Picomenu.ini): Reset to 128K, a 128K game when the paging is locked and the long press are then real resets. A check after each says if the wire isn't doing it ("Reset pin GP28: no reset").
+- **After a firmware update** (T-U) PicoMenu resets the Spectrum itself once the new firmware starts. Without the mod the update's screens say to press a reset button or power cycle the Spectrum.
+
+### Standard Pico: 128K tapes looping (the Rev 2.6.1 fix)
+- Some 128K tapes (Aliens: Neoplasma, Dreamwalker, Old Tower) loaded, reset and loaded again for ever on a standard Pico. A second NMI came while /NMI was held low for 3 ms and started the NMI ROM again over itself. The line is now held only until the NMI is taken, then the NMI ROM's 0x66 returns at once (RETN) until the next one.
+- Autosaves and the level-loader scan wait while a tape is loading (a block served in the last 5 seconds); the standard firmware reads the SD card 2 sectors ahead, as the W does.
+
+### Other changes
+- **Erase all assets** is in the standard firmware too (6 kinds; High scores are Pico W only).
+- **Room:** the NMI ROM, the set-up texts and the Help are packed with a new packer (LZ77 with Elias gamma codes, `pico/blob_pack.py`; the NMI ROM 10,659 → 9,342 bytes), the snapshot writers share one file type, and the tape converter is built for size on the standard Pico. littlefs is built without its debug and warning messages (`LFS_NO_DEBUG`, `LFS_NO_WARN`), and the NMI ROM's screen-path code is shared (`.pathdrive`).
+- **T-U** can stage a program up to the W's largest (`MAX_BLOCKS` follows `APP_MAX`).
+- **High scores:** the saved table is also drawn on the screen when a game shows it as it starts (from the amended 2.6.0).
+- **Tidy:** the bus test builds (`PICOMENU_BUSTEST`) used to find the tape loop are gone; the log build (`PICOMENU_TLOG`) stays.
+
+### Tests
+- New simulator scripts for the trophies (`trophies48`, `trophypeek48`, `trophyfind48`, `trophyhelp48`, `trophyneeds48`, `trophyabout48`, `trophycreator48`, `trophyrises48`, `trophyupby48`, `trophykeep48`, `trophypaperboy48`, `trophylive48`, `trophyagain48`, `trophystep48`, `trophyedit48`, `trophywatch48`), the pokes (`pokeview48`, `pokeview128`, `pokefind48`, `pokefindnew48`, `pokeword48`, `pokebig48`, `pokedelete48`), the reset mod (`pagelockwire128`, `optionsresetpin48`), the update screens (`fwupdate48`, `fwupdatereset48`) and the redrawn table (`hiscoreredraw48`, `hiscoreredrawtape48`). All pass.
 
 ## Rev 2.6.0 (2026-11-07)
 Changes since Rev 2.5.0. There are two firmware files, as for 2.5.0:

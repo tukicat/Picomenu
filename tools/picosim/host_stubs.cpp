@@ -41,7 +41,8 @@ void sleep_us(uint64_t us) { host_us += us; }
 void busy_wait_us(uint64_t us) { host_us += us; }
 void gpio_init(uint) {}
 void gpio_set_dir(uint, bool) {}
-void gpio_put(uint, bool) {}
+extern "C" void host_gpio_put(unsigned pin, bool v);     // sim.cpp: pin 28 is the Spectrum's reset (reset_pin)
+void gpio_put(uint pin, bool v) { host_gpio_put(pin, v); }
 bool gpio_get(uint) { return true; }
 void gpio_pull_up(uint) {}
 void gpio_set_function(uint, int) {}

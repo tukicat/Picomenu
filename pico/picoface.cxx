@@ -99,6 +99,7 @@ static bool tape_asking = false;           // T in Browse Games: "Trap or Blueto
 #include "picoface.h"
 #include "file_wrapper.h"
 #include "snapload.h"
+
 #include "tzxconv_pico.h"
 #include "helptext.h"
 #include "extras.h"
@@ -201,6 +202,13 @@ void LOG(const char* format, ...) {
 }
 #else
 #define LOG(...) do { } while (0)
+#endif
+// A few messages about the tape trap and the NMIs on the USB serial port, for finding a fault
+// with a PC in a build that has no room for LOG's: cmake -DPICOMENU_TLOG=1 (with time stamps, ms)
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+#define TLOG(f, ...) printf("%lu " f, (unsigned long) to_ms_since_boot(get_absolute_time()), ##__VA_ARGS__)
+#else
+#define TLOG(...) do { } while (0)
 #endif
 
 
@@ -363,7 +371,45 @@ static size_t game_base(const char* dir, const char* name, char* out);
 #else
 #define PICOMENU_HISCORE 0
 #endif
+// Trophies (Y - Your trophies, trophies.h): with the high score tables, the Pico W build
+#define PICOMENU_TROPHIES PICOMENU_HISCORE
+#ifdef PICOFACE_HOST
+extern "C" { bool host_trophy_banner = false; }     // (the simulator's "trophies on": see tr_poll)
+#endif
+#if PICOMENU_TROPHIES
+#include "trophies.h"
+static void tr_forget_pending();
+static bool tr_searching();
+static void tr_table_saved(const char* game, const uint8_t* table, uint16_t len);
+static bool tr_base_wanted(const char* game);
+static void tr_base(const char* game, const uint8_t* table, uint16_t len);
+static bool tr_poll();
+static bool tr_from_original = false;   // the game loading is from its own file (not a save or an autosave)
+#endif
+// The 128K memory locked (see paging_check): its state, and Browse's choice
+static struct {
+    uint8_t state = 0;              // 1: the test is running (254 next), 2: the screen is up (a key next)
+    bool pick = false;              // Browse's choice (ACTION_SLOT_ASK), what loads next unless prepared
+    uint16_t pick_offset = 0;
+    uint8_t pick_drive = 0;
+} lk;
+static void paging_pick(uint16_t nameoffset, uint8_t drive) {
+    lk.pick = nameoffset != 0;
+    lk.pick_offset = nameoffset;
+    lk.pick_drive = drive;
+}
+inline bool sendNmiAndWaitForCompletion(uint8_t command, uint16_t param1, uint16_t param2);
+// 2.7.0 test: the reset pin (reset_pin = 28 in Picomenu.ini). 0 takes it out (the check and its
+// screen stay)
+#ifndef PICOMENU_RESET_PIN
+#define PICOMENU_RESET_PIN 1
+#endif
+#if PICOMENU_RESET_PIN
+static bool reset_pin_poll();
+#endif
 static uint32_t tape_block_ms = 0;  // when the tape trap last gave the game a block
+static uint32_t tape_served_ms = 0; // when the trap last served the game a block (not a skip to one)
+static bool tape_loading();         // a tape is giving the game blocks (no NMI of our own then)
 static bool hs_bt_played = false;   // the Bluetooth has played the tape put in (the trap gives it no blocks)
 
 // Big enough for sd_cwd, a slash and the longest file name
@@ -866,9 +912,9 @@ static bool tape_service_start(uint8_t drive, const char* filename);
 // looks for "tapeloader v" and a number) the build number. Every build keeps both in this one text.
 // " W" after the number: the Pico W build (Update PicoMenu only takes the same kind: fwupdate.h)
 #ifdef WIFI_ENABLE
-static const char FIRMWARE_ID[] = "Rev 2.6.1 W (tapeloader v261)";
+static const char FIRMWARE_ID[] = "Rev 2.7.0 W (tapeloader v270)";
 #else
-static const char FIRMWARE_ID[] = "Rev 2.6.1 (tapeloader v261)";
+static const char FIRMWARE_ID[] = "Rev 2.7.0 (tapeloader v270)";
 #endif
 // "Rev 1.0": shown on the Diagnostics page of Help and the Update screen. Made from the id so the id is used
 // (an unused text is left out of the image by the linker).
@@ -1097,6 +1143,13 @@ void load_snapshot_file(uint8_t drive, const char* dir, const char* fileAndExt, 
     game_base(dir, fileAndExt, hs_next.name);
     hs_next.valid = true;
     hs_next.tape = false;
+#endif
+#if PICOMENU_TROPHIES
+    {
+        // a game's own file: its high score table is the one it came with (Top of the Table)
+        const size_t sl = sizeof(slots::FOLDER) - 1;
+        tr_from_original = strncasecmp(dir, slots::FOLDER, sl) != 0 && strncasecmp(dir, "/Autosave", 9) != 0;
+    }
 #endif
     if (strcasecmp(ext, "tap") == 0 || strcasecmp(ext, "tzx") == 0) {
 #if PICOMENU_HISCORE
@@ -3111,20 +3164,18 @@ void nmi_action_sna_save_dir() {
 }
 
 // Where write_z80_128 puts the file
-struct FlashSink {
-    int file;
-    bool write(const uint8_t* data, uint32_t size) {
-        return pico_write(file, data, size) == (lfs_ssize_t) size;
-    }
+// Where a snapshot is written: a file on the SD card (fat), on the flash (lfs), or a
+// FileHandle (fh). One type for all of them, so the writers (snapload.h) are in the firmware once
+struct FileSink {
+    FIL* fat;
+    int lfs;
+    FileHandle* fh;
+    bool write(const uint8_t* data, uint32_t size);
 };
-
-struct SdSink {
-    FIL* file;
-    bool write(const uint8_t* data, uint32_t size) {
-        UINT written = 0;
-        return f_write(file, data, size, &written) == FR_OK && written == size;
-    }
-};
+using SdSink = FileSink;
+using FlashSink = FileSink;
+static FileSink sd_sink(FIL* f) { return { f, -1, nullptr }; }
+static FileSink flash_sink(int f) { return { nullptr, f, nullptr }; }
 
 // Writes the snapshot in snap_load_buffer to sink, as the file type asked for:
 // a 48K snapshot as a .sna (as it is) or a .z80, a 128K one as a .z80 or a .sna
@@ -3544,7 +3595,7 @@ void nmi_action_sna_save() {
         bool ok = file >= 0;
 
         if (ok) {
-            FlashSink sink = { file };
+            FlashSink sink = flash_sink(file);
             ok = write_snapshot_file(sink, format);
             pico_close(file);
             if (!ok) {
@@ -3575,7 +3626,7 @@ void nmi_action_sna_save() {
         FIL& file = save_fil;
         FRESULT fr = f_open(&file, path, FA_WRITE | (overwrite == 0 ? FA_CREATE_NEW : FA_CREATE_ALWAYS));
         if (fr == FR_OK) {
-            SdSink sink = { &file };
+            SdSink sink = sd_sink(&file);
             fr = write_snapshot_file(sink, format) ? FR_OK : FR_DENIED;    // a full card is a short write
             FRESULT fc = f_close(&file);
             if (fr == FR_OK) {
@@ -3843,6 +3894,7 @@ void nmi_action_begin_snap_read() {
         current_snap_data = snap_load_buffer;
     }
     snap_prepared = false;
+    lk.pick = false;                // (Browse's choice is used up)
 #if PICOMENU_HISCORE
     hs_commit();                    // the game going in now: its high score table put in it
 #endif
@@ -4328,6 +4380,104 @@ static void nmi_action_snap_preview() {
 
 static void help_put_text(uint8_t* screen, int row, int col, const char* text, int len, uint8_t attr);
 
+// ---- Pictures of saves (A - Autosave, the save slots): a chosen one at half size, all of them at
+// an eighth. The pictures are made in list_pool (cp_pics: a screen of 6912 bytes, the list cache
+// let go first, as for a copy), so moving between them only reads the chosen one again.
+static uint8_t cp_sel = 0;              // the one chosen in the row (0: the newest)
+static int8_t cp_big = -1;              // the entry whose large picture cp_pics has (-1: none)
+static bool cp_pics_ok = false;         // cp_pics has the row's pictures
+static bool sp_ok = false;              // cp_pics has the save slots' pictures
+static uint8_t* cp_pics() { return reinterpret_cast<uint8_t*>(list_pool); }
+
+static inline uint16_t zx_line(int y) { return (uint16_t) (((y & 0xC0) << 5) | ((y & 7) << 8) | ((y & 0x38) << 2)); }
+static inline uint8_t zx_colour(uint8_t a, bool ink) { return (uint8_t) ((a & 0x40 ? 8 : 0) | (ink ? a & 7 : (a >> 3) & 7)); }
+
+// A screen made smaller, by 2 (shift 1) or 8 (shift 3), into dst from cell (cx0, cy0). Each new
+// pixel is the colour most of its block has, except that a little ink on black wins (a thin
+// line or a sprite stays); each new cell then takes its two commonest colours.
+__attribute__((noinline)) static void pic_shrink(const uint8_t* src, uint8_t* dst, int cx0, int cy0, int shift) {
+    const int s = 1 << shift, area = s * s, thr = shift == 1 ? 1 : 6;
+    const int cw = 32 >> shift, ch = 24 >> shift;
+    uint8_t col[64];
+    for (int cy = 0; cy < ch; cy++) {
+        for (int cx = 0; cx < cw; cx++) {
+            uint8_t cnt[16] = {0};
+            for (int y = 0; y < 8; y++) {
+                for (int x = 0; x < 8; x++) {
+                    const int sx = (cx * 8 + x) << shift, sy = (cy * 8 + y) << shift;
+                    const uint8_t a = src[6144 + (sy >> 3) * 32 + (sx >> 3)];
+                    int inks = 0;
+                    for (int dy = 0; dy < s; dy++) {
+                        const uint8_t bits = src[zx_line(sy + dy) + (sx >> 3)];
+                        inks += __builtin_popcount(s == 8 ? bits : (bits >> (8 - s - (sx & 7))) & ((1 << s) - 1));
+                    }
+                    const uint8_t ci = zx_colour(a, true), cpp = zx_colour(a, false);
+                    uint8_t c = inks * 2 >= area ? ci : cpp;
+                    const uint8_t o = c == ci ? cpp : ci;
+                    const int oc = c == ci ? area - inks : inks;
+                    if ((c & 7) == 0 && (o & 7) != 0 && oc >= thr) c = o;
+                    col[y * 8 + x] = c;
+                    cnt[c]++;
+                }
+            }
+            int p = 0;
+            for (int i = 1; i < 16; i++) if (cnt[i] > cnt[p]) p = i;
+            int k = p;
+            for (int i = 0; i < 16; i++) if (i != p && cnt[i] > 0 && (k == p || cnt[i] > cnt[k])) k = i;
+            dst[6144 + (cy0 + cy) * 32 + cx0 + cx] = (uint8_t) ((((p | k) & 8) ? 0x40 : 0) | ((p & 7) << 3) | (k & 7));
+            for (int y = 0; y < 8; y++) {
+                uint8_t bits = 0;
+                for (int x = 0; x < 8; x++) {
+                    if ((col[y * 8 + x] & 7) != (p & 7)) bits |= (uint8_t) (0x80 >> x);
+                }
+                dst[zx_line((cy0 + cy) * 8 + y) + cx0 + cx] = bits;
+            }
+        }
+    }
+}
+
+
+// Clears cells of cp_pics (w x h from cx0, cy0) to the screen's own colours
+static void cp_pics_clear(int cx0, int cy0, int w, int h) {
+    uint8_t* d = cp_pics();
+    for (int cy = cy0; cy < cy0 + h; cy++) {
+        for (int y = 0; y < 8; y++) memset(d + zx_line(cy * 8 + y) + cx0, 0, (size_t) w);
+        memset(d + 6144 + cy * 32 + cx0, ui_attr(0x07), (size_t) w);
+    }
+}
+
+static void screen_dot(uint8_t* screen, int x, int y) { screen[zx_line(y) + (x >> 3)] |= (uint8_t) (0x80 >> (x & 7)); }
+
+// A frame two pixels wide round cells (cx, cy) w x h, in the cells about them (made yellow)
+static void pic_frame(uint8_t* screen, int cx, int cy, int w, int h) {
+    const int x0 = cx * 8 - 2, x1 = (cx + w) * 8 + 1, y0 = cy * 8 - 2, y1 = (cy + h) * 8 + 1;
+    for (int x = x0 - 1; x <= x1 + 1; x++) {
+        screen_dot(screen, x, y0); screen_dot(screen, x, y0 - 1);
+        screen_dot(screen, x, y1); screen_dot(screen, x, y1 + 1);
+    }
+    for (int y = y0; y <= y1; y++) {
+        screen_dot(screen, x0, y); screen_dot(screen, x0 - 1, y);
+        screen_dot(screen, x1, y); screen_dot(screen, x1 + 1, y);
+    }
+    for (int c = cx - 1; c <= cx + w; c++) {
+        screen[6144 + (cy - 1) * 32 + c] = ui_attr(gameinfo::ATTR_HEADING);
+        screen[6144 + (cy + h) * 32 + c] = ui_attr(gameinfo::ATTR_HEADING);
+    }
+    for (int r = cy; r < cy + h; r++) {
+        screen[6144 + r * 32 + cx - 1] = ui_attr(gameinfo::ATTR_HEADING);
+        screen[6144 + r * 32 + cx + w] = ui_attr(gameinfo::ATTR_HEADING);
+    }
+}
+
+// Copies rows r0 to r1 (cells) of the pictures onto the screen
+static void pic_rows(uint8_t* screen, int r0, int r1) {
+    const uint8_t* pics = cp_pics();
+    for (int row = r0; row <= r1; row++) {
+        for (int y = 0; y < 8; y++) memcpy(screen + zx_line(row * 8 + y), pics + zx_line(row * 8 + y), 32);
+        memcpy(screen + 6144 + row * 32, pics + 6144 + row * 32, 32);
+    }
+}
+
 // ---- S on the menu: the save slots screen (ACTION_SLOTS), and the question when a game with
 // slots is loaded (ACTION_SLOT_ASK). Both are drawn by the pico and take the keys (picoscreen).
 enum SlotState : uint8_t { SLOT_LIST, SLOT_OVERWRITE, SLOT_PICK_LABEL, SLOT_TYPING, SLOT_PICK_VIEW, SLOT_VIEWING,
@@ -4377,6 +4527,117 @@ static void slots_banner(uint8_t* screen, const char* lead, const char* game) {
     help_put_text(screen, 0, 1, t, (int) strlen(t), gameinfo::ATTR_BANNER);
 }
 
+
+// A row of keys and what they do, from column col: '|' switches between the keys' colour
+// (first) and the text's; spaces are left as they are. One call for a row (room in the firmware)
+__attribute__((noinline)) static void put_keys(uint8_t* screen, int row, int col, const char* s) {
+    uint8_t attr = gameinfo::ATTR_KEYS;
+    for (; *s != '\0'; s++) {
+        if (*s == '|') {
+            attr = attr == gameinfo::ATTR_KEYS ? gameinfo::ATTR_TEXT : gameinfo::ATTR_KEYS;
+            continue;
+        }
+        if (*s != ' ') help_put_text(screen, row, col, s, 1, attr);
+        col++;
+    }
+}
+
+// ---- The save slots as pictures (S from the menu, and the question when a game with slots is
+// loaded): the chosen slot large on the left, the nine in a 3 x 3 grid on the right (1 2 3 at the
+// top), an empty one a dim box with its number. O P Q A (or the cursor keys) choose.
+static const int SP_BIG_COL = 0, SP_BIG_ROW = 1;                    // 16 x 12 cells
+static const int SP_GRID_COL = 17, SP_GRID_ROW = 2, SP_STEP_X = 5, SP_STEP_Y = 4;  // 4 x 3 cells each
+static uint8_t sp_sel = 0;              // the slot chosen (0-8)
+static int8_t sp_big = -1;              // the large picture cp_pics has: a slot (0-8), 9 the game's own screen
+static int sp_col(int i) { return SP_GRID_COL + (i % 3) * SP_STEP_X; }
+static int sp_row(int i) { return SP_GRID_ROW + (i / 3) * SP_STEP_Y; }
+
+static bool slot_file_path(const char* game, const SlotEntry& e, int n, char* out, size_t size) {
+    char file[80];
+    slots::name(n, e.label, file, sizeof(file));
+    return snprintf(out, size, "%s/%s/%s.%s", slots::FOLDER, game, file, e.ext) < (int) size;
+}
+
+static void sp_picture(const char* game, const SlotEntry* e, int i, int cx, int cy, int shift) {
+    if (!slot_file_path(game, e[i], i + 1, grab_path, sizeof(grab_path))) return;
+    preview_screen = nullptr;
+    if (find_preview(1, grab_path, e[i].ext) == 0 && preview_screen != nullptr) pic_shrink(preview_screen, cp_pics(), cx, cy, shift);
+}
+
+// The first slot chosen: the last one saved, else the first used one
+static void sp_start(const SlotEntry* e, int last) {
+    sp_sel = 0;
+    if (last > 0 && e[last - 1].used) {
+        sp_sel = (uint8_t) (last - 1);
+    } else {
+        for (int i = slots::COUNT - 1; i >= 0; i--) if (e[i].used) sp_sel = (uint8_t) i;
+    }
+    sp_ok = false;
+}
+
+// O P Q A and the cursor keys: true if the key was one of them
+static bool sp_move(uint8_t key) {
+    if (key == 'o' || key == 'O' || key == notes::KEY_LEFT) {
+        if (sp_sel > 0) sp_sel--;
+    } else if (key == 'p' || key == 'P' || key == notes::KEY_RIGHT) {
+        if (sp_sel + 1 < slots::COUNT) sp_sel++;
+    } else if (key == 'q' || key == 'Q' || key == notes::KEY_UP) {
+        if (sp_sel >= 3) sp_sel = (uint8_t) (sp_sel - 3);
+    } else if (key == 'a' || key == 'A' || key == notes::KEY_DOWN) {
+        if (sp_sel + 3 < slots::COUNT) sp_sel = (uint8_t) (sp_sel + 3);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Makes the pictures in cp_pics (each slot read into snap_load_buffer: before the screen is
+// drawn there). save_here: an empty slot chosen shows the game's own screen (what S would save)
+__attribute__((noinline)) static void sp_make(const char* game, const SlotEntry* e, bool save_here) {
+    if (!sp_ok) {
+        walk_stop();                    // the list cache's memory holds the pictures
+        big_valid = false;
+        cp_pics_clear(0, 0, 32, 24);
+        for (int i = 0; i < slots::COUNT; i++) if (e[i].used) sp_picture(game, e, i, sp_col(i), sp_row(i), 3);
+        sp_big = -1;
+        sp_ok = true;
+        cp_pics_ok = false;
+    }
+    const int want = e[sp_sel].used ? sp_sel : save_here && screen_stashed ? 9 : -1;
+    if (want != sp_big || want < 0) {
+        cp_pics_clear(SP_BIG_COL, SP_BIG_ROW, 16, 12);
+        if (want == 9) {
+            pic_shrink(screen_stash, cp_pics(), SP_BIG_COL, SP_BIG_ROW, 1);
+        } else if (want >= 0) {
+            sp_picture(game, e, want, SP_BIG_COL, SP_BIG_ROW, 1);
+        }
+        sp_big = (int8_t) want;
+    }
+}
+
+// Puts the pictures on the screen, an empty slot's box, the frame and the caption (row 14)
+__attribute__((noinline)) static void sp_draw(uint8_t* screen, const SlotEntry* e, int last, bool save_here) {
+    pic_rows(screen, SP_BIG_ROW, SP_BIG_ROW + 11);
+    for (int i = 0; i < slots::COUNT; i++) {
+        if (e[i].used) continue;
+        const int cx = sp_col(i), cy = sp_row(i);
+        char d[2] = { (char) ('1' + i), '\0' };
+        help_put_text(screen, cy + 1, cx + 1, d, 1, gameinfo::ATTR_DIM);
+        for (int r = cy; r < cy + 3; r++) memset(screen + 6144 + r * 32 + cx, ui_attr(gameinfo::ATTR_DIM), 4);
+        for (int x = cx * 8 + 1; x < (cx + 4) * 8 - 1; x++) { screen_dot(screen, x, cy * 8 + 1); screen_dot(screen, x, (cy + 3) * 8 - 2); }
+        for (int y = cy * 8 + 1; y < (cy + 3) * 8 - 1; y++) { screen_dot(screen, cx * 8 + 1, y); screen_dot(screen, (cx + 4) * 8 - 2, y); }
+    }
+    pic_frame(screen, sp_col(sp_sel), sp_row(sp_sel), 4, 3);
+    char t[48];
+    const SlotEntry& c = e[sp_sel];
+    if (c.used) {
+        snprintf(t, sizeof(t), "Slot %d: %s%s", sp_sel + 1, c.label[0] != '\0' ? c.label : "Saved game", sp_sel + 1 == last ? " (last)" : "");
+    } else {
+        snprintf(t, sizeof(t), "Slot %d: empty%s", sp_sel + 1, save_here ? " - save here" : "");
+    }
+    help_put_text(screen, 14, 1, t, (int) strlen(t) > 31 ? 31 : (int) strlen(t), gameinfo::ATTR_HEADING);
+}
+
 // ACTION_SLOTS: BYTE param1 = the key (0: opened). Status 0 the screen stays; 1 closed (back to
 // the menu); 2 the Save snapshot screen instead; 3 save now, to slot_target (the ROM sends the
 // snapshot, then ACTION_SNA_SAVE with param3 = 3). With save_screen = named in Picomenu.ini,
@@ -4400,9 +4661,21 @@ __attribute__((noinline)) static void nmi_action_slots() {
     }
     SlotEntry e[slots::COUNT];
     int last = slots_scan(game, e);
-    const int n = key >= '1' && key <= '9' ? key - '0' : 0;
+    int n = key >= '1' && key <= '9' ? key - '0' : 0;
     const bool back = is_key_break(key) || key == 'x' || key == 'X';
+    // pictures from the menu; the button's quick save (no menu) keeps the list, which comes quicker
+    const bool pics = !menu_alone();
+    if (key == 0) sp_start(e, last);
     if (key != 0) slot_msg = nullptr;
+    if (pics && key != 0 && slot_state == SLOT_LIST && !sp_move(key)) {
+        // ENTER saves in the slot chosen (asking first if it is used); L V E act on it at once
+        if (key == notes::KEY_ENTER || key == 13) {
+            n = sp_sel + 1;
+        } else if (key == 'l' || key == 'L' || key == 'v' || key == 'V' || key == 'e' || key == 'E') {
+            slot_state = key == 'l' || key == 'L' ? SLOT_PICK_LABEL : key == 'v' || key == 'V' ? SLOT_PICK_VIEW : SLOT_PICK_ERASE;
+            n = sp_sel + 1;
+        }
+    }
     switch (key == 0 ? SLOT_LIST : slot_state) {
     case SLOT_LIST:
         if (key == 0) break;
@@ -4518,18 +4791,30 @@ __attribute__((noinline)) static void nmi_action_slots() {
             if (ok) tape_note_follow(1, erase_path, 1, bin == BIN_OK ? erase_scratch : nullptr, false);
             slot_msg = !ok ? "Could not erase it" : bin == BIN_OK ? "Moved to the Waste Bin" : "Erased";
             last = slots_scan(game, e);
+            sp_ok = false;              // (the Waste Bin's folder may be made: list_pool lent to FatFs)
         }
         slot_state = SLOT_LIST;
         break;
     }
 
+    if (pics) sp_make(game, e, true);
     slots_banner(screen, "Save slots: ", game);
-    slots_draw_list(screen, e, last, false);
-    help_put_text(screen, 13, 1, "1-9", 3, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 13, 5, "Save to a slot", 14, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 14, 1, "L-Label  V-View  E-Erase", 24, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 15, 1, "S-Save snapshot (own name)", 26, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 16, 1, menu_alone() ? "X-Exit" : "X-Back", 6, gameinfo::ATTR_KEYS);
+    if (pics) {
+        sp_draw(screen, e, last, true);
+        if (slot_state == SLOT_LIST) {
+            put_keys(screen, 16, 1, "O P Q A |Choose  |ENTER |Save");
+            put_keys(screen, 17, 1, "1-9     |Save straight to a slot");
+            put_keys(screen, 18, 1, "L-Label  V-Full size  E-Erase");
+            put_keys(screen, 19, 1, "S-Save snapshot (own name)");
+            put_keys(screen, 20, 1, "X-Back");
+        }
+    } else {
+        slots_draw_list(screen, e, last, false);
+        put_keys(screen, 13, 1, "1-9 |Save to a slot");
+        help_put_text(screen, 14, 1, "L-Label  V-View  E-Erase", 24, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 15, 1, "S-Save snapshot (own name)", 26, gameinfo::ATTR_KEYS);
+        help_put_text(screen, 16, 1, "X-Exit", 6, gameinfo::ATTR_KEYS);
+    }
     char t[48];
     switch (slot_state) {
     case SLOT_OVERWRITE:
@@ -4599,11 +4884,13 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
                 return;
             }
             ask_drive = reload_drive;
+            paging_pick(0, 0);
             fileAndExt = reload_name;
             dir = reload_dir;
         } else {
             uint16_t nameoffset = (nmi_rom_data[4] << 8) | nmi_rom_data[3];
             ask_drive = nmi_rom_data[5] == 1 ? 1 : 0;
+            paging_pick(nameoffset, ask_drive);     // (what loads next, unless a slot is picked)
             fileAndExt = list_entry_name_for(nameoffset, reinterpret_cast<const char*>(nmi_rom_data + nameoffset));
             dir = list_entry_dir_for(nameoffset);
         }
@@ -4618,6 +4905,7 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         memcpy(erase_scratch, fileAndExt, nl + el);
         ask_view = 0;
         slot_msg = nullptr;
+        sp_ok = false;
     } else if (screengrab::base_name(erase_scratch, game) == 0) {
         nmi_rom_data[0] = 3;
         return;
@@ -4630,8 +4918,19 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         nmi_rom_data[0] = 1;
         return;
     }
-    const int n = key >= '1' && key <= '9' ? key - '0' : 0;
+    if (key == 0) sp_start(e, last);
+    int n = key >= '1' && key <= '9' ? key - '0' : 0;
     if (key != 0) slot_msg = nullptr;
+    if (key != 0 && ask_view == 0 && !sp_move(key)) {
+        // ENTER carries on from the slot chosen; V and E act on it at once
+        if (key == notes::KEY_ENTER || key == 13) {
+            if (e[sp_sel].used) n = sp_sel + 1;
+            else slot_msg = "That slot is empty";
+        } else if (key == 'v' || key == 'V' || key == 'e' || key == 'E') {
+            ask_view = key == 'v' || key == 'V' ? 1 : 3;
+            n = sp_sel + 1;
+        }
+    }
     const bool viewing = ask_view != 0;     // this key is for V's question or its picture
     if (ask_view == 2) {
         ask_view = 0;                       // the slot's screen: any key goes back to the list
@@ -4678,14 +4977,11 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
             if (ok) tape_note_follow(1, grab_path, 1, bin == BIN_OK ? to : nullptr, false);
             slot_msg = !ok ? "Could not erase it" : bin == BIN_OK ? "Moved to the Waste Bin" : "Erased";
             last = slots_scan(game, e);
+            sp_ok = false;
             any = false;
             for (int i = 0; i < slots::COUNT; i++) any = any || e[i].used;
         }
-    } else if (key == 'v' || key == 'V') {
-        ask_view = 1;
-    } else if (key == 'e' || key == 'E') {
-        ask_view = 3;
-    } else if (key == '0' || key == notes::KEY_ENTER || key == 13) {
+    } else if (key == '0') {
         load_snapshot_file(ask_drive, erase_path, erase_scratch);       // the game as chosen
         snap_prepared = true;
         nmi_rom_data[0] = 2;
@@ -4706,22 +5002,16 @@ __attribute__((noinline)) static void nmi_action_slot_ask() {
         nmi_rom_data[0] = 3;
         return;
     }
+    sp_make(game, e, false);
     slots_banner(screen, "Saved games: ", game);
-    slots_draw_list(screen, e, last, true);
-    if (!any) help_put_text(screen, 2, 1, "No saved games left", 19, gameinfo::ATTR_DIM);
-    help_put_text(screen, 13, 1, "1-9", 3, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 13, 5, "Carry on from a slot", 20, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 14, 1, "0", 1, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 14, 5, "Start the game", 14, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 15, 1, "V", 1, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 15, 5, "View a slot's screen", 20, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 16, 1, "E", 1, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 16, 5, "Erase a slot", 12, gameinfo::ATTR_TEXT);
-    help_put_text(screen, 17, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
-    if (ask_view == 1 || ask_view == 3) {
-        const char* what = ask_view == 1 ? "View which slot? 1-9" : "Erase which slot? 1-9";
-        help_put_text(screen, 19, 1, what, (int) strlen(what), gameinfo::ATTR_HEADING);
-        help_put_text(screen, 20, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
+    sp_draw(screen, e, last, false);
+    if (ask_view == 0) {
+        put_keys(screen, 16, 1, "O P Q A |Choose  |ENTER |Carry on");
+        put_keys(screen, 17, 1, "1-9     |Carry on from a slot");
+        put_keys(screen, 18, 1, "0       |Start the game");
+        put_keys(screen, 19, 1, "V-Full size  E-Erase");
+        put_keys(screen, 20, 1, "X-Back");
+        if (!any) help_put_text(screen, 21, 1, "No saved games left", 19, gameinfo::ATTR_DIM);
     } else if (ask_view == 4) {
         char t[24];
         snprintf(t, sizeof(t), "Erase slot %d?", slot_pick);
@@ -4826,7 +5116,7 @@ static void checkpoint_flush() {
     FIL& file = save_fil;
     FRESULT fr = f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (fr == FR_OK) {
-        SdSink sink = { &file };
+        SdSink sink = sd_sink(&file);
         fr = write_snapshot_file(sink, format) ? FR_OK : FR_DENIED;
         FRESULT fc = f_close(&file);
         if (fr == FR_OK) fr = fc;
@@ -4872,9 +5162,12 @@ static void checkpoint_poll() {
         return;
     }
     if (!rw.on || rw.secs == 0 || !game_running || !sd_card_mounted || rom_state.nmi_active ||
-            conv_running() || (int32_t) (now - rw.due_ms) < 0) {
+            conv_running() || (int32_t) (now - rw.due_ms) < 0 || tape_loading()) {
         return;
     }
+#if PICOMENU_TROPHIES
+    if (tr_searching()) return;         // (an address search's state is in snap_load_buffer: F on Y)
+#endif
 #ifdef PICOFACE_HOST
     if (!rw_host_take) return;          // the simulator takes them when its script says (checkpoint)
 #endif
@@ -4887,8 +5180,14 @@ static void checkpoint_poll() {
 #ifdef PICOFACE_HOST
 // The simulator: the main loop's part; take: a checkpoint now (checkpoints on). True if one was sent.
 bool host_checkpoint_poll(bool take) {
+#if PICOMENU_RESET_PIN
+    if (!take && !bt_on && reset_pin_poll()) return true;      // (as the main loop)
+#endif
 #if PICOMENU_HISCORE
     if (!take && hs_auto_poll()) return true;   // (a high score table put back: the Bluetooth on too)
+#endif
+#if PICOMENU_TROPHIES
+    if (!take && tr_poll()) return true;        // (a trophy's banner)
 #endif
     if (bt_on) return false;            // as the main loop: not while the Bluetooth is on
     bool was = (rom_state.flags & 2) != 0;
@@ -4902,6 +5201,217 @@ bool host_checkpoint_poll(bool take) {
     return !was && (rom_state.flags & 2) != 0;
 }
 #endif
+
+// ---- The 128K memory locked (2.7.0) ----
+// Port 0x7FFD's lock (bit 5) is let go only by a real reset of the Spectrum: 48 BASIC sets it, a
+// 48K game PicoMenu locks (lock_48k) and some 48K games' own OUTs. A 128K snapshot (or Reset into
+// 128K) then can't page its banks and ends in 48 BASIC. So before such a load from the menu the
+// Spectrum is asked (PICO_RUN) whether its paging works: if not, the reset pin (reset_pin = 28, a
+// transistor across the picoFace's reset button) resets it and the load follows by itself, or a
+// screen says to press the reset button, and any key goes back to the game. A 48K Spectrum has no
+// paging, so it looks locked too.
+static const uint16_t LK_RESULT = PICO_CODE_AT + 62;    // the test's answer: 0xAA paging works, 0x55 not
+
+// Could what is about to load need the 128K memory? A 128K snapshot or Reset into 128K made ready,
+// or a snapshot picked in Browse Games (which one it is is found only if the paging is locked)
+static bool paging_target_128(uint8_t* nmi_rom_data) {
+    if (snap_prepared) return snap_is_paged || menu_reset_128k;
+    if (!lk.pick) return false;
+    const char* fe = list_entry_name_for(lk.pick_offset, reinterpret_cast<const char*>(nmi_rom_data + lk.pick_offset));
+    const char* ext = fe + strlen(fe) + 1;
+    return is_snapshot_ext(ext) && strcasecmp(ext, "tap") != 0 && strcasecmp(ext, "tzx") != 0;    // (a tape: 48K)
+}
+
+static bool reset_pin_usable();
+// The paging test: bank 0 and bank 1 each given a byte at 0xC000, and bank 0 read back: two
+// different bytes if the paging works, the last one written if not (the bytes put back after);
+// the answer at LK_RESULT. As a PICO_RUN routine (RET, bank 0 paged after), or (after_reset) as
+// the NMI's own code after a reset by the reset pin: the paging put back as the 128's own menu
+// keeps it (BANK_M, 0x5B5C), then out of the NMI
+static void paging_test_code(uint8_t* at, bool after_reset) {
+    static const uint8_t TEST[] = {
+        0x21, 0x00, 0xC0,       // LD HL,0xC000
+        0x01, 0xFD, 0x7F,       // LD BC,0x7FFD
+        0x3E, 0x10, 0xED, 0x79, // LD A,0x10 / OUT (C),A      bank 0
+        0x56, 0x36, 0xAA,       // LD D,(HL) / LD (HL),0xAA
+        0x3E, 0x11, 0xED, 0x79, // LD A,0x11 / OUT (C),A      bank 1
+        0x5E, 0x36, 0x55,       // LD E,(HL) / LD (HL),0x55
+        0x3E, 0x10, 0xED, 0x79, // LD A,0x10 / OUT (C),A      bank 0
+        0x7E,                   // LD A,(HL)
+        0x32, (uint8_t) (LK_RESULT & 0xFF), (uint8_t) (LK_RESULT >> 8),     // LD (LK_RESULT),A
+        0x72,                   // LD (HL),D                  bank 0's byte back (or the one)
+        0xFE, 0x55, 0x28, 5,    // CP 0x55 / JR Z,+5          locked: that was all
+        0x3E, 0x11, 0xED, 0x79, // LD A,0x11 / OUT (C),A
+        0x73,                   // LD (HL),E                  bank 1's byte back
+    };
+    memcpy(at, TEST, sizeof(TEST));
+    uint8_t* c = at + sizeof(TEST);
+    if (!after_reset) {
+        static const uint8_t END[] = { 0x3E, 0x10, 0xED, 0x79, 0xC9 };     // LD A,0x10 / OUT (C),A / RET
+        memcpy(c, END, sizeof(END));
+        return;
+    }
+    *c++ = 0x3A; *c++ = 0x5C; *c++ = 0x5B;                  // LD A,(BANK_M)
+    *c++ = 0xED; *c++ = 0x79;                               // OUT (C),A
+    *c++ = 0xC3; *c++ = (uint8_t) (EXIT_NO_SCREEN & 0xFF); *c = (uint8_t) (EXIT_NO_SCREEN >> 8);   // JP exit
+}
+
+#if PICOMENU_RESET_PIN
+// The reset pin's job, done by the main loop (reset_pin_poll) once the menu has gone: the pin
+// high for RP_HOLD_MS (the Spectrum held in reset), then low; RP_BOOT_MS later (the 128's menu
+// up) an NMI tests the paging (paging_test_code): if it works the load follows (if any), if not
+// the pin didn't reset the Spectrum (rp.failed: said on the next try, paging_draw_locked)
+static struct {
+    uint8_t state = 0;              // 1: waiting for the menu to go, 2: held in reset, 3: starting up,
+                                    //   4: the test's NMI sent
+    bool load = false;              // the snapshot in the buffer to follow (else a reset alone)
+    bool failed = false;            // the last reset didn't reset the Spectrum (the wiring?)
+    bool check = false;             // the next STARTUP_ACTION_CHECKPOINT is the test (sendNmiRequest)
+    uint32_t at = 0;
+} rp;
+static const uint32_t RP_HOLD_MS = 150, RP_BOOT_MS = 2000, RP_CHECK_MS = 3000;
+
+// A reset by the pin, then the snapshot in the buffer loaded (load), or the reset alone
+static void reset_pin_start(bool load) {
+    rp.load = load;
+    if (!load) {
+        snap_prepared = false;
+        menu_reset_128k = false;
+        reset_to_128k_pending = false;
+    }
+    checkpoints_stop();
+    if (!tape_in) tape_service_stop();
+    rp.state = 1;
+}
+
+// (true: an NMI was sent, for the simulator to give it)
+static bool reset_pin_poll() {
+    if (rp.state == 0 || cfg.reset_pin == 0) return false;
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (rp.state == 1) {
+        if (rom_state.nmi_active || (rom_state.flags & 0x2) != 0) return false;
+        gpio_init(cfg.reset_pin);
+        gpio_set_dir(cfg.reset_pin, true);
+        gpio_put(cfg.reset_pin, true);      // the transistor on: the reset line low
+        rp.at = now;
+        rp.state = 2;
+    } else if (rp.state == 2) {
+        if (now - rp.at < RP_HOLD_MS) return false;
+        gpio_put(cfg.reset_pin, false);
+        game_running = tape_in;
+        loaded_paging.valid = false;
+        running_48k = false;
+        rp.at = now;
+        rp.state = 3;
+    } else if (rp.state == 3) {
+        if (now - rp.at < RP_BOOT_MS) return false;
+        // the paging tested, the NMI's own code (after the reset the 128's menu is up)
+        rp.check = true;
+        rom_data[16384 + LK_RESULT] = 0;
+        if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) { rp.check = false; return false; }
+        rp.at = now;
+        rp.state = 4;
+        return true;
+    } else {
+        if ((rom_state.nmi_active || (rom_state.flags & 0x2) != 0) && now - rp.at < RP_CHECK_MS) return false;
+        rp.state = 0;
+        rp.check = false;
+        rp.failed = rom_data[16384 + LK_RESULT] != 0xAA;
+        if (rp.failed) {
+            LOG("The reset pin: the Spectrum was not reset\n");
+            set_last_error("Reset pin GP28:", "no reset");
+            snap_prepared = false;          // (the game isn't loaded: the one before carries on)
+            return false;
+        }
+        if (rp.load) sendNmiAndWaitForCompletion(STARTUP_ACTION_LOAD_SNAP, 0, 0);
+    }
+    return false;
+}
+
+static bool reset_pin_usable() { return cfg.reset_pin != 0 && !rp.failed; }
+
+// sendNmiRequest, STARTUP_ACTION_CHECKPOINT: true if it is the test after a reset (its code put in)
+static bool reset_pin_check_code(uint8_t* nmi_rom_data) {
+    if (!rp.check) return false;
+    rp.check = false;
+    paging_test_code(nmi_rom_data + CP_AT, true);
+    nmi_rom_data[LK_RESULT] = 0;
+    return true;
+}
+#else
+static bool reset_pin_usable() { return false; }
+#endif
+
+static void paging_draw_locked(uint8_t* nmi_rom_data, bool pin_failed) {
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    slots_banner(screen, "Can't load: ", "128K memory locked");
+    // (a line at a time; on a 48K Spectrum there is no paging, so it looks locked too)
+    const char* t = pin_failed
+        ? "The reset pin (reset_pin = 28)\ndidn't reset the Spectrum last\ntime: check the wiring (GP28\nis the Pico's pin 34), or set\nreset_pin = off. A 48K Spectrum\nhas no 128K memory at all.\nFor now: press the picoFace's\nreset button, then load again.\n\nAny key: back to the game"
+        : "The 128K memory is locked (48\nBASIC, a 48K game, or a 48K\nSpectrum). Only a reset lets\nit go: press the picoFace's\nreset button, then load again\n(or fit the reset mod: README).\n\nAny key: back to the game";
+    for (int row = 2; *t != '\0'; row++) {
+        const char* e = strchr(t, '\n');
+        int n = e != nullptr ? (int) (e - t) : (int) strlen(t);
+        help_put_text(screen, row, 1, t, n, e == nullptr ? gameinfo::ATTR_KEYS : gameinfo::ATTR_TEXT);
+        t += e != nullptr ? n + 1 : n;
+    }
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// In ACTION_CHECKPOINT_ASK, before a load from the menu. True: the status is set (PICO_RUN for
+// the test, the screen, or 2: back to the game); false: carry on with the load.
+__attribute__((noinline)) static bool paging_check(uint8_t* nmi_rom_data, uint8_t key) {
+    if (lk.state == 0) {
+        if (key != 0 || !nmi_menu_open || !paging_target_128(nmi_rom_data)) return false;
+#if PICOMENU_RESET_PIN
+        if (cfg.reset_pin != 0 && snap_prepared && menu_reset_128k && !rp.failed) {
+            // Reset to 128K, with the reset pin: always a real reset (the 128's own menu)
+            reset_pin_start(false);
+            nmi_rom_data[0] = 2;
+            return true;
+        }
+#endif
+        paging_test_code(nmi_rom_data + PICO_CODE_AT, false);
+        nmi_rom_data[LK_RESULT] = 0;
+        nmi_rom_data[0] = PICO_RUN;
+        lk.state = 1;
+        return true;
+    }
+    if (lk.state == 1) {
+        lk.state = 0;
+        const bool locked = nmi_rom_data[LK_RESULT] != 0xAA;
+        LOG("128K paging: %s\n", locked ? "locked" : "works");
+        if (!locked) return false;
+        if (!snap_prepared) {
+            // Browse's choice: loaded now, to see (a 48K one loads as usual, from its file)
+            const char* fe = list_entry_name_for(lk.pick_offset, reinterpret_cast<const char*>(nmi_rom_data + lk.pick_offset));
+            load_snapshot_file(lk.pick_drive, list_entry_dir_for(lk.pick_offset), fe, reset_pin_usable());
+            if (!snap_is_paged) return false;
+            snap_prepared = true;
+        }
+        bool pin_failed = false;
+#if PICOMENU_RESET_PIN
+        if (cfg.reset_pin != 0 && !rp.failed) {
+            reset_pin_start(!menu_reset_128k);
+            nmi_rom_data[0] = 2;            // back to the game: the main loop resets the Spectrum
+            return true;
+        }
+        pin_failed = cfg.reset_pin != 0;
+        rp.failed = false;                  // (said once: the next time it is tried again)
+#endif
+        paging_draw_locked(nmi_rom_data, pin_failed);
+        lk.state = 2;
+        return true;
+    }
+    // the screen: any key goes back to the game, and nothing made ready is loaded
+    lk.state = 0;
+    snap_prepared = false;
+    menu_reset_128k = false;
+    reset_to_128k_pending = false;
+    nmi_rom_data[0] = 2;
+    return true;
+}
 
 // ACTION_CHECKPOINT_ASK: param1 0, before a load from the menu (through picoscreen): status 3
 // to ask, 1 not (checkpoints off, no SD card, a checkpoint being loaded). Then 'y' or 'n'. On the
@@ -4917,6 +5427,11 @@ static void nmi_action_checkpoint_ask() {
         key = 0;                    // (the question, if any, is over: on with the load)
     }
 #endif
+    // then whether the 128K memory can be paged, for a load that needs it
+    if (key == 0 || lk.state != 0) {
+        if (paging_check(nmi_rom_data, key)) return;
+        key = 0;
+    }
     if (key == 0) {
         if (rw.loading) {           // a checkpoint: still the same game, checkpoints stay on
             rw.loading = false;
@@ -5044,6 +5559,9 @@ static void hs_path(char* out, size_t outsize, const char* game, const char* ext
 
 // The game in the Spectrum is this one now
 static void hs_game_is(const char* game, bool restored) {
+#if PICOMENU_TROPHIES
+    if (strcmp(hs.game, game) != 0) tr_forget_pending();    // (a trophy's banner is for the game that won it)
+#endif
     snprintf(hs.game, sizeof(hs.game), "%s", game);
     hs.restored = restored;
     hs.sent_ms = to_ms_since_boot(get_absolute_time());
@@ -5141,6 +5659,9 @@ static bool hs_bin_write(const char* game, const uint8_t* p, uint16_t len) {
         set_last_error("Cannot save", path);
     }
     LOG("High scores: %s saved: %d\n", path, ok);
+#if PICOMENU_TROPHIES
+    if (ok) tr_table_saved(game, p, len);
+#endif
     return ok;
 }
 
@@ -5213,6 +5734,16 @@ static void hs_loaded_snapshot(const char* game, bool paged, uint32_t header) {
     uint16_t addr, len;
     if (!hs_def(game, addr, len)) return;
     uint8_t* buf = reinterpret_cast<uint8_t*>(snap_load_buffer);
+#if PICOMENU_TROPHIES
+    if (tr_from_original && len <= hiscore::TABLE_MAX && tr_base_wanted(game)) {
+        // the table as the game came with it (before the saved one goes in): Top of the Table's mark
+        walk_stop();
+        big_valid = false;
+        uint8_t* t = reinterpret_cast<uint8_t*>(list_pool);
+        for (uint16_t i = 0; i < len; i++) t[i] = *hs_in_snapshot(buf, paged, header, addr + i);
+        tr_base(game, t, len);
+    }
+#endif
     char path[sizeof(sd_cwd) + 32];
     hs_path(path, sizeof(path), game, "bin");
     if (f_open(&save_fil, path, FA_READ) != FR_OK) {
@@ -5270,9 +5801,16 @@ static void hs_loaded_snapshot(const char* game, bool paged, uint32_t header) {
     LOG("High scores: %s put in the snapshot: %d\n", game, ok);
 }
 
+#if PICOMENU_TROPHIES
+static void tr_fresh_start();
+#endif
+
 // The snapshot in snap_load_buffer is going into the Spectrum (nmi_action_begin_snap_read): the
 // game it is (load_snapshot_file said) is the one now; a reset or a snapshot from a PC: none
 static void hs_commit() {
+#if PICOMENU_TROPHIES
+    tr_fresh_start();       // (memory trophies start again: what they saw was of another time)
+#endif
     if (!hs_next.valid) {
         hs_game_is("", false);
         return;
@@ -5825,8 +6363,3092 @@ __attribute__((noinline)) static bool hs_action(uint8_t* nmi_rom_data, uint8_t k
 }
 #endif
 
-// ACTION_CHECKPOINTS: K on the menu. BYTE param1 = the key (0: opened). Status 0 stays, 1 closed,
-// 2 the checkpoint chosen is ready (loaded into snap_load_buffer)
+#if PICOMENU_TROPHIES
+// ---- Trophies (Y - Your trophies; trophies.h says how they are written) ----
+// Each game's own: its trophies in /Trophies/<game>.txt (made on Y's screen, or written on a PC:
+// the WiFi file transfer's Edit), and in /Trophies/<game>.won the ones won and the scores its
+// high score table had (as it came, and when last saved). A trophy is won when the game's table
+// is saved with a new score that wins it (tr_table_saved). A trophy won shows a banner over the
+// bottom of the game's screen with a tape-loading sound and border (trophy_sound), a few seconds
+// after the game is back: an NMI with code in place of the autosave's (tr_code), which puts the
+// screen back.
+static const char TR_FOLDER[] = "/Trophies";
+
+// (the trophies' state is in the scratch RAM after the Bluetooth's tape: the main RAM is all used,
+// and core 1's stack, which comes after it there, has room)
+#define TR_RAM __attribute__((section(".scratch_x.trophies")))
+struct TrState {
+    uint32_t pend[4];           // the trophies won whose banner is still to show (their names' hashes)
+    uint8_t npend;
+    uint32_t quiet_ms;          // the last time an NMI was active (the banner waits a while after)
+    bool nmi, peek;             // the next checkpoint NMI is the banner's, or a look at the memory
+    bool peeking;               //   (that look is running: not counted as a menu)
+    bool menu_seen;             // an NMI of ours or not: the memory's trophies are read again after one
+    uint32_t trial;             // a trophy being tried out (T): its name's hash, or 0
+    bool trial_hit;             //   it would have been won: its banner, not won
+    uint32_t trial_hit_hash;
+    uint8_t sel;                // Y's screen: the trophy chosen
+    uint8_t state;              //   0 the list, 1 making one: what wins it, 2 its number, 3 its name,
+                                //   4 "Delete it?", 5 an address, 6 the test, 7 seconds held,
+                                //   8 the others it needs (tr.num: those ticked, a bit each; tr.ndig: the one at),
+                                //   9 what it means (E: tr_about_typed),
+                                //   10-14 the search (F), 20 checked before it is saved, 21 what it
+                                //   means while making it, 22 a score found: reaches or rises,
+                                //   23 something that happened once: the test it suggests
+    uint8_t kind;               //   the one being made: what wins it, and its number
+    uint32_t num;
+    uint8_t ndig;               //   (digits typed)
+    uint16_t addr, held;        //   a memory one: its address, its test, a word, seconds held, its mask,
+    uint8_t op, word, digits;   //   a number's digits (6: 6 bytes)
+    uint16_t mask;
+    uint32_t pvalue;            //   (pvalue: the number its test compares with)
+    bool adding;                //   a peek being added to the chosen trophy (P), not a new trophy
+    bool ed;                    //   the edit screen (ENTER on one, state 25) is open: changes go back to it
+    uint8_t epeek;              //   a peek of it being changed (0-3), or 0xFF (25 edit screen, 26 a peek to
+                                //   delete, 27 seconds held, 28 its score or places)
+    uint8_t skind;              // the address search (F): 0 none, 1 a value, 2 something happening,
+                                //   3 something that happens once (before / after), 4 a score
+    uint8_t srounds, svalue;    //   rounds done; the value typed (1)
+    bool shappen;               //   this round: it is happening (2)
+    uint32_t read_at;           //   reading the game's memory: where next, and how much this time
+    uint16_t read_n;
+    char typed[trophies::NAME_MAX + 1];
+    const char* msg;
+};
+static TrState tr TR_RAM = {};
+
+// The memory trophies of the running game (not won yet, or being tried), looked at checks times a
+// second: each peek's address read by an NMI (tr_peek_code), what it read and read before
+// (rises: from base, where it was when it began to rise; true_t, base_t: when, in 0.1 seconds)
+struct TrSlot {
+    uint32_t value, prev, base;
+    uint16_t addr, mask, true_t, base_t;
+    uint8_t op, word, digits;
+    uint8_t have : 1, truth : 1, latch : 1;     // (latch: was true, within its trophy's seconds)
+};
+// (armed: seen not won at a look, since the game's trophies were first read: only then can it be
+// won. suspect: true at its very first look, so not won: Y says to check it)
+struct TrRule {
+    uint32_t hash; uint32_t since; uint16_t held, within; uint8_t first, n;
+    uint8_t any : 1, done : 1, armed : 1, suspect : 1;
+};
+static const int TR_RULES = 8, TR_SLOTS = 11, TR_RES_EACH = 8;
+struct TrWatch {
+    uint32_t game;              // the game they are for (its name's hash), 0 none read yet
+    uint32_t last_ms;
+    uint32_t look_ms;           // when its reads were last taken (0: none since it was read): a gap
+                                // much longer than its checks' is time away from the game (a menu),
+                                // and doesn't count toward held, within or rises
+    uint8_t nrule, nslot, checks;
+    bool due, wait;             // to be read again; an NMI's reads to be taken
+    bool tab_now;               // this look reads the high score table too
+    uint16_t tab_addr, tab_len; // the game's high score table, read every 5 seconds while it has table
+                                // trophies not won (tab_len 0: none), so they're won in the game
+    uint32_t tab_ms, tab_sum;   // when it was last read, and a sum of it (0: not read yet this time)
+    TrRule rule[TR_RULES];
+    TrSlot slot[TR_SLOTS];
+};
+static TrWatch trw TR_RAM = {};
+static const uint16_t TR_PEEK_RES = CP_AT + 400;    // where the NMI's code puts what it reads
+static const uint16_t TR_TAB_RES = TR_PEEK_RES + TR_RES_EACH * TR_SLOTS;  // (and the table)
+static const uint32_t TR_TAB_MS = 5000;
+static_assert(TR_TAB_RES + hiscore::TABLE_MAX <= CP_LIMIT && 11 * TR_SLOTS + 11 + 3 <= 400, "the peeks' code and reads fit");
+static_assert(trophies::DIGITS_MAX <= TR_RES_EACH, "a peek's digits fit");
+
+static void tr_forget_pending() { tr.npend = 0; }
+
+// A snapshot loaded (or a reset): the memory trophies start again, unarmed, as for a new game
+static void tr_fresh_start() {
+    trw.game = 0;
+    trw.due = true;
+}
+
+static void tr_path(char* out, size_t size, const char* game, const char* ext) {
+    snprintf(out, size, "%s/%s.%s", TR_FOLDER, game, ext);
+}
+
+static void tr_folder() {
+    if (fsops::kind(Drive::EXTERNAL_SD_CARD, TR_FOLDER) != fsops::KIND_DIR) {
+        make_sd_folder(TR_FOLDER);
+        cp_pics_ok = sp_ok = false;     // (FatFs was lent list_pool)
+    }
+}
+
+// /Trophies/<game>.won: "base = <scores>" (the table as the game came), "last = <scores>" (as
+// it was saved last), "won = <hash>" for each trophy won (its name's hash, trophies::name_hash)
+struct TrProg {
+    trophies::Table base = {}, last = {};
+    bool has_base = false, has_last = false;
+    uint8_t nwon = 0;
+    uint32_t won[trophies::MAX];
+};
+static_assert(trophies::SCORES == hiscore::TOP_KEEP, "the scores the table reader keeps");
+
+static void tr_scores_parse(const char* s, trophies::Table& t) {
+    t.n = 0;
+    while (t.n < trophies::SCORES) {
+        char* e;
+        unsigned long v = strtoul(s, &e, 10);
+        if (e == s) break;
+        t.v[t.n++] = (uint32_t) v;
+        s = e;
+    }
+}
+
+static bool tr_scores(const uint8_t* table, uint16_t len, trophies::Table& t) {
+    hiscore::Top2 top;
+    if (!hiscore::scores_top2(table, len, top)) return false;
+    t.n = top.kept;
+    memcpy(t.v, top.all, sizeof(uint32_t) * t.n);
+    return true;
+}
+
+__attribute__((noinline)) static void tr_prog_read(const char* game, TrProg& p) {
+    char path[96], line[100];
+    tr_path(path, sizeof(path), game, "won");
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return;
+    while (f_gets(line, sizeof(line), &save_fil) != nullptr) {
+        if (strncmp(line, "base =", 6) == 0) {
+            tr_scores_parse(line + 6, p.base);
+            p.has_base = true;
+        } else if (strncmp(line, "last =", 6) == 0) {
+            tr_scores_parse(line + 6, p.last);
+            p.has_last = true;
+        } else if (strncmp(line, "won =", 5) == 0 && p.nwon < trophies::MAX) {
+            p.won[p.nwon++] = (uint32_t) strtoul(line + 5, nullptr, 16);
+        }
+    }
+    f_close(&save_fil);
+}
+
+__attribute__((noinline)) static void tr_prog_write(const char* game, const TrProg& p) {
+    tr_folder();
+    char path[96], line[100];
+    tr_path(path, sizeof(path), game, "won");
+    if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    UINT w = 0;
+    int n = snprintf(line, sizeof(line), "; PicoMenu: the trophies won in this game, and its table's scores\r\n");
+    f_write(&save_fil, line, (UINT) n, &w);
+    for (int k = 0; k < 2; k++) {
+        if (!(k == 0 ? p.has_base : p.has_last)) continue;
+        const trophies::Table& t = k == 0 ? p.base : p.last;
+        n = snprintf(line, sizeof(line), "%s =", k == 0 ? "base" : "last");
+        for (int i = 0; i < t.n; i++) n += snprintf(line + n, sizeof(line) - (size_t) n, " %lu", (unsigned long) t.v[i]);
+        n += snprintf(line + n, sizeof(line) - (size_t) n, "\r\n");
+        f_write(&save_fil, line, (UINT) n, &w);
+    }
+    for (int i = 0; i < p.nwon; i++) {
+        n = snprintf(line, sizeof(line), "won = %08lx\r\n", (unsigned long) p.won[i]);
+        f_write(&save_fil, line, (UINT) n, &w);
+    }
+    f_close(&save_fil);
+}
+
+static bool tr_won(const TrProg& p, uint32_t h) {
+    for (int i = 0; i < p.nwon; i++) {
+        if (p.won[i] == h) return true;
+    }
+    return false;
+}
+
+// The game's trophies, a line of its file at a time: each(def, ctx) for each, until it says false
+typedef bool (*TrEach)(const trophies::Def& d, void* ctx);
+// (says how many times a second its memory is looked at: checks)
+__attribute__((noinline)) static uint8_t tr_defs_each(const char* game, TrEach each, void* ctx) {
+    char path[96], line[80];
+    tr_path(path, sizeof(path), game, "txt");
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return 1;
+    trophies::Parser ps;
+    bool more = true;
+    while (more) {
+        bool got;
+        if (f_gets(line, sizeof(line), &save_fil) != nullptr) {
+            got = ps.line(line);
+        } else {
+            got = ps.finish();
+            more = false;
+        }
+        if (got && !each(ps.d, ctx)) break;
+    }
+    f_close(&save_fil);
+    return ps.checks;
+}
+
+// The game's trophies into defs (trophies::MAX at most): how many
+__attribute__((noinline)) static int tr_defs_read(const char* game, trophies::Def* defs) {
+    struct C { trophies::Def* defs; int n; } c = { defs, 0 };
+    tr_defs_each(game, [](const trophies::Def& d, void* x) {
+        C& c = *static_cast<C*>(x);
+        c.defs[c.n++] = d;
+        return c.n < trophies::MAX;
+    }, &c);
+    return c.n;
+}
+
+// Those the new scores win (and not won before): noted in p, and their banners due
+__attribute__((noinline)) static void tr_defs_check(const char* game, const trophies::Table& now,
+        const uint8_t* places, int nnew, uint32_t base_top, TrProg& p) {
+    struct C { const trophies::Table& now; const uint8_t* places; int nnew; uint32_t base_top; TrProg& p; int seen; }
+        c = { now, places, nnew, base_top, p, 0 };
+    tr_defs_each(game, [](const trophies::Def& d, void* x) {
+        C& c = *static_cast<C*>(x);
+        if (trophies::wins(d, c.now, c.places, c.nnew, c.base_top)) {
+            const uint32_t h = trophies::name_hash(d.name);
+            if (!tr_won(c.p, h) && c.p.nwon < trophies::MAX) {
+                c.p.won[c.p.nwon++] = h;
+                if (tr.npend < 4) tr.pend[tr.npend++] = h;
+                LOG("Trophy: %s\n", d.name);
+            }
+        }
+        return ++c.seen < trophies::MAX;
+    }, &c);
+}
+
+static char tr_about_typed[trophies::ABOUT_MAX + 1];    // (E on Y's list: what it means, being typed)
+
+// Trophies won by others (need =): each one whose others are all won now, won too (and its banner).
+// True if any was (p to be written).
+__attribute__((noinline)) static bool tr_needs_settle(const char* game, TrProg& p) {
+    bool any = false;
+    for (int round = 0; round < trophies::MAX; round++) {
+        struct C { TrProg& p; bool got; int seen; } c = { p, false, 0 };
+        tr_defs_each(game, [](const trophies::Def& d, void* x) {
+            C& c = *static_cast<C*>(x);
+            if (d.kind == trophies::K_NEEDS && d.nneed > 0) {
+                const uint32_t h = trophies::name_hash(d.name);
+                bool all = !tr_won(c.p, h) && c.p.nwon < trophies::MAX;
+                for (int i = 0; i < d.nneed && all; i++) all = tr_won(c.p, d.need[i]);
+                if (all) {
+                    c.p.won[c.p.nwon++] = h;
+                    if (tr.npend < 4) tr.pend[tr.npend++] = h;
+                    c.got = true;
+                    LOG("Trophy: %s\n", d.name);
+                }
+            }
+            return ++c.seen < trophies::MAX;
+        }, &c);
+        if (!c.got) break;
+        any = true;
+    }
+    return any;
+}
+
+// Is the table the game came with still to be noted?
+static bool tr_base_wanted(const char* game) {
+    if (!sd_card_mounted) return false;
+    TrProg p;
+    tr_prog_read(game, p);
+    return !p.has_base;
+}
+
+// The table the game came with (its own file loaded, before the saved table goes in)
+static void tr_base(const char* game, const uint8_t* table, uint16_t len) {
+    trophies::Table t;
+    if (!tr_scores(table, len, t)) return;
+    TrProg p;
+    tr_prog_read(game, p);
+    if (p.has_base) return;
+    p.base = t;
+    p.has_base = true;
+    tr_prog_write(game, p);
+    LOG("Trophies: %s came with %lu\n", game, (unsigned long) (t.n > 0 ? t.v[0] : 0));
+}
+
+// A game's table was saved: a new score in it (one that was not in the table saved before) may
+// win some of the game's trophies
+__attribute__((noinline)) static void tr_table_saved(const char* game, const uint8_t* table, uint16_t len) {
+    trophies::Table now;
+    if (!sd_card_mounted || !tr_scores(table, len, now)) return;
+    TrProg p;
+    tr_prog_read(game, p);
+    if (!p.has_base) {
+        // not seen as it came: the table saved before this, or this one
+        p.base = p.has_last ? p.last : now;
+        p.has_base = true;
+    }
+    uint8_t places[trophies::SCORES];
+    // (a table noted with fewer scores, 8 before test 36, is only noted again: its extra places
+    // aren't new scores)
+    const trophies::Table& was = p.has_last ? p.last : p.base;
+    const int nnew = was.n == now.n ? trophies::new_places(now, was, places) : 0;
+    if (nnew > 0) {
+        tr_defs_check(game, now, places, nnew, p.base.n > 0 ? p.base.v[0] : 0, p);
+        tr_needs_settle(game, p);
+    }
+    p.last = now;
+    p.has_last = true;
+    tr_prog_write(game, p);
+}
+
+// The running game's memory trophies (not won yet, or the one being tried) into trw: when the game
+// changes, and after a menu (Y may have made one, the WiFi file transfer changed the file)
+__attribute__((noinline)) static void tr_watch_load() {
+    // (what was seen of each, kept while it's the same game: read again after every menu. A
+    // snapshot loaded starts again: tr_fresh_start)
+    struct Was { TrRule rule[TR_RULES]; TrSlot slot[TR_SLOTS]; int nrule; } was;
+    was.nrule = 0;
+    if (trw.game == trophies::name_hash(hs.game)) {
+        was.nrule = trw.nrule;
+        memcpy(was.rule, trw.rule, sizeof(was.rule));
+        memcpy(was.slot, trw.slot, sizeof(was.slot));
+    } else {
+        trw.look_ms = 0;
+        trw.tab_ms = trw.tab_sum = 0;
+    }
+    trw.due = false;
+    trw.wait = false;
+    trw.nrule = trw.nslot = 0;
+    trw.game = trophies::name_hash(hs.game);
+    if (hs.game[0] == '\0' || !sd_card_mounted) return;
+    TrProg p;
+    tr_prog_read(hs.game, p);
+    if (tr_needs_settle(hs.game, p)) tr_prog_write(hs.game, p);   // (a need = line written on a PC)
+    struct C { const TrProg& p; const Was& was; bool tabs; } c = { p, was, false };
+    trw.checks = tr_defs_each(hs.game, [](const trophies::Def& d, void* x) {
+        C& cx = *static_cast<C*>(x);
+        const TrProg& p = cx.p;
+        if ((d.kind == trophies::K_SCORE || d.kind == trophies::K_TOP || d.kind == trophies::K_PLACE) &&
+                !tr_won(p, trophies::name_hash(d.name))) cx.tabs = true;
+        if (d.kind != trophies::K_MEM || d.npeek == 0) return true;
+        const uint32_t h = trophies::name_hash(d.name);
+        if (tr_won(p, h) && h != tr.trial) return true;
+        if (trw.nrule >= TR_RULES || trw.nslot + d.npeek > TR_SLOTS) return false;
+        TrRule& r = trw.rule[trw.nrule++];
+        r.hash = h;
+        r.since = 0;
+        r.held = d.held;
+        r.within = d.within;
+        r.first = trw.nslot;
+        r.n = d.npeek;
+        r.any = d.any != 0;
+        r.done = 0;
+        r.armed = 0;
+        r.suspect = 0;
+        const TrRule* old = nullptr;
+        for (int k = 0; k < cx.was.nrule; k++) {
+            if (cx.was.rule[k].hash == h) old = &cx.was.rule[k];
+        }
+        if (old != nullptr) {
+            r.armed = old->armed;
+            r.suspect = old->suspect;
+            r.since = old->since;
+        }
+        bool same = old != nullptr && old->n == d.npeek;
+        for (int i = 0; i < d.npeek; i++) {
+            TrSlot& sl = trw.slot[trw.nslot++];
+            sl.addr = d.peek[i].addr;
+            sl.op = d.peek[i].op;
+            sl.word = d.peek[i].word;
+            sl.value = d.peek[i].value;
+            sl.mask = d.peek[i].mask;
+            sl.digits = d.peek[i].digits;
+            sl.have = sl.truth = sl.latch = 0;
+            sl.prev = sl.base = 0;
+            sl.true_t = sl.base_t = 0;
+            if (same) {
+                // (the same peek as before the menu: what it had seen carries on)
+                const TrSlot& o = cx.was.slot[old->first + i];
+                same = o.addr == sl.addr && o.op == sl.op && o.word == sl.word && o.value == sl.value &&
+                    o.mask == sl.mask && o.digits == sl.digits;
+                if (same) sl = o;
+            }
+        }
+        if (!same) r.since = 0;
+        return true;
+    }, &c);
+    // its table trophies (not won yet): its table looked at while it runs
+    uint16_t ta = 0, tl = 0;
+    if (!c.tabs || !hs_def(hs.game, ta, tl) || tl == 0 || tl > hiscore::TABLE_MAX) tl = 0;
+    trw.tab_addr = ta;
+    trw.tab_len = tl;
+    LOG("Trophies: %d to look for in the memory, %d a second%s\n", trw.nrule, trw.checks, tl ? ", and its table" : "");
+}
+
+// What the last look read of the game's high score table: when it has changed, its new scores
+// are looked at as when it's saved (tr_table_saved). The first read since the game was loaded
+// only notes it (the table that was saved before may have more in it, or less: a table not saved
+// when the game was left), so only what changes while it's played counts.
+static void tr_table_look(const uint8_t* t, uint16_t len) {
+    uint32_t sum = 2166136261u;
+    for (uint16_t i = 0; i < len; i++) sum = (sum ^ t[i]) * 16777619u;
+    sum |= 1;
+    if (sum == trw.tab_sum) return;
+    const bool first = trw.tab_sum == 0;
+    trophies::Table now;
+    if (!sd_card_mounted || !tr_scores(t, len, now)) return;    // (not a table yet: loading)
+    trw.tab_sum = sum;
+    if (!first) {
+        tr_table_saved(hs.game, t, len);
+        return;
+    }
+    TrProg p;
+    tr_prog_read(hs.game, p);
+    if (p.has_last && p.last.n == now.n && memcmp(p.last.v, now.v, sizeof(now.v[0]) * now.n) == 0) return;
+    if (!p.has_base) {
+        p.base = now;
+        p.has_base = true;
+    }
+    p.last = now;
+    p.has_last = true;
+    tr_prog_write(hs.game, p);
+}
+
+// The NMI's code (sendNmiRequest, STARTUP_ACTION_CHECKPOINT with tr.peek): each peek's bytes
+// copied to TR_PEEK_RES (8 each), then back to the game (its registers put back by the exit)
+static void tr_peek_code(uint8_t* nmi_rom_data) {
+    uint8_t* c = nmi_rom_data + CP_AT;
+    auto w16 = [&](uint16_t v) { *c++ = (uint8_t) (v & 0xFF); *c++ = (uint8_t) (v >> 8); };
+    for (int i = 0; i < trw.nslot; i++) {
+        const TrSlot& sl = trw.slot[i];
+        const int nb = sl.digits ? sl.digits : sl.word ? 2 : 1;
+        *c++ = 0x21; w16(sl.addr);                                      // LD HL,addr
+        *c++ = 0x11; w16((uint16_t) (TR_PEEK_RES + TR_RES_EACH * i));   // LD DE,res
+        *c++ = 0x01; w16((uint16_t) nb);                                // LD BC,n
+        *c++ = 0xED; *c++ = 0xB0;                                       // LDIR
+    }
+    if (trw.tab_now) {
+        *c++ = 0x21; w16(trw.tab_addr);                                 // the high score table
+        *c++ = 0x11; w16(TR_TAB_RES);
+        *c++ = 0x01; w16(trw.tab_len);
+        *c++ = 0xED; *c++ = 0xB0;
+    }
+    *c++ = 0xC3; w16(EXIT_NO_SCREEN);
+    trw.wait = true;
+}
+
+// Won (or, being tried out, would be): its banner, and noted
+static void tr_mem_won(TrRule& r) {
+    r.done = true;
+    if (r.hash == tr.trial) {
+        tr.trial = 0;
+        tr.trial_hit = true;
+        tr.trial_hit_hash = r.hash;
+        trw.due = true;                 // (not looked for again, unless it is not won)
+        return;
+    }
+    TrProg p;
+    tr_prog_read(hs.game, p);
+    if (tr.npend < 4) tr.pend[tr.npend++] = r.hash;
+    if (!tr_won(p, r.hash) && p.nwon < trophies::MAX) {
+        p.won[p.nwon++] = r.hash;
+        tr_needs_settle(hs.game, p);
+        tr_prog_write(hs.game, p);
+    }
+}
+
+// What the NMI read: each peek true or not, and each trophy won if its peeks are (for long enough).
+// Before another NMI puts the NMI ROM back (sendNmiRequest), or once it has ended (tr_poll).
+// "within": each peek true still counts for that many seconds after, and "rises" counts from where
+// the number began to rise, unless that was longer ago (or it went down); without, from the last look.
+static void tr_peek_harvest() {
+    trw.wait = false;
+    const uint8_t* res = rom_data + 16384 + TR_PEEK_RES;
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    const uint16_t t = (uint16_t) (now / 100);
+    if (trw.look_ms != 0) {
+        // time away from the game (a menu, a tape loading) since the last look: moved past, so
+        // held, within and rises count only time in the game
+        const uint32_t each = 1000u / (trw.checks > 0 ? trw.checks : 1);
+        const uint32_t gap = now - trw.look_ms;
+        if (gap > 4 * each + 2000) {        // (3 s at 4 a second, 6 s at once a second)
+            const uint32_t away = gap - each;
+            for (int k = 0; k < trw.nrule; k++) {
+                if (trw.rule[k].since != 0) trw.rule[k].since += away;
+            }
+            for (int i = 0; i < trw.nslot; i++) {
+                trw.slot[i].true_t = (uint16_t) (trw.slot[i].true_t + away / 100);
+                trw.slot[i].base_t = (uint16_t) (trw.slot[i].base_t + away / 100);
+            }
+        }
+    }
+    trw.look_ms = now;
+    for (int k = 0; k < trw.nrule; k++) {
+        TrRule& r = trw.rule[k];
+        const uint16_t w = (uint16_t) (r.within * 10);
+        bool all = true, any = false;
+        for (int i = r.first; i < r.first + r.n; i++) {
+            TrSlot& sl = trw.slot[i];
+            const trophies::Peek pk = { sl.addr, sl.op, sl.word, sl.value, sl.mask, sl.digits };
+            const uint32_t v = trophies::peek_value(pk, res + TR_RES_EACH * i);
+            if (!sl.have || w == 0 || v < sl.prev) {
+                sl.base = sl.have && w == 0 ? sl.prev : v;
+                sl.base_t = t;
+            } else if ((uint16_t) (t - sl.base_t) > w) {
+                sl.base = sl.prev;              // (rose too slowly: from the last look now)
+                sl.base_t = t;
+            }
+            sl.truth = trophies::peek_true(pk, v, sl.prev, sl.have, sl.base);
+            if (sl.truth) {
+                sl.latch = 1;
+                sl.true_t = t;
+                if (pk.op == trophies::O_RISES) {
+                    sl.base = v;                // (counted: a rise after it starts again)
+                    sl.base_t = t;
+                }
+            } else if (sl.latch && (w == 0 || (uint16_t) (t - sl.true_t) > w)) {
+                sl.latch = 0;
+            }
+            sl.prev = v;
+            sl.have = 1;
+            const bool yes = sl.truth || (w > 0 && sl.latch);
+            all = all && yes;
+            any = any || yes;
+        }
+        if (r.done) continue;
+        if (!(r.any ? any : all)) {
+            r.since = 0;
+            r.armed = 1;
+            continue;
+        }
+        if (!r.armed) {
+            // true from its first look: not won (an address or test that's always true, or
+            // true before it was played for): Y says so
+            r.suspect = 1;
+            continue;
+        }
+        r.suspect = 0;
+        if (r.since == 0) r.since = now == 0 ? 1 : now;
+        if (now - r.since >= (uint32_t) r.held * 1000) tr_mem_won(r);
+    }
+    if (trw.tab_now) {
+        trw.tab_now = false;
+        if (hs.restored && trw.tab_len > 0) tr_table_look(res + (TR_TAB_RES - TR_PEEK_RES), trw.tab_len);
+    }
+}
+
+// The banner, once the game has been back a while, and the memory looked at. From the main loop;
+// true if an NMI was sent.
+static bool tr_poll() {
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (trw.wait && !rom_state.nmi_active && (rom_state.flags & 0x2) == 0) tr_peek_harvest();
+    if (rom_state.nmi_active) {
+        if (!tr.peeking) {
+            tr.quiet_ms = now;
+            tr.menu_seen = true;
+        }
+        return false;
+    }
+    tr.peeking = false;
+    if (tr.menu_seen) {
+        tr.menu_seen = false;
+        trw.due = true;
+    }
+    // (not while a tape is giving the game blocks: tape_loading, not tape_busy, which stays true
+    // until a tape has been read to its end, and so for good with a tape whose last blocks are
+    // never asked for)
+    if (!game_running || tape_loading() || conv_running() || rw.pending || hs.cap != 0) return false;
+    if (trw.due || trw.game != trophies::name_hash(hs.game)) tr_watch_load();
+    if (tr.npend > 0 || tr.trial_hit) {
+        if (now - tr.quiet_ms < 4000) return false;
+#ifdef PICOFACE_HOST
+        if (!host_trophy_banner) return false;  // (the simulator: only when its script says, trophies on)
+#endif
+        tr.nmi = true;
+        if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) {
+            tr.nmi = false;
+            tr.quiet_ms = now;
+            return false;
+        }
+        return true;
+    }
+    if (trw.checks == 0 || now - tr.quiet_ms < 2000) return false;
+    bool any = false;
+    for (int k = 0; k < trw.nrule; k++) any = any || !trw.rule[k].done;
+    const bool mem_due = any && now - trw.last_ms >= 1000u / trw.checks;
+    const bool tab_due = trw.tab_len > 0 && hs.restored && now - trw.tab_ms >= TR_TAB_MS;
+    if (!mem_due && !tab_due) return false;
+    trw.last_ms = now;
+    trw.tab_now = tab_due;
+    if (tab_due) trw.tab_ms = now;
+    tr.peek = true;
+    if (!sendNmiRequest(STARTUP_ACTION_CHECKPOINT, 0, 0)) {
+        tr.peek = false;
+        return false;
+    }
+    return true;
+}
+
+// The banner's NMI (sendNmiRequest, STARTUP_ACTION_CHECKPOINT): code at CP_AT that keeps rows 21
+// to 23 of the game's screen in spare_space, puts the banner there, plays the sound (a tape
+// loading: the pilot tone with red and cyan in the border, then data with blue and yellow, as the
+// Spectrum's own SAVE makes them; short or long, trophy_sound), waits, puts the rows back and
+// goes back to the game.
+static void tr_code(uint8_t* nmi_rom_data) {
+    // the trophy's name and what won it, from the game's file
+    trophies::Def won;
+    memset(&won, 0, sizeof(won));
+    // (a trophy tried out, T on Y's screen: its own banner, and the ones won stay for the next)
+    const bool trial = tr.trial_hit;
+    const uint32_t first = trial ? tr.trial_hit_hash : tr.pend[0];
+    const int count = trial ? 1 : tr.npend;
+    if (trial) tr.trial_hit = false;
+    else tr.npend = 0;
+    struct C { trophies::Def& won; uint32_t first; } find = { won, first };
+    tr_defs_each(hs.game, [](const trophies::Def& d, void* x) {
+        C& f = *static_cast<C*>(x);
+        if (trophies::name_hash(d.name) != f.first) return true;
+        f.won = d;
+        return false;
+    }, &find);
+    if (won.name[0] == '\0') snprintf(won.name, sizeof(won.name), "A trophy");
+    // the banner: drawn on a screen in list_pool, its three rows taken
+    walk_stop();
+    big_valid = false;
+    cp_pics_ok = sp_ok = false;
+    uint8_t* scr = cp_pics();
+    memset(scr, 0, 6912);
+    const uint8_t BANNER = 0x4E, NAME = 0x4F;       // bright: yellow and white on blue
+    memset(scr + 6144 + 20 * 32, BANNER, 128);       // (rows 20 to 23)
+    if (trial) help_put_text(scr, 20, 5, "TRY IT OUT: IT WORKS!", 21, BANNER);
+    else help_put_text(scr, 20, 8, "TROPHY UNLOCKED!", 16, BANNER);
+    for (int c : { 1, 30 }) {
+        for (int y = 0; y < 8; y++) scr[zx_line(21 * 8 + y) + c] = trophies::CUP[y];
+    }
+    char t[40];
+    help_put_text(scr, 21, 3, won.name, (int) strlen(won.name), NAME);
+    // what it means: two lines, or one and a note
+    const int L = trophies::ABOUT_LINE;
+    const int a1 = trophies::wrap_first(won.about, L);
+    help_put_text(scr, 22, 1, won.about, a1, NAME);
+    if (trial) snprintf(t, sizeof(t), "(a try: not counted as won)");
+    else if (count > 1) snprintf(t, sizeof(t), "and %d more: Y on the menu", count - 1);
+    else snprintf(t, sizeof(t), "%.30s", trophies::wrap_rest(won.about, L));
+    help_put_text(scr, 23, 1, t, (int) strlen(t), NAME);
+    // the code
+    uint8_t* c0 = nmi_rom_data + CP_AT;
+    uint8_t* c = c0;
+    const uint16_t SAVE_ROWS = CP_AT + 160, SHOW_ROWS = CP_AT + 192, DATA = CP_AT + 224;
+    auto w16 = [&](uint16_t v) { *c++ = (uint8_t) (v & 0xFF); *c++ = (uint8_t) (v >> 8); };
+    auto jr = [&](uint8_t op, uint8_t* to) { *c = op; c[1] = (uint8_t) (to - (c + 2)); c += 2; };
+    *c++ = 0x21; w16(0x5080);                       // LD HL,row 20 / LD DE,spare / CALL SAVE_ROWS
+    *c++ = 0x11; w16(SPARE_AT);
+    *c++ = 0xCD; w16(SAVE_ROWS);
+    *c++ = 0x21; w16(DATA);                         // LD HL,the banner / CALL SHOW_ROWS
+    *c++ = 0xCD; w16(SHOW_ROWS);
+    const uint8_t sound = cfg.trophy_sound;
+    if (sound != 0) {
+        // the pilot: an edge every 2168 T-states (54 + 13 B)
+        *c++ = 0x11; w16(sound == 2 ? 4843 : 1614);  // LD DE,edges
+        *c++ = 0x3E; *c++ = 0x12;                   // LD A,speaker + red
+        uint8_t* p = c;
+        *c++ = 0xD3; *c++ = 0xFE;                   // OUT (0xFE),A
+        *c++ = 0xEE; *c++ = 0x17;                   // XOR 0x17: red and on, cyan and off
+        *c++ = 0x06; *c++ = 163;                    // LD B,163 / DJNZ $
+        *c++ = 0x10; *c++ = 0xFE;
+        *c++ = 0x1B; *c++ = 0x4F;                   // DEC DE / LD C,A / LD A,D / OR E / LD A,C
+        *c++ = 0x7A; *c++ = 0xB3; *c++ = 0x79;
+        jr(0x20, p);                                // JR NZ,the pilot
+        // the data: bytes of this ROM, each bit two edges of 855 (0) or 1710 (1) T-states
+        const int bytes = sound == 2 ? 255 : 100;
+        *c++ = 0x21; w16((uint16_t) (0x100 - bytes)); // LD HL,0x100 - bytes (to L = 0)
+        *c++ = 0x3E; *c++ = 0x11;                   // LD A,speaker + blue
+        uint8_t* d = c;
+        *c++ = 0x5E;                                // LD E,(HL) / LD D,8
+        *c++ = 0x16; *c++ = 8;
+        uint8_t* b = c;
+        *c++ = 0xCB; *c++ = 0x13;                   // RL E
+        *c++ = 0x06; *c++ = 63;                     // LD B,a 0 / JR NC,+2 / LD B,a 1
+        *c++ = 0x30; *c++ = 2;
+        *c++ = 0x06; *c++ = 129;
+        *c++ = 0xD3; *c++ = 0xFE;                   // OUT / XOR: blue and on, yellow and off
+        *c++ = 0xEE; *c++ = 0x17;
+        *c++ = 0x48;                                // LD C,B / DJNZ $ / LD B,C
+        *c++ = 0x10; *c++ = 0xFE;
+        *c++ = 0x41;
+        *c++ = 0xD3; *c++ = 0xFE;                   // OUT / XOR / DJNZ $
+        *c++ = 0xEE; *c++ = 0x17;
+        *c++ = 0x10; *c++ = 0xFE;
+        *c++ = 0x15;                                // DEC D / JR NZ,the next bit
+        jr(0x20, b);
+        *c++ = 0x2C;                                // INC L / JR NZ,the next byte
+        jr(0x20, d);
+    }
+    *c++ = 0x3A; w16(0x5C48);                       // LD A,(BORDCR) / RRA x3 / AND 7 / OUT (0xFE),A
+    *c++ = 0x1F; *c++ = 0x1F; *c++ = 0x1F;          //   (the border as the game had it, as the menu leaves it)
+    *c++ = 0xE6; *c++ = 0x07;
+    *c++ = 0xD3; *c++ = 0xFE;
+    *c++ = 0x11; w16(sound != 0 ? 1563 : 3126);     // LD DE,n: the banner stays 1.5 s more (3 s with no sound)
+    uint8_t* h = c;
+    *c++ = 0x06; *c++ = 0x00;                       // LD B,0 / DJNZ $ / DEC DE / LD A,D / OR E / JR NZ
+    *c++ = 0x10; *c++ = 0xFE;
+    *c++ = 0x1B; *c++ = 0x7A; *c++ = 0xB3;
+    jr(0x20, h);
+    *c++ = 0x21; w16(SPARE_AT);                     // LD HL,spare / CALL SHOW_ROWS: the game's rows back
+    *c++ = 0xCD; w16(SHOW_ROWS);
+    *c++ = 0xC3; w16(EXIT_NO_SCREEN);
+    // SAVE_ROWS: rows 20-23 (8 lines of 128 bytes, then 128 attributes) from HL to DE
+    c = nmi_rom_data + SAVE_ROWS;
+    static const uint8_t SAVE_CODE[] = {
+        0x06, 0x08, 0xC5, 0xE5, 0x01, 0x80, 0x00, 0xED, 0xB0, 0xE1, 0x24, 0xC1, 0x10, 0xF4,
+        0x21, 0x80, 0x5A, 0x01, 0x80, 0x00, 0xED, 0xB0, 0xC9 };
+    memcpy(c, SAVE_CODE, sizeof(SAVE_CODE));
+    // SHOW_ROWS: from HL to rows 20-23
+    c = nmi_rom_data + SHOW_ROWS;
+    static const uint8_t SHOW_CODE[] = {
+        0x11, 0x80, 0x50, 0x06, 0x08, 0xC5, 0xD5, 0x01, 0x80, 0x00, 0xED, 0xB0, 0xD1, 0x14, 0xC1, 0x10, 0xF4,
+        0x11, 0x80, 0x5A, 0x01, 0x80, 0x00, 0xED, 0xB0, 0xC9 };
+    memcpy(c, SHOW_CODE, sizeof(SHOW_CODE));
+    // the banner's bytes
+    c = nmi_rom_data + DATA;
+    for (int y = 0; y < 8; y++) memcpy(c + y * 128, scr + zx_line(20 * 8 + y), 128);
+    memcpy(c + 8 * 128, scr + 6144 + 20 * 32, 128);
+}
+static_assert(160 + 32 + 32 + 9 * 128 <= CP_LIMIT - CP_AT, "the banner's code and data fit where cpsave goes");
+static_assert(9 * 128 <= 1792, "the game's banner rows fit in spare_space");
+
+// A trophy made on Y's screen: put at the end of the game's file (made, with its notes, if new)
+// (a K_NEEDS one: its need = lines, the names of others[i] for each bit i of mask)
+__attribute__((noinline)) static bool tr_def_add(const char* game, const trophies::Def& d,
+        const trophies::Def* others = nullptr, uint32_t mask = 0) {
+    tr_folder();
+    char path[96], text[256];
+    tr_path(path, sizeof(path), game, "txt");
+    const bool fresh = fsops::kind(Drive::EXTERNAL_SD_CARD, path) == fsops::KIND_NONE;
+    if (f_open(&save_fil, path, FA_WRITE | FA_OPEN_APPEND) != FR_OK) return false;
+    UINT w = 0;
+    bool ok = true;
+    if (fresh) ok = f_write(&save_fil, trophies::FILE_HEAD, sizeof(trophies::FILE_HEAD) - 1, &w) == FR_OK;
+    const int n = trophies::write_def(text, sizeof(text), d);
+    ok = ok && f_write(&save_fil, text, (UINT) n, &w) == FR_OK && w == (UINT) n;
+    for (int i = 0; others != nullptr && i < trophies::MAX && ok; i++) {
+        if ((mask & (1u << i)) == 0) continue;
+        const int m = snprintf(text, sizeof(text), "need = %s\r\n", others[i].name);
+        ok = f_write(&save_fil, text, (UINT) m, &w) == FR_OK && w == (UINT) m;
+    }
+    if (f_close(&save_fil) != FR_OK) ok = false;
+    return ok;
+}
+
+// The game's trophy number k (as tr_defs_read counts them) deleted from its file (repl null), or
+// written again as repl (lines of it PicoMenu doesn't know are lost then), everything else in the
+// file left as it is
+// (about: only its about = line changed to it, or one put after its name)
+__attribute__((noinline)) static bool tr_def_rewrite(const char* game, int k, const trophies::Def* repl,
+        const char* about = nullptr) {
+    char path[96];
+    tr_path(path, sizeof(path), game, "txt");
+    // the file in snap_load_buffer (after Y's screen and its list)
+    char* text = snap_load_buffer + 16384;
+    const UINT room = 16384;
+    UINT got = 0;
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return false;
+    bool ok = f_read(&save_fil, text, room, &got) == FR_OK && got < room;
+    f_close(&save_fil);
+    if (!ok) return false;
+    // the lines: a trophy is from its [Trophy] line to the next [ line (or the end)
+    trophies::Parser ps;
+    char line[80];
+    UINT at = 0, start = 0, cut0 = 0, cut1 = 0;
+    int seen = 0;
+    bool found = false;
+    while (!found) {
+        UINT e = at;
+        while (e < got && text[e] != '\n') e++;
+        const bool end = at >= got;
+        bool whole;
+        if (end) {
+            whole = ps.finish();
+        } else {
+            UINT l = e - at < sizeof(line) - 1 ? e - at : sizeof(line) - 1;
+            memcpy(line, text + at, l);
+            line[l] = '\0';
+            whole = ps.line(line);
+        }
+        if (whole) {
+            if (seen == k) {
+                cut0 = start;
+                cut1 = end ? got : at;
+                found = true;
+                break;
+            }
+            seen++;
+        }
+        if (end) break;
+        if (text[at] == '[') start = at;
+        at = e < got ? e + 1 : got;
+    }
+    if (!found) return false;
+    char def[320];
+    int dn = 0;
+    if (about != nullptr) {
+        // its about = line (or the line after its name, or after [Trophy]) put in place of
+        UINT a0 = 0, a1 = 0, after_name = 0, after_head = 0;
+        bool have = false;
+        for (UINT q = cut0; q < cut1 && !have; ) {
+            UINT e = q;
+            while (e < cut1 && text[e] != '\n') e++;
+            const UINT next = e < cut1 ? e + 1 : cut1;
+            UINT b = q;
+            while (b < e && (text[b] == ' ' || text[b] == '\t')) b++;
+            auto key = [&](const char* kw) {
+                const UINT kl = (UINT) strlen(kw);
+                if (e - b < kl) return false;
+                for (UINT j = 0; j < kl; j++) if ((text[b + j] | 0x20) != kw[j]) return false;
+                UINT r = b + kl;
+                while (r < e && (text[r] == ' ' || text[r] == '\t')) r++;
+                return r < e && text[r] == '=';
+            };
+            if (after_head == 0 && b < e && text[b] == '[') after_head = next;
+            if (key("about")) {
+                a0 = q;
+                a1 = next;
+                have = true;
+            } else if (key("name")) {
+                after_name = next;
+            }
+            q = next;
+        }
+        if (!have) a0 = a1 = after_name != 0 ? after_name : after_head != 0 ? after_head : cut0;
+        char ab[trophies::ABOUT_MAX + 1];
+        snprintf(ab, sizeof(ab), "%s", about);
+        const int an = snprintf(def, sizeof(def), "about = %s\r\n", ab);
+        if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
+        UINT w = 0;
+        ok = f_write(&save_fil, text, a0, &w) == FR_OK && w == a0;
+        // (no line end before it: one put first)
+        if (ok && a0 > 0 && text[a0 - 1] != '\n') ok = f_write(&save_fil, "\r\n", 2, &w) == FR_OK;
+        ok = ok && f_write(&save_fil, def, (UINT) an, &w) == FR_OK && w == (UINT) an;
+        ok = ok && f_write(&save_fil, text + a1, got - a1, &w) == FR_OK && w == got - a1;
+        if (f_close(&save_fil) != FR_OK) ok = false;
+        return ok;
+    }
+    if (repl == nullptr) {
+        // (the blank line before it too, as tr_def_add writes one)
+        if (cut0 >= 4 && memcmp(text + cut0 - 4, "\r\n\r\n", 4) == 0) cut0 -= 2;
+        else if (cut0 >= 2 && memcmp(text + cut0 - 2, "\n\n", 2) == 0) cut0 -= 1;
+    } else {
+        // (write_def starts with a blank line: the old one's is kept; one after it if more follows)
+        dn = trophies::write_def(def, sizeof(def) - 2, *repl);
+        if (dn < 2 || dn >= (int) sizeof(def) - 2) return false;
+        if (cut1 < got) {
+            def[dn++] = '\r';
+            def[dn++] = '\n';
+        }
+        dn -= 2;
+    }
+    if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
+    UINT w = 0;
+    ok = f_write(&save_fil, text, cut0, &w) == FR_OK && w == cut0;
+    if (dn > 0) ok = ok && f_write(&save_fil, def + 2, (UINT) dn, &w) == FR_OK && w == (UINT) dn;
+    ok = ok && f_write(&save_fil, text + cut1, got - cut1, &w) == FR_OK && w == got - cut1;
+    if (f_close(&save_fil) != FR_OK) ok = false;
+    return ok;
+}
+
+// Deletes the game's trophy number k from its file, and from what has been won
+// N in the Trophy creator: the k-th trophy renamed. Its name = line, and every need = line naming
+// it (in names with commas between too), written again; all else in the file as it was. old: the
+// name it had (for .won). False if it couldn't be.
+__attribute__((noinline)) static bool tr_def_rename(const char* game, int k, const char* name, char* old) {
+    char path[96];
+    tr_path(path, sizeof(path), game, "txt");
+    char* text = snap_load_buffer + 16384;
+    const UINT room = 16384;
+    UINT got = 0;
+    if (f_open(&save_fil, path, FA_READ) != FR_OK) return false;
+    bool ok = f_read(&save_fil, text, room, &got) == FR_OK && got < room;
+    f_close(&save_fil);
+    if (!ok) return false;
+    // the k-th trophy's lines (as tr_def_rewrite finds them), and its name
+    trophies::Parser ps;
+    char line[80];
+    UINT at = 0, start = 0, cut0 = 0, cut1 = 0;
+    int seen = 0;
+    bool found = false;
+    while (!found) {
+        UINT e = at;
+        while (e < got && text[e] != '\n') e++;
+        const bool end = at >= got;
+        bool whole;
+        if (end) {
+            whole = ps.finish();
+        } else {
+            UINT l = e - at < sizeof(line) - 1 ? e - at : sizeof(line) - 1;
+            memcpy(line, text + at, l);
+            line[l] = '\0';
+            whole = ps.line(line);
+        }
+        if (whole) {
+            if (seen == k) {
+                cut0 = start;
+                cut1 = end ? got : at;
+                found = true;
+                snprintf(old, trophies::NAME_MAX + 1, "%s", ps.d.name);
+                break;
+            }
+            seen++;
+        }
+        if (end) break;
+        if (text[at] == '[') start = at;
+        at = e < got ? e + 1 : got;
+    }
+    if (!found) return false;
+    const uint32_t oldh = trophies::name_hash(old);
+    if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
+    UINT w = 0;
+    auto put = [&](const char* s, UINT n) {
+        if (ok && n > 0) ok = f_write(&save_fil, s, n, &w) == FR_OK && w == n;
+    };
+    for (UINT q = 0; q < got && ok; ) {
+        UINT e = q;
+        while (e < got && text[e] != '\n') e++;
+        const UINT next = e < got ? e + 1 : got;
+        UINT b = q;
+        while (b < e && (text[b] == ' ' || text[b] == '\t')) b++;
+        auto key = [&](const char* kw) -> UINT {           // past its "=" (0: not that key)
+            const UINT kl = (UINT) strlen(kw);
+            if (e - b < kl) return 0;
+            for (UINT j = 0; j < kl; j++) if ((text[b + j] | 0x20) != kw[j]) return 0;
+            UINT r = b + kl;
+            while (r < e && (text[r] == ' ' || text[r] == '\t')) r++;
+            return r < e && text[r] == '=' ? r + 1 : 0;
+        };
+        UINT v;
+        if (q >= cut0 && q < cut1 && key("name") != 0) {
+            char nl[48];
+            const int m = snprintf(nl, sizeof(nl), "name = %s\r\n", name);
+            put(nl, (UINT) m);
+        } else if ((v = key("needs")) != 0 || (v = key("need")) != 0) {
+            // its names: the old one becomes the new one
+            put(text + q, v - q);
+            put(" ", 1);
+            UINT r = v;
+            bool firstn = true;
+            UINT stop = e;
+            if (stop > r && text[stop - 1] == '\r') stop--;
+            while (r < stop && ok) {
+                while (r < stop && (text[r] == ' ' || text[r] == '\t')) r++;
+                UINT c = r;
+                while (c < stop && text[c] != ',') c++;
+                UINT t = c;
+                while (t > r && (text[t - 1] == ' ' || text[t - 1] == '\t')) t--;
+                char nm[trophies::NAME_MAX + 1];
+                const UINT l = t - r < (UINT) trophies::NAME_MAX ? t - r : (UINT) trophies::NAME_MAX;
+                memcpy(nm, text + r, l);
+                nm[l] = '\0';
+                if (!firstn) put(", ", 2);
+                firstn = false;
+                if (trophies::name_hash(nm) == oldh) put(name, (UINT) strlen(name));
+                else put(text + r, t - r);
+                r = c < stop ? c + 1 : stop;
+            }
+            put("\r\n", 2);
+        } else {
+            put(text + q, next - q);
+        }
+        q = next;
+    }
+    if (f_close(&save_fil) != FR_OK) ok = false;
+    return ok;
+}
+
+__attribute__((noinline)) static bool tr_def_delete(const char* game, int k, uint32_t hash) {
+    const bool ok = tr_def_rewrite(game, k, nullptr);
+    TrProg p;
+    tr_prog_read(game, p);
+    for (int i = 0; i < p.nwon; i++) {
+        if (p.won[i] == hash) {
+            p.won[i] = p.won[--p.nwon];
+            tr_prog_write(game, p);
+            break;
+        }
+    }
+    return ok;
+}
+
+// R on Y's screen: "checks = n" at the top of the game's file (how often its memory is looked
+// at), the rest of the file left as it is
+__attribute__((noinline)) static bool tr_checks_set(const char* game, uint8_t checks) {
+    tr_folder();
+    char path[96], line[24];
+    tr_path(path, sizeof(path), game, "txt");
+    char* text = snap_load_buffer + 16384;
+    const UINT room = 16384;
+    UINT got = 0;
+    if (f_open(&save_fil, path, FA_READ) == FR_OK) {
+        bool ok = f_read(&save_fil, text, room, &got) == FR_OK && got < room;
+        f_close(&save_fil);
+        if (!ok) return false;
+    } else {
+        got = sizeof(trophies::FILE_HEAD) - 1;
+        memcpy(text, trophies::FILE_HEAD, got);
+    }
+    // its line, if it has one (before the first [)
+    UINT at = 0, cut0 = 0, cut1 = 0;
+    while (at < got && text[at] != '[') {
+        UINT e = at;
+        while (e < got && text[e] != '\n') e++;
+        if (got - at >= 6 && strncasecmp(text + at, "checks", 6) == 0) {
+            cut0 = at;
+            cut1 = e < got ? e + 1 : got;
+            break;
+        }
+        at = e < got ? e + 1 : got;
+    }
+    if (cut1 == 0) cut0 = cut1 = at;        // (none: put just before the first trophy)
+    const int ln = snprintf(line, sizeof(line), "checks = %u\r\n", (unsigned) checks);
+    if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
+    UINT w = 0;
+    bool ok = f_write(&save_fil, text, cut0, &w) == FR_OK && w == cut0;
+    ok = ok && f_write(&save_fil, line, (UINT) ln, &w) == FR_OK && w == (UINT) ln;
+    ok = ok && f_write(&save_fil, text + cut1, got - cut1, &w) == FR_OK && w == got - cut1;
+    if (f_close(&save_fil) != FR_OK) ok = false;
+    return ok;
+}
+
+// ---- The address search (F on Y's screen) ----
+// Finds where a game keeps something: a value it shows (lives: "3", then "2" ...), or something that
+// happens (marked while it is happening, and while it isn't). Each round reads the game's memory
+// (16384 to 65535 as paged, but not the screen: the menu is on it) 1728 bytes at a time (PICO_RUN)
+// and keeps the addresses that fit. In snap_load_buffer, after what Y's screen and tr_def_rewrite
+// use, below the radios' share: a header, a bit for each address still in, and (something
+// happening) what each had the first time it was happening. Autosaves wait while a search is open
+// (they would use the buffer); if something else used it the header says so.
+static const uint32_t TS_AT = 32768, TS_BITS = TS_AT + 16, TS_H = TS_BITS + 6144, TS_END = TS_H + 49152;
+// (TS_NOW: the first 8 kept by the last round, and what they had then: shown when 8 or fewer are left)
+static const uint32_t TS_NOW = TS_END + 4, TS_NOW_N = TS_NOW + 8 * 4;
+// (the header's spare bytes: a score's search, the score typed; something that happens once, the
+// After rounds done, and how many are in TS_BEFORE (what each had before, for those still in after
+// the first After round: 3 bytes each, the address low first, in address order), and whether more
+// were left than it holds. TS_CARRY: a score's search, the last bytes of the piece read before)
+static const uint32_t TS_SCORE = TS_AT + 4, TS_NAFTER = TS_AT + 8, TS_NB = TS_AT + 10, TS_NB_OVER = TS_AT + 12;
+// (once: TS_AGAIN, this round is an Again one: kept, those that changed once more by the same step
+// (a counter: a day 0, 1, then 2), each one's before then its after, its after what it has now;
+// TS_NAGAIN, how many Again rounds were done)
+static const uint32_t TS_AGAIN = TS_AT + 13, TS_NAGAIN = TS_AT + 14;
+// (once: TS_STEP1, L was used: only those that went up or down by 1 kept, a counter's likely step)
+static const uint32_t TS_STEP1 = TS_AT + 15;
+// (TS_MODE: the search is the Poke Finder's: its picks make pokes)
+static const uint32_t TS_MODE = TS_AT + 9;
+static const uint32_t TS_CARRY = TS_NOW_N + 1, TS_BEFORE = TS_CARRY + 8;
+static const uint32_t TS_LIMIT = SNAP_LOAD_BUFFER_SIZE - 24 * 1024;
+static const uint32_t TS_BEFORE_MAX = (TS_LIMIT - TS_BEFORE) / 3;
+static_assert(TS_BEFORE + 3 * 1000 <= TS_LIMIT, "the search is below the radios' share");
+static const uint32_t TS_MAGIC = 0x54524653;
+static uint8_t* ts_ptr(uint32_t at) { return reinterpret_cast<uint8_t*>(snap_load_buffer) + at; }
+static bool ts_valid() {
+    uint32_t a, b;
+    memcpy(&a, ts_ptr(TS_AT), 4);
+    memcpy(&b, ts_ptr(TS_END), 4);
+    return a == TS_MAGIC && b == TS_MAGIC;
+}
+static bool tr_searching() { return tr.skind != 0; }
+
+static void ts_start(uint8_t kind) {
+    memset(ts_ptr(TS_BITS), 0xFF, 6144);
+    memset(ts_ptr(TS_BITS), 0, 6912 / 8);           // (not the screen)
+    if (kind == 4) {
+        // a score: each address its last digit's, as numbers 0-9 (TS_BITS) or characters (TS_H's start)
+        memset(ts_ptr(TS_H), 0xFF, 6144);
+        memset(ts_ptr(TS_H), 0, 6912 / 8);
+    }
+    memset(ts_ptr(TS_AT + 4), 0, 12);
+    memset(ts_ptr(TS_CARRY), 0xFF, 8);
+    memcpy(ts_ptr(TS_AT), &TS_MAGIC, 4);
+    memcpy(ts_ptr(TS_END), &TS_MAGIC, 4);
+    tr.skind = kind;
+    tr.srounds = 0;
+}
+
+static void ts_stop() {
+    tr.skind = 0;
+    memset(ts_ptr(TS_AT), 0, 4);
+}
+
+// Search 5, watching an address you know: its address in TS_SCORE, and at TS_BEFORE when it began
+// (ms) and how many reads are kept (the newest TW_MAX), each 4 bytes of when (ms after it began),
+// then the 8 bytes from the address. A read each time the Trophy creator is opened (NMI+Y), and
+// N reads again. As a search, it keeps autosaves waiting.
+static const uint32_t TW_START = TS_BEFORE, TW_N = TS_BEFORE + 4, TW_READS = TS_BEFORE + 5;
+static const int TW_MAX = 12, TW_EACH = 12;
+static uint16_t tw_addr() { uint32_t a; memcpy(&a, ts_ptr(TS_SCORE), 4); return (uint16_t) a; }
+// The read (PICO_RUN): the 8 bytes from the address into HS_READ_DATA
+static void tw_read(uint8_t* nmi_rom_data) {
+    const uint16_t a = tw_addr();
+    const uint16_t n = (uint16_t) (0x10000u - a < 8 ? 0x10000u - a : 8);
+    memset(nmi_rom_data + HS_READ_DATA, 0, 8);
+    uint8_t* c = nmi_rom_data + PICO_CODE_AT;
+    *c++ = 0x21; *c++ = (uint8_t) (a & 0xFF); *c++ = (uint8_t) (a >> 8);         // LD HL,address
+    *c++ = 0x11; *c++ = (uint8_t) (HS_READ_DATA & 0xFF); *c++ = (uint8_t) (HS_READ_DATA >> 8);  // LD DE,data
+    *c++ = 0x01; *c++ = (uint8_t) n; *c++ = 0;                                  // LD BC,n
+    *c++ = 0xED; *c++ = 0xB0;                                                   // LDIR
+    *c = 0xC9;                                                                  // RET
+    nmi_rom_data[0] = PICO_RUN;
+}
+// What it read, kept (the oldest goes when there are TW_MAX)
+static void tw_keep(const uint8_t* data) {
+    uint32_t start;
+    memcpy(&start, ts_ptr(TW_START), 4);
+    uint8_t& n = *ts_ptr(TW_N);
+    if (n >= TW_MAX) {
+        memmove(ts_ptr(TW_READS), ts_ptr(TW_READS + TW_EACH), TW_EACH * (TW_MAX - 1));
+        n = TW_MAX - 1;
+    }
+    uint8_t* r = ts_ptr(TW_READS + TW_EACH * n);
+    const uint32_t when = to_ms_since_boot(get_absolute_time()) - start;
+    memcpy(r, &when, 4);
+    memcpy(r + 4, data, 8);
+    n++;
+}
+
+// The addresses still in: how many, and the first few
+// (a score's search: enc, for each, 0 numbers or 1 characters)
+static uint32_t ts_list(uint16_t* out, int max, uint8_t* enc = nullptr) {
+    uint32_t n = 0;
+    for (int e = 0; e < (tr.skind == 4 ? 2 : 1); e++) {
+        const uint8_t* bits = ts_ptr(e == 0 ? TS_BITS : TS_H);
+        for (int i = 0; i < 6144; i++) {
+            uint8_t b = bits[i];
+            while (b != 0) {
+                const int k = __builtin_ctz(b);
+                b &= (uint8_t) (b - 1);
+                if ((int) n < max) {
+                    out[n] = (uint16_t) (0x4000 + i * 8 + k);
+                    if (enc != nullptr) enc[n] = (uint8_t) e;
+                }
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+// The code (PICO_RUN): the game's memory from read_at into HS_READ_DATA
+static void ts_read_next(uint8_t* nmi_rom_data) {
+    uint32_t n = 0x10000 - tr.read_at;
+    if (n > HS_READ_MAX) n = HS_READ_MAX;
+    tr.read_n = (uint16_t) n;
+    uint8_t* c = nmi_rom_data + PICO_CODE_AT;
+    auto word = [&](uint16_t w) { *c++ = (uint8_t) (w & 0xFF); *c++ = (uint8_t) (w >> 8); };
+    *c++ = 0x21; word((uint16_t) tr.read_at);       // LD HL,from
+    *c++ = 0x11; word(HS_READ_DATA);                // LD DE,data
+    *c++ = 0x01; word((uint16_t) n);                // LD BC,n
+    *c++ = 0xED; *c++ = 0xB0;                       // LDIR
+    *c = 0xC9;                                      // RET
+    nmi_rom_data[0] = PICO_RUN;
+}
+
+// What was read: the addresses that don't fit this round taken out
+// A score's search: the addresses (each the last digit's) whose bytes end with the score's digits
+// (as numbers, or as characters); for the first 8 still in, how many digits it has (TS_NOW: the
+// address, the encoding, the digits, counting the 0s (or spaces) before)
+static void ts_chunk_score(const uint8_t* data, uint32_t first) {
+    uint32_t score;
+    memcpy(&score, ts_ptr(TS_SCORE), 4);
+    int len = 1;
+    for (uint32_t x = score; x >= 10; x /= 10) len++;
+    uint8_t* carry = ts_ptr(TS_CARRY);
+    uint8_t* now = ts_ptr(TS_NOW);
+    uint8_t& nnow = *ts_ptr(TS_NOW_N);
+    auto at = [&](int32_t i) -> int { return i >= 0 ? data[i] : i >= -8 ? carry[8 + i] : -1; };
+    for (uint32_t i = 0; i < tr.read_n; i++) {
+        const uint32_t a = first + i;
+        const uint8_t m = (uint8_t) (1u << (a & 7));
+        for (int e = 0; e < 2; e++) {
+            uint8_t* bits = ts_ptr(e == 0 ? TS_BITS : TS_H);
+            if ((bits[a >> 3] & m) == 0) continue;
+            bool ok = true;
+            uint32_t x = score;
+            for (int k = 0; k < len && ok; k++) {
+                const int dg = (int) (x % 10);
+                x /= 10;
+                ok = at((int32_t) i - k) == (e == 0 ? dg : '0' + dg);
+            }
+            if (!ok) {
+                bits[a >> 3] &= (uint8_t) ~m;
+            } else if (nnow < 8) {
+                int d = len;
+                while (d < trophies::DIGITS_MAX) {
+                    const int b = at((int32_t) i - d);
+                    if (b == (e == 0 ? 0 : '0') || (e == 1 && b == ' ')) d++;
+                    else break;
+                }
+                const uint16_t addr = (uint16_t) (0x4000 + a);
+                now[4 * nnow] = (uint8_t) (addr & 0xFF);
+                now[4 * nnow + 1] = (uint8_t) (addr >> 8);
+                now[4 * nnow + 2] = (uint8_t) e;
+                now[4 * nnow + 3] = (uint8_t) d;
+                nnow++;
+            }
+        }
+    }
+    for (int k = 0; k < 8; k++) carry[k] = tr.read_n >= 8 ? data[tr.read_n - 8 + k] : 0xFF;
+}
+
+// Something that happens once: where what an address had before is kept (nullptr: not known)
+static uint8_t* ts_before_at(uint16_t addr);
+
+static void ts_chunk(const uint8_t* data) {
+    uint8_t* bits = ts_ptr(TS_BITS);
+    uint8_t* h = ts_ptr(TS_H);
+    const uint32_t first = tr.read_at - 0x4000;
+    uint8_t* now = ts_ptr(TS_NOW);
+    uint8_t& nnow = *ts_ptr(TS_NOW_N);
+    if (first == 0) nnow = 0;                       // (a round's first piece)
+    if (tr.skind == 4) {
+        if (first == 0) memset(ts_ptr(TS_CARRY), 0xFF, 8);
+        ts_chunk_score(data, first);
+        return;
+    }
+    // something that happens once: the first After round notes what each still in had before
+    // (TS_BEFORE), then keeps what it has after in TS_H; later After rounds keep those the same
+    const bool first_after = tr.skind == 3 && !tr.shappen && *ts_ptr(TS_NAFTER) == 0;
+    uint16_t nb;
+    memcpy(&nb, ts_ptr(TS_NB), 2);
+    if (first_after && first == 0) nb = 0;
+    for (uint32_t i = 0; i < tr.read_n; i++) {
+        const uint32_t a = first + i;
+        const uint8_t m = (uint8_t) (1u << (a & 7));
+        if ((bits[a >> 3] & m) == 0) continue;
+        const uint8_t v = data[i];
+        bool keep;
+        if (tr.skind == 1) {
+            keep = v == tr.svalue;
+        } else if (tr.srounds == 0) {
+            h[a] = v;
+            keep = true;
+        } else if (tr.skind == 3 && !tr.shappen) {
+            if (*ts_ptr(TS_AGAIN) != 0) {
+                // (Again: changed once more, by the same step)
+                uint8_t* e = ts_before_at((uint16_t) (0x4000 + a));
+                keep = e != nullptr && v == (uint8_t) (h[a] + (uint8_t) (h[a] - e[2]));
+                if (keep) {
+                    e[2] = h[a];
+                    h[a] = v;
+                }
+            } else if (first_after) {
+                keep = v != h[a];
+                if (keep) {
+                    if (nb < TS_BEFORE_MAX) {
+                        uint8_t* e = ts_ptr(TS_BEFORE + 3 * nb++);
+                        e[0] = (uint8_t) ((0x4000 + a) & 0xFF);
+                        e[1] = (uint8_t) ((0x4000 + a) >> 8);
+                        e[2] = h[a];
+                    } else {
+                        *ts_ptr(TS_NB_OVER) = 1;
+                    }
+                    h[a] = v;
+                }
+            } else {
+                keep = v == h[a];
+            }
+        } else {
+            keep = tr.shappen ? v == h[a] : v != h[a];
+        }
+        if (!keep) {
+            bits[a >> 3] &= (uint8_t) ~m;
+        } else if (nnow < 8) {
+            const uint16_t at = (uint16_t) (0x4000 + a);
+            now[4 * nnow] = (uint8_t) (at & 0xFF);
+            now[4 * nnow + 1] = (uint8_t) (at >> 8);
+            now[4 * nnow + 2] = v;
+            nnow++;
+        }
+    }
+    memcpy(ts_ptr(TS_NB), &nb, 2);
+}
+
+// Something that happens once: what an address had before (-1: not known)
+static int ts_before(uint16_t addr) {
+    uint16_t nb;
+    memcpy(&nb, ts_ptr(TS_NB), 2);
+    int lo = 0, hi = (int) nb - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        const uint8_t* e = ts_ptr(TS_BEFORE + 3 * (uint32_t) mid);
+        const uint16_t at = (uint16_t) (e[0] | e[1] << 8);
+        if (at == addr) return e[2];
+        if (at < addr) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+
+static uint8_t* ts_before_at(uint16_t addr) {
+    uint16_t nb;
+    memcpy(&nb, ts_ptr(TS_NB), 2);
+    int lo = 0, hi = (int) nb - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        uint8_t* e = ts_ptr(TS_BEFORE + 3 * (uint32_t) mid);
+        const uint16_t at = (uint16_t) (e[0] | e[1] << 8);
+        if (at == addr) return e;
+        if (at < addr) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return nullptr;
+}
+
+// A score's search: the digits found at an address (its last digit's), -1 not known
+static int ts_score_digits(uint16_t addr, uint8_t enc) {
+    const uint8_t* now = ts_ptr(TS_NOW);
+    for (int i = 0; i < *ts_ptr(TS_NOW_N) && i < 8; i++) {
+        if ((now[4 * i] | now[4 * i + 1] << 8) == addr && now[4 * i + 2] == enc) return now[4 * i + 3];
+    }
+    return -1;
+}
+
+// What an address had at the last round (-1: not known)
+static int ts_now(uint16_t addr) {
+    const uint8_t* now = ts_ptr(TS_NOW);
+    for (int i = 0; i < *ts_ptr(TS_NOW_N) && i < 8; i++) {
+        if ((now[4 * i] | now[4 * i + 1] << 8) == addr) return now[4 * i + 2];
+    }
+    return -1;
+}
+
+// Something that happens once, L: only the addresses whose value went up or down by exactly 1
+// kept (between their last two values: before, after). How many are left
+static uint32_t ts_step1() {
+    uint8_t* bits = ts_ptr(TS_BITS);
+    const uint8_t* h = ts_ptr(TS_H);
+    uint32_t n = 0;
+    for (uint32_t a = 0; a < 49152; a++) {
+        const uint8_t m = (uint8_t) (1u << (a & 7));
+        if ((bits[a >> 3] & m) == 0) continue;
+        const uint8_t* e = ts_before_at((uint16_t) (0x4000 + a));
+        const uint8_t d = e != nullptr ? (uint8_t) (h[a] - e[2]) : 0;
+        if (d == 1 || d == 255) n++;
+        else bits[a >> 3] &= (uint8_t) ~m;
+    }
+    *ts_ptr(TS_STEP1) = 1;
+    return n;
+}
+
+// Y - Your trophies (ACTION_TROPHIES): the running game's trophies, won or not, to look at.
+// The Trophy creator (ACTION_TROPHY_MAKER: Y in Tools, or the hotkey Y; maker): the same list, and
+// making them, the search, trying out, changing, renaming.
+// BYTE param1 = the key (0: opened). Status 0 stays, 1 closed
+// V on the poke list (ACTION_POKE_VIEW): its state, in snap_load_buffer between the screen and
+// the Trophy creator's list (the creator, opened from it with T, takes its address from there)
+static bool tr_hotkey_maker = false;    // the hotkey Y: Your trophies' screen opens as the Trophy creator
+struct PokeView {
+    uint8_t state;          // 0 which cheat, 1 its pokes, 2 T: which line, 3 the value typed
+    uint8_t run;            // PICO_RUN asked for: 1 reading what is there now, 2 making the pokes
+    uint8_t trophy;         // T: 2 when the Trophy creator is to open at taddr (with magic)
+    uint8_t nok;            // how many of now[] were read
+    uint16_t start, cheat;  // the page's first cheat, the cheat shown
+    uint8_t now[extras::POK_PER_CHEAT];
+    uint8_t can[extras::POK_PER_CHEAT];     // it can be read and poked now (as the menu's .pokeallowed)
+    uint8_t poked, skipped;
+    uint8_t ndig;
+    uint16_t num;
+    const char* msg;
+    char text[32];          // a message made up
+    uint16_t taddr, magic;  // (T: the address, and PV_MAGIC while it waits for the creator)
+};
+static const uint16_t PV_MAGIC = 0x5056;
+static const uint32_t PV_AT = 7168;
+// F on the Poke screen (ACTION_POKE_FIND): the Poke Finder, the Trophy creator's search whose
+// finds become a cheat in the game's .pok: its state after PokeView (a cheat made a poke at a time)
+struct PokeFind {
+    uint16_t magic;         // PF_MAGIC when the rest means something
+    uint8_t pending;        // F pressed: the creator, opening, is the Poke Finder
+    uint8_t on;             // the creator is the Poke Finder now (its picks make pokes)
+    uint8_t n;              // the cheat's pokes so far
+    uint8_t make;           // M: make them now too (as they are saved)
+    uint16_t cur;           // the address picked
+    uint8_t orig, digits, enc, viaf;    // what it had; a score's digits (0: one byte) and characters; opened by F
+    uint8_t word, orig2, known2, pad2;  // W: a word (two pokes, low byte first); what the next byte had (if known2)
+    struct P { uint16_t addr, value; uint8_t orig, pad; } p[extras::POK_PER_CHEAT];
+};
+static const uint16_t PF_MAGIC = 0x5046;
+static const uint32_t PF_AT = PV_AT + 256;
+static_assert(sizeof(PokeView) <= 256 && PF_AT + sizeof(PokeFind) <= 8192, "the poke finder's state fits");
+static PokeFind& pf_state() { return *reinterpret_cast<PokeFind*>(snap_load_buffer + PF_AT); }
+static const uint16_t PV_READ = PICO_CODE_AT + 128;     // what PICO_RUN read
+static_assert(PV_AT + sizeof(PokeView) <= 8192, "the poke view's state fits before the trophies' list");
+
+// The Poke Finder's cheat (name, and pf's pokes) added to the game's .pok in Poke List, before
+// its Y line (the end); create: a new .pok, named as the game last loaded. Null when saved, else why not
+static bool pok_find(char* path, size_t size);
+extern const char POKE_LIST_DIR[];
+__attribute__((noinline)) static const char* pf_save(const PokeFind& pf, const char* name, bool create) {
+    char* path = snap_load_buffer + 32768 - 1024;      // (after the file's room)
+    const size_t psize = 1024;
+    if (!pok_find(path, psize)) {
+        if (!create) return "No .pok";
+        if (!reload_known || !sd_card_mounted) return "No game loaded from the card";
+        f_mkdir(POKE_LIST_DIR);
+        snprintf(path, psize, "%s/%s.pok", POKE_LIST_DIR, reload_name);
+    }
+    char* text = snap_load_buffer + 16384;
+    const UINT room = 16384 - 2048;             // (room for the cheat after it)
+    UINT got = 0;
+    if (f_open(&save_fil, path, FA_READ) == FR_OK) {
+        const bool ok = f_read(&save_fil, text, room, &got) == FR_OK && got < room;
+        f_close(&save_fil);
+        if (!ok) return "Its .pok is too big";
+    }
+    // the end: its Y line (from there on goes), or the end of the file
+    UINT end = got;
+    for (UINT at = 0; at < got;) {
+        UINT e = at;
+        while (e < got && text[e] != '\n') e++;
+        if (text[at] == 'Y') {
+            end = at;
+            break;
+        }
+        at = e + 1;
+    }
+    if (end > 0 && text[end - 1] != '\n') {
+        text[end++] = '\r';
+        text[end++] = '\n';
+    }
+    end += (UINT) snprintf(text + end, 80, "N%s\r\n", name);
+    for (int i = 0; i < pf.n; i++) {
+        end += (UINT) snprintf(text + end, 40, "%c  8 %5u %3u %3u\r\n", i + 1 < pf.n ? 'M' : 'Z', (unsigned) pf.p[i].addr,
+            (unsigned) pf.p[i].value, (unsigned) pf.p[i].orig);
+    }
+    end += (UINT) snprintf(text + end, 8, "Y\r\n");
+    UINT put = 0;
+    if (f_open(&save_fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return "Could not write its .pok";
+    const bool ok = f_write(&save_fil, text, end, &put) == FR_OK && put == end;
+    f_close(&save_fil);
+    return ok ? nullptr : "Could not write its .pok";
+}
+
+__attribute__((noinline)) static void nmi_action_trophies(bool maker) {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    const uint8_t key = nmi_rom_data[2];
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    trophies::Def* defs = reinterpret_cast<trophies::Def*>(snap_load_buffer + 8192);
+    static_assert(8192 + sizeof(trophies::Def) * trophies::MAX <= 16384, "the list fits before tr_def_delete's text");
+    const char* g = hs.game;
+    const bool have = g[0] != '\0' && sd_card_mounted;
+    const bool enter = key == notes::KEY_ENTER || key == 13;
+    const bool digit = key >= '0' && key <= '9';
+    if (key == 0) {
+        tr.sel = 0;
+        tr.ed = false;
+        tr.adding = false;
+        tr.epeek = 0xFF;
+        // (the creator, with a search going: straight to it, for its next round)
+        tr.state = maker && tr.skind != 0 && ts_valid() ? 10 : 0;
+        PokeFind& pf = pf_state();
+        if (pf.magic != PF_MAGIC) {
+            memset(&pf, 0, sizeof(pf));
+            pf.magic = PF_MAGIC;
+        }
+        if (maker && pf.pending) {
+            // (F on the Poke screen: the Poke Finder, on its search)
+            pf.pending = 0;
+            pf.on = 1;
+            pf.viaf = 1;
+            pf.n = 0;
+            tr.state = 10;
+        } else if (maker && tr.skind != 0 && ts_valid() && *ts_ptr(TS_MODE) != 0) {
+            // (the Poke Finder's search, carried on with NMI+Y)
+            pf.on = 1;
+            pf.viaf = 0;
+        } else {
+            pf.pending = 0;
+            pf.on = 0;
+            pf.viaf = 0;
+            pf.n = 0;
+        }
+        PokeView& pv = *reinterpret_cast<PokeView*>(snap_load_buffer + PV_AT);
+        if (maker && pv.trophy == 2 && pv.magic == PV_MAGIC) {
+            // (T on the poke view: a new memory trophy at that address, ENTER takes it)
+            pv.trophy = 0;
+            pv.magic = 0;
+            tr.kind = trophies::K_MEM;
+            tr.word = 0;
+            tr.digits = 0;
+            tr.mask = 0;
+            tr.num = pv.taddr;
+            tr.ndig = 5;
+            tr.state = 5;
+        }
+    }
+    if (!maker) tr.state = 0;
+    tr.msg = nullptr;
+    if (key == 0 && tr.state == 10 && tr.skind == 5) {
+        // (watching an address: read it as the menu opened, then show it)
+        tr.state = 15;
+        tw_read(nmi_rom_data);
+        return;
+    }
+    if (have && (trw.due || trw.game != trophies::name_hash(g))) tr_watch_load();
+    int n = have ? tr_defs_read(g, defs) : 0;
+    if (tr.sel >= n) tr.sel = (uint8_t) (n > 0 ? n - 1 : 0);
+    auto number_key = [&](uint32_t max) {      // typing a number: digits, DELETE
+        if (key == notes::KEY_DELETE) {
+            tr.num /= 10;
+            if (tr.ndig > 0) tr.ndig--;
+        } else if (digit && tr.num * 10 + (uint32_t) (key - '0') <= max) {
+            tr.num = tr.num * 10 + (uint32_t) (key - '0');
+            tr.ndig++;
+        }
+    };
+    // (where a change goes back to: the edit screen if it is open, else the list)
+    auto home = [&]() -> uint8_t { return tr.ed ? 25 : 0; };
+    PokeFind& pf = pf_state();
+    bool pfon = maker && pf.magic == PF_MAGIC && pf.on;
+    // The Poke Finder: an address picked, its value to poke next (31)
+    auto pf_pick = [&](uint16_t addr, int orig, uint8_t digits, uint8_t enc, int orig2) {
+        pf.cur = addr;
+        pf.word = 0;
+        pf.known2 = orig2 >= 0 ? 1 : 0;
+        pf.orig2 = (uint8_t) (orig2 < 0 ? 0 : orig2);
+        pf.orig = (uint8_t) (orig < 0 ? 0 : orig);
+        pf.digits = digits;
+        pf.enc = enc;
+        tr.num = 0;
+        tr.ndig = 0;
+        tr.state = 31;
+    };
+    // The edit screen's lines (25): what each is, ED_*; how many
+    enum : uint8_t { ED_NAME = 1, ED_ABOUT, ED_MATCH, ED_WITHIN, ED_HELD, ED_VALUE, ED_TOP, ED_NEEDS, ED_PEEK = 10 };
+    auto ed_items = [&](const trophies::Def& d, uint8_t* it) {
+        int k = 0;
+        it[k++] = ED_NAME;
+        it[k++] = ED_ABOUT;
+        if (d.kind == trophies::K_MEM) {
+            for (int i = 0; i < d.npeek; i++) it[k++] = (uint8_t) (ED_PEEK + i);
+            if (d.npeek >= 2) it[k++] = ED_MATCH;
+            it[k++] = ED_WITHIN;
+            it[k++] = ED_HELD;
+        } else if (d.kind == trophies::K_SCORE || d.kind == trophies::K_PLACE) {
+            it[k++] = ED_VALUE;
+        } else if (d.kind == trophies::K_TOP) {
+            it[k++] = ED_TOP;
+        } else if (d.kind == trophies::K_NEEDS) {
+            it[k++] = ED_NEEDS;
+        }
+        return k;
+    };
+    // A change to the chosen trophy saved (d: it changed)
+    auto save_def = [&](const trophies::Def& d, const char* ok) {
+        tr.msg = tr_def_rewrite(g, tr.sel, &d) ? ok : "Could not save it";
+        trw.due = true;
+        n = tr_defs_read(g, defs);
+    };
+    // P: the peek made (address, test, number) put in the chosen trophy (or in place of the one
+    // being changed: epeek)
+    auto finish_peek = [&]() {
+        trophies::Def d = defs[tr.sel];
+        tr.state = home();
+        tr.adding = false;
+        const uint8_t k = tr.epeek;
+        tr.epeek = 0xFF;
+        const trophies::Peek pk = { tr.addr, tr.op, tr.word, tr.pvalue, tr.mask, tr.digits };
+        if (k < d.npeek) {
+            d.peek[k] = pk;
+            if (tr.op == trophies::O_RISES && d.within == 0) d.within = 2;
+            save_def(d, "Peek changed");
+            return;
+        }
+        if (d.npeek >= trophies::PEEKS) return;
+        d.peek[d.npeek++] = pk;
+        save_def(d, "Peek added (M: all or any)");
+    };
+    // P: a peek to add to the chosen trophy
+    auto start_peek = [&]() {
+        if (defs[tr.sel].kind != trophies::K_MEM) {
+            tr.msg = "P adds to memory ones only";
+        } else if (defs[tr.sel].npeek >= trophies::PEEKS) {
+            tr.msg = "4 peeks is the most";
+        } else {
+            tr.adding = true;
+            tr.epeek = 0xFF;
+            tr.kind = trophies::K_MEM;
+            tr.num = 0;
+            tr.ndig = 0;
+            tr.word = 0;
+            tr.digits = 0;
+            tr.mask = 0;
+            tr.state = 5;
+        }
+    };
+    // T: try the chosen one out (or stop trying it)
+    auto try_it = [&]() {
+        const trophies::Def& d = defs[tr.sel];
+        const uint32_t h = trophies::name_hash(d.name);
+        if (d.kind != trophies::K_MEM) {
+            tr.msg = "Only memory ones can be tried";
+        } else if (tr.trial == h) {
+            tr.trial = 0;
+            tr.msg = "Not trying it any more";
+        } else {
+            tr.trial = h;
+            tr.msg = "Trying it: play, and see";
+            for (int k = 0; k < trw.nrule; k++) {
+                if (trw.rule[k].hash == h) trw.rule[k].armed = trw.rule[k].suspect = 0;
+            }
+        }
+        trw.due = true;
+    };
+    // W: the next time window (none, 1, 2, 3, 5, 10 seconds)
+    auto next_within = [&]() {
+        trophies::Def d = defs[tr.sel];
+        static const uint8_t WITHIN[] = { 0, 1, 2, 3, 5, 10 };
+        if (d.kind != trophies::K_MEM) {
+            tr.msg = "W: for memory ones only";
+            return;
+        }
+        int k = 0;
+        while (k < (int) sizeof(WITHIN) && WITHIN[k] <= d.within) k++;
+        d.within = k < (int) sizeof(WITHIN) ? WITHIN[k] : 0;
+        static char m[32];
+        if (d.within == 0) snprintf(m, sizeof(m), "Its peeks true at the same look");
+        else snprintf(m, sizeof(m), "Its peeks true within %us", (unsigned) d.within);
+        save_def(d, m);
+    };
+    // M: won when all its peeks are true, or any
+    auto flip_match = [&]() {
+        trophies::Def d = defs[tr.sel];
+        if (d.kind != trophies::K_MEM || d.npeek < 2) {
+            tr.msg = "M: for one with 2 peeks or more";
+            return;
+        }
+        d.any = d.any ? 0 : 1;
+        save_def(d, d.any ? "Won when any peek is true" : "Won when all are true at once");
+    };
+    // The trophy being made (tr), as a Def: mask, a K_NEEDS one's others (a bit each)
+    auto build_def = [&](trophies::Def& d, uint32_t& mask) {
+        memset(&d, 0, sizeof(d));
+        snprintf(d.name, sizeof(d.name), "%s", tr.typed);
+        d.kind = tr.kind;
+        d.value = tr.num;
+        mask = 0;
+        if (tr.kind == trophies::K_MEM) {
+            d.npeek = 1;
+            d.peek[0] = { tr.addr, tr.op, tr.word, tr.pvalue, tr.mask, tr.digits };
+            if (tr.op == trophies::O_RISES) d.within = tr.held;     // (its seconds: to rise in)
+            else d.held = tr.held;
+        } else if (tr.kind == trophies::K_NEEDS) {
+            d.value = 0;
+            mask = tr.num;
+            for (int i = 0; i < n; i++) {
+                if (mask & (1u << i)) d.need[d.nneed++] = trophies::name_hash(defs[i].name);
+            }
+        }
+    };
+    // F: a round of the search read from the game's memory, starting
+    auto search_read = [&]() {
+        tr.read_at = 0x4000;
+        tr.state = 12;
+        ts_read_next(nmi_rom_data);
+    };
+    if (key != 0 && tr.state >= 10 && tr.state < 20 && tr.state != 12 && tr.skind != 0 && !ts_valid()) {
+        tr.skind = 0;
+        tr.state = 10;
+        tr.msg = "The search was lost: again";
+    }
+    if (key != 0) {
+        switch (tr.state) {
+        case 10:        // the search: start one, a round more, pick an address
+            if (is_key_back(key) && pfon) {
+                nmi_rom_data[0] = 1;            // (the Poke Finder: back to the Poke screen)
+                return;
+            } else if (is_key_back(key)) {
+                tr.state = 0;
+            } else if (tr.skind == 0 && key >= '1' && key <= '5') {
+                ts_start((uint8_t) (key - '0'));
+                *ts_ptr(TS_MODE) = pfon ? 1 : 0;
+                tr.num = 0;
+                tr.ndig = 0;
+                tr.state = key == '1' || key == '4' || key == '5' ? 11 : 14;
+            } else if (tr.skind == 5) {
+                // watching an address: N reads it again, A another address, M a trophy on it, S stops
+                if (key == 'n' || key == 'N' || enter) {
+                    tr.state = 15;
+                    tw_read(nmi_rom_data);
+                    return;
+                } else if (key == 'a' || key == 'A') {
+                    tr.num = 0;
+                    tr.ndig = 0;
+                    tr.state = 11;
+                } else if ((key == 'm' || key == 'M') && pfon) {
+                    const int nr = *ts_ptr(TW_N);
+                    const uint8_t* last = nr > 0 ? ts_ptr(TW_READS + TW_EACH * (nr - 1)) : nullptr;
+                    pf_pick(tw_addr(), last ? last[4] : -1, 0, 0, last ? last[5] : -1);
+                } else if (key == 'm' || key == 'M') {
+                    tr.kind = trophies::K_MEM;
+                    tr.addr = tw_addr();
+                    tr.word = 0;
+                    tr.digits = 0;
+                    tr.mask = 0;
+                    tr.held = 0;
+                    tr.adding = false;
+                    tr.state = 6;
+                } else if (key == 's' || key == 'S') {
+                    ts_stop();
+                    if (!pf.viaf) pf.on = 0, pfon = false;
+                    tr.msg = "Stopped watching";
+                }
+            } else if (tr.skind != 0 && (key == 'n' || key == 'N' || enter)) {
+                tr.num = 0;
+                tr.ndig = 0;
+                tr.state = tr.skind == 1 || tr.skind == 4 ? 11 : 14;
+            } else if (tr.skind != 0 && (key == 's' || key == 'S')) {
+                ts_stop();
+                if (!pf.viaf) pf.on = 0, pfon = false;
+                tr.msg = "Search stopped";
+            } else if (tr.skind != 0 && tr.srounds > 0 && key >= '1' && key <= '8') {
+                uint16_t cand[8];
+                uint8_t enc[8];
+                const uint32_t left = ts_list(cand, 8, enc);
+                const int k = key - '1';
+                if (left <= 8 && k < (int) left && pfon) {
+                    // the Poke Finder: a poke at it (a score: one for each of its digits)
+                    if (tr.skind == 4) {
+                        uint32_t score;
+                        memcpy(&score, ts_ptr(TS_SCORE), 4);
+                        int len = 1;
+                        for (uint32_t x = score; x >= 10; x /= 10) len++;
+                        int d = ts_score_digits(cand[k], enc[k]);
+                        if (d < len) d = len;
+                        pf_pick((uint16_t) (cand[k] - (d - 1)), -1, (uint8_t) d, enc[k], -1);
+                    } else if (tr.skind == 3) {
+                        pf_pick(cand[k], ts_ptr(TS_H)[cand[k] - 0x4000], 0, 0, cand[k] < 0xFFFF ? ts_now((uint16_t) (cand[k] + 1)) : -1);
+                    } else {
+                        pf_pick(cand[k], ts_now(cand[k]), 0, 0, cand[k] < 0xFFFF ? ts_now((uint16_t) (cand[k] + 1)) : -1);
+                    }
+                } else if (left <= 8 && k < (int) left) {
+                    // a memory trophy on it: a value, any test; something happening: = its value then;
+                    // once: the test it suggests; a score: reaches or rises
+                    tr.kind = trophies::K_MEM;
+                    tr.addr = cand[k];
+                    tr.word = 0;
+                    tr.digits = 0;
+                    tr.mask = 0;
+                    tr.held = 0;
+                    tr.adding = false;
+                    if (tr.skind == 1) {
+                        tr.state = 6;
+                    } else if (tr.skind == 3) {
+                        const int before = ts_before(tr.addr);
+                        const uint8_t after = ts_ptr(TS_H)[tr.addr - 0x4000];
+                        if (before >= 0 && (*ts_ptr(TS_NAGAIN) > 0 || *ts_ptr(TS_STEP1) != 0)) {
+                            // (a counter: at least what it has got to, or at most, counting down)
+                            tr.op = (uint8_t) (after - before) < 128 ? trophies::O_GE : trophies::O_LE;
+                            tr.pvalue = after;
+                        } else if (before >= 0 && (before ^ after) == 0x80) {
+                            tr.op = (after & 0x80) ? trophies::O_GE : trophies::O_LT;      // (bit 7 set, or let go)
+                            tr.pvalue = 128;
+                        } else {
+                            tr.op = trophies::O_EQ;
+                            tr.pvalue = after;
+                        }
+                        tr.state = 23;
+                    } else if (tr.skind == 4) {
+                        uint32_t score;
+                        memcpy(&score, ts_ptr(TS_SCORE), 4);
+                        int len = 1;
+                        for (uint32_t x = score; x >= 10; x /= 10) len++;
+                        int d = ts_score_digits(cand[k], enc[k]);
+                        if (d < len) d = len;
+                        tr.digits = (uint8_t) d;
+                        tr.addr = (uint16_t) (cand[k] - (d - 1));
+                        tr.state = 22;
+                    } else {
+                        tr.op = trophies::O_EQ;
+                        tr.num = ts_ptr(TS_H)[tr.addr - 0x4000];
+                        tr.ndig = 1;
+                        tr.state = 2;
+                    }
+                }
+            }
+            break;
+        case 11:        // a value: what it is now
+            if (key == notes::KEY_BREAK) {
+                tr.state = 10;
+            } else if (enter) {
+                if (tr.ndig == 0) {
+                    tr.msg = "Type the number first";
+                } else if (tr.skind == 5) {
+                    if (tr.num < 16384) {
+                        tr.msg = "16384 to 65535";
+                    } else {
+                        memcpy(ts_ptr(TS_SCORE), &tr.num, 4);
+                        const uint32_t now = to_ms_since_boot(get_absolute_time());
+                        memcpy(ts_ptr(TW_START), &now, 4);
+                        *ts_ptr(TW_N) = 0;
+                        tr.state = 15;
+                        tw_read(nmi_rom_data);
+                        return;
+                    }
+                } else {
+                    tr.svalue = (uint8_t) tr.num;
+                    memcpy(ts_ptr(TS_SCORE), &tr.num, 4);
+                    search_read();
+                    return;
+                }
+            } else {
+                number_key(tr.skind == 4 ? 99999999u : tr.skind == 5 ? 65535u : 255u);
+            }
+            break;
+        case 14:        // something happening: is it now? (once: before or after)
+            if (key == notes::KEY_BREAK) {
+                tr.state = 10;
+            } else if (tr.skind == 3) {
+                if (key == 'b' || key == 'B') {
+                    if (*ts_ptr(TS_NAFTER) > 0) {
+                        tr.msg = "Before rounds come first: A";
+                    } else {
+                        tr.shappen = true;
+                        search_read();
+                        return;
+                    }
+                } else if (key == 'l' || key == 'L') {
+                    if (*ts_ptr(TS_NAFTER) == 0) {
+                        tr.msg = "L comes after an After round";
+                    } else {
+                        tr.state = 10;
+                        if (ts_step1() == 0) tr.msg = "None left: S, and again";
+                    }
+                } else if (key == 'a' || key == 'A' || key == 'g' || key == 'G') {
+                    const bool again = key == 'g' || key == 'G';
+                    if (tr.srounds == 0) {
+                        tr.msg = "First a Before round: B";
+                    } else if (again && *ts_ptr(TS_NAFTER) == 0) {
+                        tr.msg = "Again comes after an After round";
+                    } else {
+                        tr.shappen = false;
+                        *ts_ptr(TS_AGAIN) = again ? 1 : 0;
+                        search_read();
+                        return;
+                    }
+                }
+            } else if (key == 'h' || key == 'H' || ((key == 'n' || key == 'N') && tr.srounds > 0)) {
+                tr.shappen = key == 'h' || key == 'H';
+                search_read();
+                return;
+            } else if (key == 'n' || key == 'N') {
+                tr.msg = "First while it happens: H";
+            }
+            break;
+        case 31:        // the Poke Finder: the value to poke at the address picked
+            if (key == notes::KEY_BREAK) {
+                tr.state = 10;
+            } else if (enter) {
+                const int room = extras::POK_PER_CHEAT - pf.n;
+                if (pf.digits > 0 && tr.ndig == 0) {
+                    tr.msg = "Type the score to set";
+                } else if (pf.word && tr.ndig == 0) {
+                    tr.msg = "Type the word's value";
+                } else if (room < (pf.digits > 0 ? pf.digits : pf.word ? 2 : 1)) {
+                    tr.msg = "16 pokes in a cheat is the most";
+                } else if (pf.digits > 0) {
+                    // a score: a poke for each digit, as the game keeps them (numbers or characters)
+                    uint32_t div = 1;
+                    for (int i = 1; i < pf.digits; i++) div *= 10;
+                    for (int i = 0; i < pf.digits; i++, div /= 10) {
+                        const uint8_t dg = (uint8_t) (tr.num / div % 10);
+                        pf.p[pf.n++] = { (uint16_t) (pf.cur + i), (uint16_t) (pf.enc ? '0' + dg : dg), 0, 0 };
+                    }
+                    tr.state = 32;
+                } else if (pf.word) {
+                    // a word: its low byte at the address, its high byte after it
+                    pf.p[pf.n++] = { pf.cur, (uint16_t) (tr.num & 0xFF), pf.orig, 0 };
+                    pf.p[pf.n++] = { (uint16_t) (pf.cur + 1), (uint16_t) ((tr.num >> 8) & 0xFF), pf.orig2, 0 };
+                    tr.state = 32;
+                } else {
+                    pf.p[pf.n++] = { pf.cur, (uint16_t) (tr.ndig == 0 ? 256 : tr.num), pf.orig, 0 };
+                    tr.state = 32;
+                }
+            } else if ((key == 'w' || key == 'W') && pf.digits == 0 && pf.cur < 0xFFFF) {
+                pf.word = pf.word ? 0 : 1;
+                tr.num = 0;
+                tr.ndig = 0;
+            } else {
+                uint32_t max = pf.word ? 65535 : 255;
+                if (pf.digits > 0) {
+                    max = 9;
+                    for (int i = 1; i < pf.digits && i < 8; i++) max = max * 10 + 9;
+                }
+                number_key(max);
+            }
+            break;
+        case 32:        // the Poke Finder: another address, or name the cheat
+            if (key == notes::KEY_BREAK) {
+                pf.n = 0;
+                tr.state = 10;
+                tr.msg = "The cheat was dropped";
+            } else if (key == 'p' || key == 'P') {
+                tr.state = 10;
+                tr.msg = "Pick another (a new round, N)";
+            } else if (enter) {
+                snprintf(tr.typed, sizeof(tr.typed), "Poke %u", (unsigned) pf.p[0].addr);
+                tr.state = 30;
+            }
+            break;
+        case 30: {      // the Poke Finder: the cheat's name
+            size_t len = strlen(tr.typed);
+            if (key == notes::KEY_BREAK) {
+                tr.state = 32;
+            } else if (key == notes::KEY_DELETE) {
+                if (len > 0) tr.typed[len - 1] = '\0';
+            } else if (enter) {
+                if (len == 0) tr.msg = "Type its name first";
+                else tr.state = pok_find(snap_load_buffer + 32768 - 1024, 1024) ? 34 : 33;
+                pf.make = 0;
+            } else if (key >= 32 && key < 127 && len < (size_t) trophies::NAME_MAX) {
+                tr.typed[len] = (char) key;
+                tr.typed[len + 1] = '\0';
+            }
+            break;
+        }
+        case 33:        // the Poke Finder: no .pok yet: make one?
+            if (key == 'y' || key == 'Y') {
+                pf.make = 2;            // (2: a new .pok)
+                tr.state = 34;
+            } else if (key == 'n' || key == 'N' || key == notes::KEY_BREAK) {
+                tr.state = 30;
+                tr.msg = "Not saved: no .pok made";
+            }
+            break;
+        case 34:        // the Poke Finder: save it (M: and make it now)
+            if (key == notes::KEY_BREAK) {
+                tr.state = 30;
+            } else if (enter || key == 'm' || key == 'M') {
+                const char* why = pf_save(pf, tr.typed, pf.make == 2);
+                if (why != nullptr) {
+                    tr.msg = why;
+                } else if (key == 'm' || key == 'M') {
+                    // the pokes made now (those whose value the player chooses are left)
+                    uint8_t* c = nmi_rom_data + PICO_CODE_AT;
+                    for (int i = 0; i < pf.n; i++) {
+                        if (pf.p[i].value > 255) continue;
+                        *c++ = 0x3E; *c++ = (uint8_t) pf.p[i].value;                            // LD A,value
+                        *c++ = 0x32; *c++ = (uint8_t) (pf.p[i].addr & 0xFF); *c++ = (uint8_t) (pf.p[i].addr >> 8);   // LD (addr),A
+                    }
+                    *c = 0xC9;
+                    pf.n = 0;
+                    tr.state = 35;
+                    nmi_rom_data[0] = PICO_RUN;
+                    return;
+                } else {
+                    pf.n = 0;
+                    nmi_rom_data[0] = 1;        // saved: back to the Poke screen
+                    return;
+                }
+            }
+            break;
+        case 35:        // the Poke Finder: the pokes made, back to the Poke screen
+            nmi_rom_data[0] = 1;
+            return;
+        case 15:        // watching an address: it has been read
+            if (key == 254) {
+                tw_keep(nmi_rom_data + HS_READ_DATA);
+                tr.state = 10;
+            } else {
+                tr.state = 10;
+            }
+            break;
+        case 12:        // reading the game's memory: the code has run
+            if (key == 254) {
+                ts_chunk(nmi_rom_data + HS_READ_DATA);
+                tr.read_at += tr.read_n;
+                if (tr.read_at < 0x10000) {
+                    ts_read_next(nmi_rom_data);
+                    return;
+                }
+                tr.srounds++;
+                if (tr.skind == 3 && !tr.shappen) {
+                    (*ts_ptr(TS_NAFTER))++;
+                    if (*ts_ptr(TS_AGAIN) != 0) (*ts_ptr(TS_NAGAIN))++;
+                    *ts_ptr(TS_AGAIN) = 0;
+                }
+                tr.state = 10;
+                uint16_t cand[1];
+                if (ts_list(cand, 0) == 0) tr.msg = "None left: S, and again";
+            }
+            break;
+        case 0:
+            if (is_key_back(key)) {
+                nmi_rom_data[0] = 1;
+                return;
+            } else if ((key == 'q' || key == 'Q' || key == notes::KEY_UP) && tr.sel > 0) {
+                tr.sel--;
+            } else if ((key == 'a' || key == 'A' || key == notes::KEY_DOWN) && tr.sel + 1 < n) {
+                tr.sel++;
+            } else if (!maker) {
+                // (Your trophies: to look at only)
+            } else if ((key == 'n' || key == 'N') && n > 0) {
+                snprintf(tr.typed, sizeof(tr.typed), "%s", defs[tr.sel].name);
+                tr.state = 24;
+            } else if ((key == 'c' || key == 'C') && have) {
+                if (n >= trophies::MAX) tr.msg = "16 trophies is the most";
+                else tr.state = 1;
+            } else if ((key == 'd' || key == 'D') && n > 0) {
+                tr.state = 4;
+            } else if ((key == 'f' || key == 'F') && have) {
+                tr.state = 10;
+            } else if (enter && n > 0) {
+                tr.ed = true;
+                tr.epeek = 0xFF;
+                tr.state = 25;
+            } else if ((key == 'p' || key == 'P') && n > 0) {
+                start_peek();
+            } else if ((key == 'm' || key == 'M') && n > 0) {
+                flip_match();
+            } else if ((key == 'e' || key == 'E') && n > 0) {
+                snprintf(tr_about_typed, sizeof(tr_about_typed), "%s", defs[tr.sel].about);
+                tr.state = 9;
+            } else if ((key == 'w' || key == 'W') && n > 0) {
+                next_within();
+            } else if ((key == 't' || key == 'T') && n > 0) {
+                try_it();
+            } else if ((key == 'r' || key == 'R') && have) {
+                const uint8_t next = trw.checks == 0 ? 1 : trw.checks == 1 ? 4 : 0;
+                if (tr_checks_set(g, next)) {
+                    trw.checks = next;
+                    trw.due = true;
+                } else {
+                    tr.msg = "Could not save it";
+                }
+            }
+            break;
+        case 25:        // the edit screen: a line's number changes it
+        case 26: {      //   (D: a peek's number deletes it)
+            if (tr.sel >= n) {
+                tr.ed = false;
+                tr.state = 0;
+                break;
+            }
+            uint8_t it[12];
+            const int ni = ed_items(defs[tr.sel], it);
+            const int k = key - '1';
+            if (tr.state == 26) {
+                tr.state = 25;
+                if (k >= 0 && k < ni && it[k] >= ED_PEEK) {
+                    trophies::Def d = defs[tr.sel];
+                    if (d.npeek <= 1) {
+                        tr.msg = "It keeps 1 peek at least";
+                    } else {
+                        for (int i = it[k] - ED_PEEK; i + 1 < d.npeek; i++) d.peek[i] = d.peek[i + 1];
+                        d.npeek--;
+                        if (d.npeek < 2) d.any = 0;
+                        save_def(d, "Peek deleted");
+                    }
+                } else if (key != notes::KEY_BREAK) {
+                    tr.msg = "D, then a peek's number";
+                }
+            } else if (is_key_back(key)) {
+                tr.ed = false;
+                tr.state = 0;
+            } else if ((key == 'p' || key == 'P')) {
+                start_peek();
+            } else if (key == 'd' || key == 'D') {
+                if (defs[tr.sel].kind != trophies::K_MEM) tr.msg = "Only memory ones have peeks";
+                else tr.state = 26;
+            } else if (key == 't' || key == 'T') {
+                try_it();
+            } else if (k >= 0 && k < ni && k < 9) {
+                const trophies::Def& d = defs[tr.sel];
+                const uint8_t what = it[k];
+                if (what == ED_NAME) {
+                    snprintf(tr.typed, sizeof(tr.typed), "%s", d.name);
+                    tr.state = 24;
+                } else if (what == ED_ABOUT) {
+                    snprintf(tr_about_typed, sizeof(tr_about_typed), "%s", d.about);
+                    tr.state = 9;
+                } else if (what >= ED_PEEK) {
+                    // a peek changed: its address, test and number, each as it is (ENTER keeps it)
+                    const trophies::Peek& pk = d.peek[what - ED_PEEK];
+                    tr.epeek = (uint8_t) (what - ED_PEEK);
+                    tr.adding = true;
+                    tr.kind = trophies::K_MEM;
+                    tr.addr = pk.addr;
+                    tr.op = pk.op;
+                    tr.word = pk.word;
+                    tr.pvalue = pk.value;
+                    tr.mask = pk.mask;
+                    tr.digits = pk.digits;
+                    tr.num = pk.addr;
+                    tr.ndig = 5;
+                    tr.state = 5;
+                } else if (what == ED_MATCH) {
+                    flip_match();
+                } else if (what == ED_WITHIN) {
+                    next_within();
+                } else if (what == ED_HELD) {
+                    tr.num = d.held;
+                    tr.ndig = d.held > 0 ? 1 : 0;
+                    tr.state = 27;
+                } else if (what == ED_VALUE) {
+                    tr.kind = d.kind;
+                    tr.num = d.value;
+                    tr.ndig = 1;
+                    tr.state = 28;
+                } else if (what == ED_TOP) {
+                    tr.msg = "It has nothing more to change";
+                } else {
+                    tr.msg = "Change what it needs in its file";
+                }
+            }
+            break;
+        }
+        case 27:        // seconds held, changed
+        case 28:        // its score or places, changed
+            if (key == notes::KEY_BREAK) {
+                tr.state = 25;
+            } else if (enter && tr.sel < n) {
+                trophies::Def d = defs[tr.sel];
+                if (tr.state == 27) {
+                    d.held = (uint16_t) tr.num;
+                    tr.state = 25;
+                    save_def(d, d.held > 0 ? "Seconds held saved" : "Won at once: saved");
+                } else if (d.kind == trophies::K_PLACE && (tr.num < 1 || tr.num > (uint32_t) trophies::SCORES)) {
+                    tr.msg = "A place from 1 to 10";
+                } else if (tr.num == 0) {
+                    tr.msg = "Type the number first";
+                } else {
+                    d.value = tr.num;
+                    tr.state = 25;
+                    save_def(d, "Saved");
+                }
+            } else {
+                number_key(tr.state == 27 ? 3600u : 99999999u);
+            }
+            break;
+        case 1:         // what wins it
+            if (is_key_back(key)) {
+                tr.state = 0;
+            } else if (key == '5') {
+                if (n == 0) {
+                    tr.msg = "Make the others first";
+                } else {
+                    tr.kind = trophies::K_NEEDS;
+                    tr.num = 0;
+                    tr.ndig = 0;
+                    tr.state = 8;
+                }
+            } else if (key >= '1' && key <= '4') {
+                tr.kind = key == '1' ? trophies::K_SCORE : key == '2' ? trophies::K_TOP :
+                    key == '3' ? trophies::K_PLACE : trophies::K_MEM;
+                tr.num = 0;
+                tr.ndig = 0;
+                if (tr.kind == trophies::K_TOP) {
+                    tr.num = 1;
+                    snprintf(tr.typed, sizeof(tr.typed), "Top of the Table");
+                    tr.state = 3;
+                } else if (tr.kind == trophies::K_MEM) {
+                    tr.word = 0;
+                    tr.digits = 0;
+                    tr.mask = 0;
+                    tr.held = 0;
+                    tr.adding = false;
+                    tr.state = 5;
+                } else {
+                    tr.state = 2;
+                }
+            }
+            break;
+        case 2:         // its number (a score, a place, or a memory one's value)
+            if (key == notes::KEY_BREAK) {
+                tr.state = tr.kind == trophies::K_MEM ? 6 : 1;
+            } else if (enter) {
+                if (tr.kind == trophies::K_PLACE && (tr.num < 1 || tr.num > (uint32_t) trophies::SCORES)) {
+                    tr.msg = "A place from 1 to 10";
+                } else if (tr.ndig == 0 || (tr.num == 0 && tr.kind != trophies::K_MEM)) {
+                    tr.msg = "Type the number first";
+                } else if (tr.kind == trophies::K_MEM || tr.adding) {
+                    tr.pvalue = tr.num;
+                    if (tr.adding) {
+                        finish_peek();
+                    } else {
+                        tr.state = 7;
+                        tr.held = 0;
+                        tr.ndig = 0;
+                        tr.num = 0;
+                    }
+                } else {
+                    if (tr.kind == trophies::K_SCORE) snprintf(tr.typed, sizeof(tr.typed), "Score %lu", (unsigned long) tr.num);
+                    else if (tr.num == 1) snprintf(tr.typed, sizeof(tr.typed), "Number One");
+                    else snprintf(tr.typed, sizeof(tr.typed), "Top %lu", (unsigned long) tr.num);
+                    tr.state = 3;
+                }
+            } else {
+                number_key(tr.kind != trophies::K_MEM || tr.digits ? 99999999u : tr.word ? 65535u : 255u);
+            }
+            break;
+        case 5:         // a memory one: its address
+            if (key == notes::KEY_BREAK) {
+                tr.state = tr.adding ? home() : 1;
+                tr.adding = false;
+                tr.epeek = 0xFF;
+            } else if (enter) {
+                if (tr.ndig == 0 || tr.num < 16384) {
+                    tr.msg = "An address, 16384 to 65535";
+                } else {
+                    tr.addr = (uint16_t) tr.num;
+                    tr.state = 6;
+                }
+            } else {
+                number_key(65535u);
+            }
+            break;
+        case 6:         // its test
+            if (key == notes::KEY_BREAK) {
+                tr.state = 5;
+                tr.num = tr.addr;
+                tr.ndig = 1;
+            } else if (key == 'w' || key == 'W') {
+                tr.word ^= 1;
+                tr.digits = 0;
+                tr.mask = 0;
+            } else if (key == 'd' || key == 'D') {
+                tr.digits = tr.digits == 0 ? 2 : tr.digits >= trophies::DIGITS_MAX ? 0 : (uint8_t) (tr.digits + 1);
+                tr.word = 0;
+                tr.mask = 0;
+            } else if ((key == 'b' || key == 'B') && !tr.word && !tr.digits) {
+                tr.mask = tr.mask == 0 ? 127 : 0;
+            } else if (enter && tr.epeek != 0xFF) {
+                // (changing a peek: its test as it was)
+                if (trophies::op_has_value(tr.op)) {
+                    tr.num = tr.pvalue;
+                    tr.ndig = 1;
+                    tr.state = 2;
+                } else {
+                    tr.pvalue = 0;
+                    finish_peek();
+                }
+            } else if ((key >= '0' && key <= '9') || key == 'u' || key == 'U' || key == 'k' || key == 'K') {
+                tr.op = key == '0' ? (uint8_t) trophies::O_RISES : key == 'u' || key == 'U' ? (uint8_t) trophies::O_UPBY :
+                    key == 'k' || key == 'K' ? (uint8_t) trophies::O_NOTDOWN : (uint8_t) (key - '1');
+                tr.num = tr.epeek != 0xFF ? tr.pvalue : 0;      // (changing a peek: its number as it was)
+                tr.ndig = tr.epeek != 0xFF ? 1 : 0;
+                tr.pvalue = 0;
+                if (trophies::op_has_value(tr.op)) {
+                    tr.state = 2;
+                } else if (tr.adding) {
+                    finish_peek();
+                } else {
+                    tr.state = 7;
+                    tr.held = 0;
+                }
+            }
+            break;
+        case 8:         // the others it needs: SPACE ticks one
+            if (key == notes::KEY_BREAK) {
+                tr.state = 1;
+            } else if ((key == 'q' || key == 'Q' || key == notes::KEY_UP) && tr.ndig > 0) {
+                tr.ndig--;
+            } else if ((key == 'a' || key == 'A' || key == notes::KEY_DOWN) && tr.ndig + 1 < n) {
+                tr.ndig++;
+            } else if (key == ' ' && tr.ndig < n) {
+                tr.num ^= 1u << tr.ndig;
+            } else if (enter) {
+                if ((tr.num & ((1u << n) - 1)) == 0) {
+                    tr.msg = "SPACE ticks the ones it needs";
+                } else {
+                    snprintf(tr.typed, sizeof(tr.typed), "%s", __builtin_popcount(tr.num) == n ? "Got Them All" : "Collector");
+                    tr.state = 3;
+                }
+            }
+            break;
+        case 24: {      // N: renamed (its wins kept, and need = lines naming it changed)
+            size_t len = strlen(tr.typed);
+            if (key == notes::KEY_BREAK) {
+                tr.state = home();
+            } else if (key == notes::KEY_DELETE) {
+                if (len > 0) tr.typed[len - 1] = '\0';
+            } else if (enter) {
+                while (len > 0 && tr.typed[len - 1] == ' ') tr.typed[--len] = '\0';
+                const uint32_t h = trophies::name_hash(tr.typed);
+                bool taken = false;
+                for (int i = 0; i < n; i++) taken = taken || (i != tr.sel && trophies::name_hash(defs[i].name) == h);
+                if (len == 0) {
+                    tr.msg = "It needs a name";
+                } else if (taken) {
+                    tr.msg = "This game has one called that";
+                } else if (tr.sel < n && strcmp(defs[tr.sel].name, tr.typed) == 0) {
+                    tr.state = home();
+                } else {
+                    char old[trophies::NAME_MAX + 1];
+                    if (tr.sel < n && tr_def_rename(g, tr.sel, tr.typed, old)) {
+                        const uint32_t oh = trophies::name_hash(old);
+                        TrProg wp;
+                        tr_prog_read(g, wp);
+                        bool was = false;
+                        for (int i = 0; i < wp.nwon; i++) {
+                            if (wp.won[i] == oh) {
+                                wp.won[i] = h;
+                                was = true;
+                            }
+                        }
+                        if (was) tr_prog_write(g, wp);
+                        for (int i = 0; i < tr.npend; i++) if (tr.pend[i] == oh) tr.pend[i] = h;
+                        if (tr.trial == oh) tr.trial = h;
+                        tr.msg = was ? "Renamed: still won" : "Renamed";
+                    } else {
+                        tr.msg = "Could not rename it";
+                    }
+                    trw.due = true;
+                    tr.state = home();
+                    n = tr_defs_read(g, defs);
+                }
+            } else if (key >= 32 && key < 127 && key != '~' && len < (size_t) trophies::NAME_MAX) {
+                tr.typed[len] = (char) key;
+                tr.typed[len + 1] = '\0';
+            }
+            break;
+        }
+        case 22:        // a score found: reaches a number, or rises by one
+            if (key == notes::KEY_BREAK) {
+                tr.state = 10;
+            } else if (key == '1' || key == '2') {
+                tr.op = key == '1' ? trophies::O_GE : trophies::O_RISES;
+                tr.num = 0;
+                tr.ndig = 0;
+                tr.state = 2;
+            }
+            break;
+        case 23:        // something that happened once: the test suggested
+            if (key == notes::KEY_BREAK) {
+                tr.state = 10;
+            } else if (enter) {
+                tr.state = 7;
+                tr.held = 0;
+                tr.num = 0;
+                tr.ndig = 0;
+            } else if (key == 'o' || key == 'O') {
+                tr.state = 6;
+            }
+            break;
+        case 20: {      // checked: saved
+            if (key == notes::KEY_BREAK) {
+                tr.state = 3;
+            } else if (key == 'e' || key == 'E') {
+                tr.state = 21;
+            } else if (enter) {
+                trophies::Def d;
+                uint32_t mask;
+                build_def(d, mask);
+                snprintf(d.about, sizeof(d.about), "%s", tr_about_typed);
+                if (tr_def_add(g, d, defs, mask)) {
+                    tr.msg = tr.kind == trophies::K_MEM ? "Made: T tries it out" : "Made: Y shows it when it is won";
+                    tr.sel = (uint8_t) n;
+                    trw.due = true;
+                    if (tr.kind == trophies::K_NEEDS) {
+                        // (all of them won already: won now)
+                        TrProg wp;
+                        tr_prog_read(g, wp);
+                        if (tr_needs_settle(g, wp)) {
+                            tr_prog_write(g, wp);
+                            tr.msg = "Made, and won: they all are";
+                        }
+                    }
+                } else {
+                    tr.msg = "Could not save it";
+                }
+                tr.state = 0;
+                n = tr_defs_read(g, defs);
+            }
+            break;
+        }
+        case 7:         // seconds it has to stay so
+            if (key == notes::KEY_BREAK) {
+                tr.state = 6;
+            } else if (enter) {
+                const bool rises = tr.op == trophies::O_RISES;
+                tr.held = (uint16_t) (rises && tr.ndig == 0 ? 2 : tr.num);
+                if (rises && tr.held > 600) tr.held = 600;
+                if (tr.digits && tr.op == trophies::O_GE) snprintf(tr.typed, sizeof(tr.typed), "Score %lu", (unsigned long) tr.pvalue);
+                else if (tr.digits && rises) snprintf(tr.typed, sizeof(tr.typed), "Combo %lu", (unsigned long) tr.pvalue);
+                else snprintf(tr.typed, sizeof(tr.typed), "Memory %u", (unsigned) tr.addr);
+                tr.state = 3;
+            } else {
+                number_key(3600u);
+            }
+            break;
+        case 3: {       // its name
+            size_t len = strlen(tr.typed);
+            if (key == notes::KEY_BREAK) {
+                tr.state = 0;
+            } else if (key == notes::KEY_DELETE) {
+                if (len > 0) tr.typed[len - 1] = '\0';
+            } else if (enter) {
+                bool taken = false;
+                for (int i = 0; i < n; i++) taken = taken || trophies::name_hash(defs[i].name) == trophies::name_hash(tr.typed);
+                if (len == 0) {
+                    tr.msg = "Type its name first";
+                } else if (taken) {
+                    tr.msg = "This game has one called that";
+                } else {
+                    // checked before it is saved (20): what it means starts as what wins it
+                    trophies::Def d;
+                    uint32_t mask;
+                    build_def(d, mask);
+                    trophies::describe(d, tr_about_typed, sizeof(tr_about_typed));
+                    tr.state = 20;
+                }
+            } else if (key >= 32 && key < 127 && key != '~' && len < (size_t) trophies::NAME_MAX) {
+                tr.typed[len] = (char) key;
+                tr.typed[len + 1] = '\0';
+            }
+            break;
+        }
+        case 9:         // what it means (21: while making it, then back to the check)
+        case 21: {
+            size_t len = strlen(tr_about_typed);
+            if (key == notes::KEY_BREAK) {
+                tr.state = tr.state == 21 ? 20 : home();
+            } else if (key == notes::KEY_DELETE) {
+                if (len > 0) tr_about_typed[len - 1] = '\0';
+            } else if (enter && tr.state == 21) {
+                tr.state = 20;
+            } else if (enter) {
+                tr.msg = tr.sel < n && tr_def_rewrite(g, tr.sel, nullptr, tr_about_typed) ? "Saved what it means" : "Could not save it";
+                tr.state = home();
+                n = tr_defs_read(g, defs);
+            } else if (key >= 32 && key < 127 && key != '~' && len < (size_t) trophies::ABOUT_MAX) {
+                tr_about_typed[len] = (char) key;
+                tr_about_typed[len + 1] = '\0';
+            }
+            break;
+        }
+        case 4:         // "Delete it?"
+            tr.state = 0;
+            if ((key == 'y' || key == 'Y') && tr.sel < n) {
+                const uint32_t h = trophies::name_hash(defs[tr.sel].name);
+                tr.msg = tr_def_delete(g, tr.sel, h) ? "Deleted" : "Could not delete it";
+                if (tr.trial == h) tr.trial = 0;
+                trw.due = true;
+                n = tr_defs_read(g, defs);
+                if (tr.sel >= n && tr.sel > 0) tr.sel--;
+            }
+            break;
+        }
+    }
+    // the screen
+    char t[48];
+    slots_banner(screen, pfon ? "Poke Finder: " : maker ? "Creator: " : "Trophies: ", have ? g : "");
+    nmi_rom_data[START_KEYREPEAT] = tr.state == 2 || tr.state == 3 || tr.state == 5 || tr.state == 7 || tr.state == 9 || tr.state == 21 || tr.state == 24 || tr.state == 11 || tr.state == 27 || tr.state == 28 || tr.state == 30 || tr.state == 31 ? 1 : 0;
+    if (!have) {
+        help_put_text(screen, 2, 1, sd_card_mounted ? "No game is running." : "No SD card.", sd_card_mounted ? 19 : 11, gameinfo::ATTR_TEXT);
+        help_put_text(screen, 4, 1, "Load a game: its trophies are", 29, gameinfo::ATTR_DIM);
+        help_put_text(screen, 5, 1, "then shown (and made) here.", 27, gameinfo::ATTR_DIM);
+        put_keys(screen, 23, 1, "X|-Back");
+        preview_screen = screen;
+        nmi_rom_data[0] = 0;
+        return;
+    }
+    TrProg p;
+    tr_prog_read(g, p);
+    int won = 0;
+    for (int i = 0; i < n; i++) won += tr_won(p, trophies::name_hash(defs[i].name)) ? 1 : 0;
+    if (n > 0) {
+        snprintf(t, sizeof(t), " %d of %d ", won, n);
+        help_put_text(screen, 0, 31 - (int) strlen(t), t, (int) strlen(t), gameinfo::ATTR_BANNER);
+    }
+    uint16_t addr, len;
+    const bool table = hs_def(g, addr, len);
+    auto put = [&](int row, int col, const char* text, uint8_t attr) {
+        help_put_text(screen, row, col, text, (int) strlen(text), attr);
+    };
+    auto typed_number = [&](int row) {
+        if (tr.ndig > 0) snprintf(t, sizeof(t), "%lu_", (unsigned long) tr.num);
+        else snprintf(t, sizeof(t), "_");
+        put(row, 2, t, gameinfo::ATTR_HEADING);
+    };
+    if (tr.state >= 10 && tr.state < 20) {
+        // the search
+        put(2, 1, tr.skind == 5 ? "Watch an address" : "Find an address", gameinfo::ATTR_HEADING);
+        if (tr.skind == 5 && tr.state != 11) {
+            // what it has had each time it was read, the newest first
+            const uint16_t a = tw_addr();
+            const int nr = *ts_ptr(TW_N);
+            snprintf(t, sizeof(t), "%u: read %d time%s", (unsigned) a, nr, nr == 1 ? "" : "s");
+            put(2, 1, t, gameinfo::ATTR_HEADING);
+            if (nr > 0) {
+                const uint8_t* last = ts_ptr(TW_READS + TW_EACH * (nr - 1)) + 4;
+                snprintf(t, sizeof(t), "Now %u  (as a word %u)", (unsigned) last[0], (unsigned) (last[0] | last[1] << 8));
+                put(4, 1, t, gameinfo::ATTR_TEXT);
+                char b[40];
+                int l = snprintf(b, sizeof(b), "Next:");
+                for (int i = 1; i < 8 && l < 34; i++) l += snprintf(b + l, sizeof(b) - (size_t) l, " %u", (unsigned) last[i]);
+                put(5, 1, b, gameinfo::ATTR_DIM);
+                put(7, 1, "When   Value", gameinfo::ATTR_HEADING);
+                for (int i = 0; i < nr && i < TW_MAX; i++) {
+                    const uint8_t* r = ts_ptr(TW_READS + TW_EACH * (nr - 1 - i));
+                    uint32_t when;
+                    memcpy(&when, r, 4);
+                    const bool changed = nr - 1 - i > 0 && r[4] != r[4 - TW_EACH];
+                    snprintf(t, sizeof(t), "%3lu:%02lu  %-4u%s", (unsigned long) (when / 60000), (unsigned long) (when / 1000 % 60),
+                        (unsigned) r[4], changed ? "changed" : "");
+                    put(8 + i, 1, t, i == 0 ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+                }
+            }
+            put_keys(screen, 21, 1, pfon ? "N|-Read again  |M|-Make a poke" : "N|-Read again  |M|-Make a trophy");
+            put_keys(screen, 22, 1, "A|-Another address  |S|-Stop");
+            put_keys(screen, 23, 1, "X|-Back: NMI+Y reads it again");
+        } else if (tr.skind == 5) {
+            put(4, 1, "The address to watch:", gameinfo::ATTR_TEXT);
+            typed_number(6);
+            put(8, 1, "16384 to 65535, in decimal. It", gameinfo::ATTR_DIM);
+            put(9, 1, "is read now and each time you", gameinfo::ATTR_DIM);
+            put(10, 1, "press NMI+Y: play between reads", gameinfo::ATTR_DIM);
+            put(11, 1, "(lose a life, say) and see what", gameinfo::ATTR_DIM);
+            put(12, 1, "it has each time.", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "ENTER|-Watch it  |BREAK|-Back");
+        } else if (tr.skind == 0) {
+            put(4, 1, "Where does the game keep:", gameinfo::ATTR_TEXT);
+            put_keys(screen, 6, 2, "1  |a value it shows (lives,");
+            put(7, 5, "a level number, energy...)", gameinfo::ATTR_TEXT);
+            put_keys(screen, 9, 2, "2  |something that happens (a");
+            put(10, 5, "shot, a door open, an item)", gameinfo::ATTR_TEXT);
+            put_keys(screen, 12, 2, "3  |something done once (a");
+            put(13, 5, "fire lit, a door unlocked)", gameinfo::ATTR_TEXT);
+            put_keys(screen, 15, 2, "4  |its score (you type the");
+            put(16, 5, "score it shows each round)", gameinfo::ATTR_TEXT);
+            put_keys(screen, 18, 2, "5  |an address you know: watch");
+            put(19, 5, "what it has as you play", gameinfo::ATTR_TEXT);
+            put(21, 1, "Each round reads the memory as", gameinfo::ATTR_DIM);
+            put(22, 1, "it was when the menu opened.", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "1-5 |Choose  |X|-Back");
+        } else if (tr.state == 11) {
+            put(4, 1, tr.skind == 4 ? "What is the score now?" : "What is the value now?", gameinfo::ATTR_TEXT);
+            typed_number(6);
+            put(8, 1, "(as the game showed it when the", gameinfo::ATTR_DIM);
+            put(9, 1, tr.skind == 4 ? "menu was opened, all of it)" : "menu was opened: 0 to 255)", gameinfo::ATTR_DIM);
+            if (tr.skind == 4) {
+                put(11, 1, "Not 0: score some points first,", gameinfo::ATTR_DIM);
+                put(12, 1, "and a different score each round.", gameinfo::ATTR_DIM);
+            }
+            put_keys(screen, 23, 1, "ENTER|-Look  |BREAK|-Back");
+        } else if (tr.state == 14 && tr.skind == 3) {
+            put(4, 1, "When the menu was opened, had", gameinfo::ATTR_TEXT);
+            put(5, 1, "it happened yet?", gameinfo::ATTR_TEXT);
+            put_keys(screen, 7, 2, "B  |before: not yet");
+            put_keys(screen, 8, 2, "A  |after: it has happened");
+            put_keys(screen, 9, 2, "G  |again: changed once more");
+            put_keys(screen, 10, 2, "L  |keep those changed by 1");
+            put(12, 1, "Some Before rounds first, then", gameinfo::ATTR_DIM);
+            put(13, 1, "do it, then After rounds. Move", gameinfo::ATTR_DIM);
+            put(14, 1, "about between rounds (rooms,", gameinfo::ATTR_DIM);
+            put(15, 1, "where you stand).", gameinfo::ATTR_DIM);
+            put(17, 1, "A counter (day, lap, level):", gameinfo::ATTR_DIM);
+            put(18, 1, "L keeps those up or down by 1;", gameinfo::ATTR_DIM);
+            put(19, 1, "G, at its next change, keeps", gameinfo::ATTR_DIM);
+            put(20, 1, "those that change the same", gameinfo::ATTR_DIM);
+            put(21, 1, "way again (0, 1, then 2).", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "B|-Before |A|-After |G|-Again");
+        } else if (tr.state == 14) {
+            put(4, 1, "When the menu was opened, was", gameinfo::ATTR_TEXT);
+            put(5, 1, "it happening?", gameinfo::ATTR_TEXT);
+            put_keys(screen, 7, 2, "H  |yes, it was happening");
+            put_keys(screen, 8, 2, "N  |no, it wasn't");
+            put(10, 1, "Keep everything else the same", gameinfo::ATTR_DIM);
+            put(11, 1, "each time (which way you face).", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "H|-Yes  |N|-No  |BREAK|-Back");
+        } else {
+            uint16_t cand[8];
+            uint8_t enc[8];
+            const uint32_t left = tr.srounds > 0 ? ts_list(cand, 8, enc) : (49152 - 6912) * (tr.skind == 4 ? 2 : 1);
+            static const char* const HEAD[] = { "", "A value: %u rounds", "Happening: %u rounds", "Once: %u rounds", "A score: %u rounds" };
+            snprintf(t, sizeof(t), HEAD[tr.skind <= 4 ? tr.skind : 0], (unsigned) tr.srounds);
+            if (tr.skind == 3) {
+                snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%u %s)", (unsigned) *ts_ptr(*ts_ptr(TS_NAGAIN) > 0 ? TS_NAGAIN : TS_NAFTER),
+                    *ts_ptr(TS_NAGAIN) > 0 ? "again" : "after");
+            }
+            put(4, 1, t, gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), left == 1 ? "%lu address left" : "%lu addresses left", (unsigned long) left);
+            put(5, 1, t, gameinfo::ATTR_HEADING);
+            if (tr.srounds > 0 && left <= 8 && left > 0) {
+                for (uint32_t i = 0; i < left; i++) {
+                    if (tr.skind == 1) {
+                        snprintf(t, sizeof(t), "%u  |%u (now %u)", (unsigned) (i + 1), (unsigned) cand[i], (unsigned) tr.svalue);
+                    } else if (tr.skind == 3) {
+                        const int b = ts_before(cand[i]);
+                        const unsigned a = ts_ptr(TS_H)[cand[i] - 0x4000];
+                        if (*ts_ptr(TS_NAFTER) == 0) snprintf(t, sizeof(t), "%u  |%u (%u before)", (unsigned) (i + 1), (unsigned) cand[i], (unsigned) a);
+                        else if (b < 0) snprintf(t, sizeof(t), "%u  |%u: after %u", (unsigned) (i + 1), (unsigned) cand[i], a);
+                        else snprintf(t, sizeof(t), "%u  |%u: %u before, %u after", (unsigned) (i + 1), (unsigned) cand[i], (unsigned) b, a);
+                    } else if (tr.skind == 4) {
+                        const int d = ts_score_digits(cand[i], enc[i]);
+                        if (d > 0) snprintf(t, sizeof(t), "%u  |%u, %d digits (%s)", (unsigned) (i + 1), (unsigned) (cand[i] - (d - 1)), d,
+                            enc[i] ? "chars" : "0-9");
+                        else snprintf(t, sizeof(t), "%u  |%u: last digit (%s)", (unsigned) (i + 1), (unsigned) cand[i], enc[i] ? "chars" : "0-9");
+                    } else {
+                        const int nv = ts_now(cand[i]);
+                        if (nv < 0) snprintf(t, sizeof(t), "%u  |%u (%u when happening)", (unsigned) (i + 1), (unsigned) cand[i],
+                            (unsigned) ts_ptr(TS_H)[cand[i] - 0x4000]);
+                        else snprintf(t, sizeof(t), "%u  |%u: H %u, now %u", (unsigned) (i + 1), (unsigned) cand[i],
+                            (unsigned) ts_ptr(TS_H)[cand[i] - 0x4000], (unsigned) nv);
+                    }
+                    put_keys(screen, 7 + (int) i, 2, t);
+                }
+                put(16, 1, pfon ? "1-8 makes a poke at it, or" : "1-8 makes a trophy on it, or", gameinfo::ATTR_DIM);
+                put(17, 1, "N for another round.", gameinfo::ATTR_DIM);
+                if (tr.skind == 2) {
+                    put(18, 1, "H: when happening; now: at the", gameinfo::ATTR_DIM);
+                    put(19, 1, "last round (menu opened).", gameinfo::ATTR_DIM);
+                } else if (tr.skind == 3 && *ts_ptr(TS_NAFTER) == 0) {
+                    put(18, 1, "Now do it, and After rounds:", gameinfo::ATTR_DIM);
+                    put(19, 1, "they find what changed.", gameinfo::ATTR_DIM);
+                }
+            } else {
+                static const char* const L1[] = { "", "Back to the game: change the", "Back to the game: make it happen",
+                    "Back to the game: Before rounds,", "Back to the game: score some" };
+                static const char* const L2[] = { "", "value, open the menu, Y, F, N.", "or stop, open the menu, Y, F, N.",
+                    "do it, then After: Y, F, N.", "points, open the menu, Y, F, N." };
+                put(7, 1, L1[tr.skind <= 4 ? tr.skind : 0], gameinfo::ATTR_DIM);
+                put(8, 1, L2[tr.skind <= 4 ? tr.skind : 0], gameinfo::ATTR_DIM);
+                put(9, 1, "Do it until a few are left.", gameinfo::ATTR_DIM);
+            }
+            put_keys(screen, 23, 1, "N|-Next round  |S|-Stop  |X|-Back");
+        }
+    } else if (tr.state >= 30 && tr.state <= 34) {
+        // the Poke Finder: the cheat being made
+        put(2, 1, tr.state == 31 ? "A poke at this address" : "The cheat", gameinfo::ATTR_HEADING);
+        int row = 4;
+        for (int i = 0; i < pf.n && row < 13; i++, row++) {
+            if (pf.p[i].value > 255) snprintf(t, sizeof(t), "%u: the player chooses", (unsigned) pf.p[i].addr);
+            else snprintf(t, sizeof(t), "%u = %u  (was %u)", (unsigned) pf.p[i].addr, (unsigned) pf.p[i].value, (unsigned) pf.p[i].orig);
+            put(row, 2, t, gameinfo::ATTR_TEXT);
+        }
+        if (tr.state == 31) {
+            if (pf.digits > 0) {
+                snprintf(t, sizeof(t), "%u, %u digits: the score to set", (unsigned) pf.cur, (unsigned) pf.digits);
+                put(row + 1, 1, t, gameinfo::ATTR_TEXT);
+                typed_number(row + 3);
+            } else if (pf.word) {
+                if (pf.known2) snprintf(t, sizeof(t), "%uw has %u. Word to poke:", (unsigned) pf.cur,
+                    (unsigned) (pf.orig | pf.orig2 << 8));
+                else snprintf(t, sizeof(t), "%uw: the word to poke:", (unsigned) pf.cur);
+                put(row + 1, 1, t, gameinfo::ATTR_TEXT);
+                typed_number(row + 3);
+                put(row + 5, 1, "0 to 65535: two pokes, the low", gameinfo::ATTR_DIM);
+                snprintf(t, sizeof(t), "byte at %u, high at %u.", (unsigned) pf.cur, (unsigned) pf.cur + 1);
+                put(row + 6, 1, t, gameinfo::ATTR_DIM);
+            } else {
+                snprintf(t, sizeof(t), "%u now has %u. Value to poke:", (unsigned) pf.cur, (unsigned) pf.orig);
+                put(row + 1, 1, t, gameinfo::ATTR_TEXT);
+                typed_number(row + 3);
+                put(row + 5, 1, "0 to 255. ENTER with none: the", gameinfo::ATTR_DIM);
+                put(row + 6, 1, "player chooses it each time.", gameinfo::ATTR_DIM);
+            }
+            put_keys(screen, 23, 1, pf.digits > 0 ? "ENTER|-Next  |BREAK|-Back"
+                : pf.word ? "ENTER|-Next  |W|-Byte  |BREAK|-Back" : "ENTER|-Next  |W|-Word  |BREAK|-Back");
+        } else if (tr.state == 32) {
+            put(row + 1, 1, "Another address in this cheat", gameinfo::ATTR_TEXT);
+            put(row + 2, 1, "(a score's other digits, say)?", gameinfo::ATTR_TEXT);
+            put_keys(screen, 22, 1, "ENTER|-Name it  |P|-Add another");
+            put_keys(screen, 23, 1, "BREAK|-Drop the cheat");
+        } else if (tr.state == 30) {
+            put(row + 1, 1, "Its name, as the poke list", gameinfo::ATTR_TEXT);
+            put(row + 2, 1, "will show it:", gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "%s_", tr.typed);
+            put(row + 4, 2, t, gameinfo::ATTR_HEADING);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Back");
+        } else if (tr.state == 33) {
+            put(row + 1, 1, "This game has no .pok yet.", gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "Make %.20s.pok?", reload_name);
+            put(row + 2, 1, t, gameinfo::ATTR_TEXT);
+            put_keys(screen, 23, 1, "Y|-Make it  |N|-No");
+        } else {
+            snprintf(t, sizeof(t), "\"%s\"", tr.typed);
+            put(row + 1, 1, t, gameinfo::ATTR_HEADING);
+            put(row + 2, 1, "goes in the game's .pok.", gameinfo::ATTR_TEXT);
+            put_keys(screen, 22, 1, "ENTER|-Save  |M|-Save and poke now");
+            put_keys(screen, 23, 1, "BREAK|-Back");
+        }
+    } else if (tr.state >= 25 && tr.state <= 28 && tr.sel < n) {
+        // the edit screen: everything about it, a numbered line each
+        const trophies::Def& d = defs[tr.sel];
+        snprintf(t, sizeof(t), "Edit: %s", d.name);
+        put(2, 1, t, gameinfo::ATTR_HEADING);
+        uint8_t it[12];
+        const int ni = ed_items(d, it);
+        char v[40];
+        for (int i = 0; i < ni && i < 9; i++) {
+            const uint8_t what = it[i];
+            if (what == ED_NAME) {
+                snprintf(t, sizeof(t), "%d |Name: %.20s", i + 1, d.name);
+            } else if (what == ED_ABOUT) {
+                snprintf(t, sizeof(t), "%d |Means: %.19s%s", i + 1, d.about, strlen(d.about) > 19 ? ".." : "");
+            } else if (what >= ED_PEEK) {
+                trophies::peek_text(v, sizeof(v), d.peek[what - ED_PEEK]);
+                snprintf(t, sizeof(t), "%d |Peek: %.21s", i + 1, v);
+            } else if (what == ED_MATCH) {
+                snprintf(t, sizeof(t), "%d |Match: %s", i + 1, d.any ? "any peek true" : "all true at once");
+            } else if (what == ED_WITHIN) {
+                if (d.within == 0) snprintf(t, sizeof(t), "%d |Within: none (same look)", i + 1);
+                else snprintf(t, sizeof(t), "%d |Within: %u seconds", i + 1, (unsigned) d.within);
+            } else if (what == ED_HELD) {
+                if (d.held == 0) snprintf(t, sizeof(t), "%d |Held: none (at once)", i + 1);
+                else snprintf(t, sizeof(t), "%d |Held: %u seconds", i + 1, (unsigned) d.held);
+            } else if (what == ED_VALUE) {
+                snprintf(t, sizeof(t), d.kind == trophies::K_SCORE ? "%d |Score to reach: %lu" : "%d |Top places: %lu", i + 1,
+                    (unsigned long) d.value);
+            } else if (what == ED_TOP) {
+                snprintf(t, sizeof(t), "%d |Above the top score", i + 1);
+            } else {
+                snprintf(t, sizeof(t), "%d |Needs: %u trophies", i + 1, (unsigned) d.nneed);
+            }
+            put_keys(screen, 4 + i, 1, t);
+        }
+        if (tr.state == 27 || tr.state == 28) {
+            put(14, 1, tr.state == 27 ? "Seconds it must stay true" : d.kind == trophies::K_SCORE ? "The score to reach:" :
+                "The places (1 = first only):", gameinfo::ATTR_TEXT);
+            if (tr.state == 27) put(15, 1, "(0: won at once):", gameinfo::ATTR_TEXT);
+            typed_number(17);
+            put_keys(screen, 23, 1, "ENTER|-Save  |BREAK|-Back");
+        } else {
+            // what wins it, in words (a "needs" one: the ones it needs)
+            char line[200];
+            trophies::sentence(d, line, sizeof(line));
+            if (d.kind == trophies::K_NEEDS) {
+                size_t k = strlen(line);
+                for (int i = 0; i < d.nneed && k + 2 < sizeof(line); i++) {
+                    const char* nm = "?";
+                    for (int j = 0; j < n; j++) if (trophies::name_hash(defs[j].name) == d.need[i]) nm = defs[j].name;
+                    k += (size_t) snprintf(line + k, sizeof(line) - k, "%s%s", i == 0 ? " " : ", ", nm);
+                }
+            }
+            const char* at = line;
+            int row = 14;
+            while (*at != '\0' && row <= 19) {
+                const int l = trophies::wrap_first(at, trophies::ABOUT_LINE);
+                snprintf(t, sizeof(t), "%.*s", l, at);
+                put(row++, 1, t, gameinfo::ATTR_DIM);
+                at = trophies::wrap_rest(at, trophies::ABOUT_LINE);
+            }
+            if (tr.state == 26) {
+                put(21, 1, "Delete which peek? Its number", gameinfo::ATTR_HEADING);
+                put_keys(screen, 23, 1, "1-9|Delete it  |BREAK|-Back");
+            } else {
+                put_keys(screen, 22, 1, "1-9 |Change |P|-Peek |D|-Del |T|-Try");
+                put_keys(screen, 23, 1, "X|-Back to the list");
+            }
+        }
+    } else if (tr.state == 24) {
+        put(2, 1, "Rename a trophy", gameinfo::ATTR_HEADING);
+        if (tr.sel < n) {
+            snprintf(t, sizeof(t), "Now: %s", defs[tr.sel].name);
+            put(4, 1, t, gameinfo::ATTR_TEXT);
+        }
+        put(6, 1, "Its new name (18 letters):", gameinfo::ATTR_TEXT);
+        snprintf(t, sizeof(t), "%s_", tr.typed);
+        put(8, 2, t, gameinfo::ATTR_HEADING);
+        put(10, 1, "If it was won it stays won, and", gameinfo::ATTR_DIM);
+        put(11, 1, "trophies that need it are kept", gameinfo::ATTR_DIM);
+        put(12, 1, "pointing at it.", gameinfo::ATTR_DIM);
+        put_keys(screen, 23, 1, "ENTER|-Save  |BREAK|-Cancel");
+    } else if (tr.state != 0 && tr.state != 4) {
+        put(2, 1, tr.epeek != 0xFF ? "Change a peek" : tr.adding ? "Add a peek" : "Make a trophy", gameinfo::ATTR_HEADING);
+        const bool mem = tr.kind == trophies::K_MEM && tr.state != 1;
+        if (tr.state == 1) {
+            put(4, 1, "What wins it? A new score in", gameinfo::ATTR_TEXT);
+            put(5, 1, "the game's high score table:", gameinfo::ATTR_TEXT);
+            put_keys(screen, 7, 2, "1  |of at least a score you say");
+            put_keys(screen, 8, 2, "2  |above the top score it had");
+            put_keys(screen, 9, 2, "3  |in the top places you say");
+            put(11, 1, "Or something in its memory:", gameinfo::ATTR_TEXT);
+            put_keys(screen, 13, 2, "4  |a value at an address");
+            put(15, 1, "Or this game's other trophies:", gameinfo::ATTR_TEXT);
+            put_keys(screen, 17, 2, "5  |all of the ones you tick");
+            put_keys(screen, 23, 1, "1-5 |Choose  |X|-Back");
+        } else if (tr.state == 8) {
+            put(3, 1, "Won when all those ticked are:", gameinfo::ATTR_TEXT);
+            for (int i = 0; i < n; i++) {
+                const int row = 5 + i;
+                if (i == (int) tr.ndig) put(row, 1, ">", gameinfo::ATTR_HEADING);
+                put(row, 3, (tr.num & (1u << i)) ? "[X]" : "[ ]", gameinfo::ATTR_KEYS);
+                put(row, 7, defs[i].name, i == (int) tr.ndig ? gameinfo::ATTR_HEADING : gameinfo::ATTR_TEXT);
+            }
+            put_keys(screen, 23, 1, "QA |Move  |SPACE|-Tick  |ENTER|-Next");
+        } else if (tr.state == 5) {
+            put(4, 1, "The address (16384-65535):", gameinfo::ATTR_TEXT);
+            typed_number(6);
+            put(8, 1, "From a POKE, or a game's", gameinfo::ATTR_DIM);
+            put(9, 1, "memory map. In decimal.", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Back");
+        } else if (tr.state == 6) {
+            if (tr.digits) snprintf(t, sizeof(t), "When %ud%u (%u digits):", (unsigned) tr.addr, (unsigned) tr.digits, (unsigned) tr.digits);
+            else snprintf(t, sizeof(t), "When %u%s%s (a %s):", (unsigned) tr.addr, tr.word ? "w" : "", tr.mask ? " & 127" : "",
+                tr.word ? "word" : "byte");
+            put(3, 1, t, gameinfo::ATTR_TEXT);
+            static const char* const TESTS[] = { "is a number", "is not a number", "is at least a number",
+                "is at most a number", "is more than a number", "is less than a number", "changes", "goes up", "goes down",
+                "rises by a number or more" };
+            for (int k = 0; k < 10; k++) {
+                snprintf(t, sizeof(t), "%d  |%s", (k + 1) % 10, TESTS[k]);
+                put_keys(screen, 5 + k, 2, t);
+            }
+            put_keys(screen, 15, 2, "U  |goes up by exactly a number");
+            put_keys(screen, 16, 2, "K  |keeps up: doesn't go down");
+            if (tr.epeek != 0xFF) {
+                // (changing a peek: its test now, which ENTER keeps)
+                const int row = tr.op <= trophies::O_RISES ? 5 + tr.op : tr.op == trophies::O_UPBY ? 15 : 16;
+                put(row, 0, ">", gameinfo::ATTR_HEADING);
+            }
+            put(17, 1, "W: a word   D: digits (scores)", gameinfo::ATTR_DIM);
+            put(18, 1, "B: bit 7 not looked at (& 127:", gameinfo::ATTR_DIM);
+            put(19, 1, "often which way a figure faces)", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, tr.epeek != 0xFF ? "ENTER|-Keep |W|-Word |D|-Dig |B|-Bit7" :
+                "0-9|Pick |W|-Word |D|-Digits |B|-Bit7");
+        } else if (tr.state == 2) {
+            const char* ask = tr.kind == trophies::K_SCORE ? "The score to reach:" : tr.kind == trophies::K_PLACE ?
+                "The places (1 = first only):" : "The number (in decimal):";
+            if (mem) {
+                trophies::Peek pk = { tr.addr, tr.op, tr.word, 0, tr.mask, tr.digits };
+                int tn = snprintf(t, sizeof(t), "When ");
+                trophies::peek_text(t + tn, sizeof(t) - (size_t) tn, pk);
+                char* z = strrchr(t, ' ');
+                if (z != nullptr) *z = '\0';        // (its number is what is asked)
+                put(4, 1, t, gameinfo::ATTR_TEXT);
+            }
+            put(mem ? 6 : 4, 1, ask, gameinfo::ATTR_TEXT);
+            typed_number(mem ? 8 : 6);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Back");
+        } else if (tr.state == 7 && tr.op == trophies::O_RISES) {
+            put(4, 1, "Within how many seconds must", gameinfo::ATTR_TEXT);
+            put(5, 1, "it rise? (none: 2)", gameinfo::ATTR_TEXT);
+            typed_number(7);
+            put(9, 1, "0: between one look and the next", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Back");
+        } else if (tr.state == 7) {
+            put(4, 1, "For how many seconds must it", gameinfo::ATTR_TEXT);
+            put(5, 1, "stay so? (none: at once)", gameinfo::ATTR_TEXT);
+            typed_number(7);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Back");
+        } else if (tr.state == 22) {
+            snprintf(t, sizeof(t), "The score: %u, %u digits", (unsigned) tr.addr, (unsigned) tr.digits);
+            put(4, 1, t, gameinfo::ATTR_TEXT);
+            put(6, 1, "Won when the score:", gameinfo::ATTR_TEXT);
+            put_keys(screen, 8, 2, "1  |reaches a number you say");
+            put_keys(screen, 9, 2, "2  |rises by a number quickly");
+            put(10, 5, "(points scored at once: two", gameinfo::ATTR_TEXT);
+            put(11, 5, "kills with one grenade)", gameinfo::ATTR_TEXT);
+            put_keys(screen, 23, 1, "1-2 |Choose  |BREAK|-Back");
+        } else if (tr.state == 23) {
+            const int b = ts_before(tr.addr);
+            const unsigned a = ts_ptr(TS_H)[tr.addr - 0x4000];
+            if (b >= 0) snprintf(t, sizeof(t), "%u: %u before, %u after", (unsigned) tr.addr, (unsigned) b, a);
+            else snprintf(t, sizeof(t), "%u: %u after", (unsigned) tr.addr, a);
+            put(4, 1, t, gameinfo::ATTR_TEXT);
+            put(6, 1, "Recommended:", gameinfo::ATTR_TEXT);
+            const trophies::Peek pk = { tr.addr, tr.op, 0, tr.pvalue, 0, 0 };
+            char w[64];
+            trophies::peek_words(w, sizeof(w), pk);
+            snprintf(t, sizeof(t), "Won when %s", w);
+            put(8, 1, t, gameinfo::ATTR_HEADING);
+            if (tr.pvalue == 128 && tr.op != trophies::O_EQ) {
+                put(10, 1, "(only bit 7 changed: this is", gameinfo::ATTR_DIM);
+                put(11, 1, "whatever the other bits do)", gameinfo::ATTR_DIM);
+            } else {
+                put(10, 1, "(the value it has after: not", gameinfo::ATTR_DIM);
+                put(11, 1, "\"is not\" the one before, which", gameinfo::ATTR_DIM);
+                put(12, 1, "the game may have at any time)", gameinfo::ATTR_DIM);
+            }
+            put_keys(screen, 23, 1, "ENTER|-Use |O|-Other |BREAK|-Back");
+        } else if (tr.state == 20) {
+            // checked before it's saved: its name, what wins it in words, what it means
+            put(3, 1, "Check it, then ENTER saves it:", gameinfo::ATTR_TEXT);
+            put(5, 1, tr.typed, gameinfo::ATTR_HEADING);
+            trophies::Def d;
+            uint32_t mask;
+            build_def(d, mask);
+            char line[200];
+            trophies::sentence(d, line, sizeof(line));
+            if (d.kind == trophies::K_NEEDS) {
+                size_t k = strlen(line);
+                bool firstn = true;
+                for (int i = 0; i < n && k + 2 < sizeof(line); i++) {
+                    if ((mask & (1u << i)) == 0) continue;
+                    k += (size_t) snprintf(line + k, sizeof(line) - k, "%s%s", firstn ? " " : ", ", defs[i].name);
+                    firstn = false;
+                }
+                if (k + 2 < sizeof(line)) snprintf(line + k, sizeof(line) - k, ".");
+            }
+            const char* at = line;
+            int row = 7;
+            while (*at != '\0' && row <= 12) {
+                const int l = trophies::wrap_first(at, trophies::ABOUT_LINE);
+                snprintf(t, sizeof(t), "%.*s", l, at);
+                put(row++, 1, t, gameinfo::ATTR_TEXT);
+                at = trophies::wrap_rest(at, trophies::ABOUT_LINE);
+            }
+            put(14, 1, "What it means (E changes it):", gameinfo::ATTR_DIM);
+            const int a1 = trophies::wrap_first(tr_about_typed, trophies::ABOUT_LINE);
+            snprintf(t, sizeof(t), "%.*s", a1, tr_about_typed);
+            put(16, 1, t, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%.30s", trophies::wrap_rest(tr_about_typed, trophies::ABOUT_LINE));
+            put(17, 1, t, gameinfo::ATTR_HEADING);
+            put_keys(screen, 23, 1, "ENTER|-Save  |E|-About  |BREAK|-Back");
+        } else if (tr.state == 9 || tr.state == 21) {
+            if (tr.state == 21) {
+                snprintf(t, sizeof(t), "What %s means", tr.typed);
+                put(4, 1, t, gameinfo::ATTR_TEXT);
+            } else if (tr.sel < n) {
+                snprintf(t, sizeof(t), "What %s means", defs[tr.sel].name);
+                put(4, 1, t, gameinfo::ATTR_TEXT);
+            }
+            put(5, 1, "(60 letters, shown when won):", gameinfo::ATTR_TEXT);
+            char line[64];
+            snprintf(line, sizeof(line), "%s_", tr_about_typed);
+            const int a1 = trophies::wrap_first(line, trophies::ABOUT_LINE);
+            snprintf(t, sizeof(t), "%.*s", a1, line);
+            put(7, 1, t, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%.31s", trophies::wrap_rest(line, trophies::ABOUT_LINE));
+            put(8, 1, t, gameinfo::ATTR_HEADING);
+            snprintf(t, sizeof(t), "%d letters left", trophies::ABOUT_MAX - (int) strlen(tr_about_typed));
+            put(10, 1, t, gameinfo::ATTR_DIM);
+            put(12, 1, "For example: \"You lit the", gameinfo::ATTR_DIM);
+            put(13, 1, "cauldron on the first screen\"", gameinfo::ATTR_DIM);
+            put_keys(screen, 23, 1, tr.state == 21 ? "ENTER|-Done  |BREAK|-Back" : "ENTER|-Save  |BREAK|-Cancel");
+        } else {
+            trophies::Def d;
+            memset(&d, 0, sizeof(d));
+            d.kind = tr.kind;
+            d.value = tr.num;
+            d.npeek = 1;
+            d.peek[0] = { tr.addr, tr.op, tr.word, tr.pvalue, tr.mask, tr.digits };
+            d.held = tr.held;
+            if (tr.kind == trophies::K_NEEDS) d.nneed = (uint8_t) __builtin_popcount(tr.num);
+            trophies::describe(d, t, sizeof(t));
+            put(4, 1, t, gameinfo::ATTR_TEXT);
+            put(6, 1, "Its name (18 letters):", gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "%s_", tr.typed);
+            put(8, 2, t, gameinfo::ATTR_HEADING);
+            put_keys(screen, 23, 1, "ENTER|-Next  |BREAK|-Cancel");
+        }
+        if (!table && !mem && tr.state != 1 && tr.state != 9 && tr.state < 20 && tr.kind != trophies::K_NEEDS) {
+            put(12, 1, "Its high score table is not", gameinfo::ATTR_DIM);
+            put(13, 1, "known yet: find it with T on", gameinfo::ATTR_DIM);
+            put(14, 1, "A - Autosave, or this can't win.", gameinfo::ATTR_DIM);
+        }
+    } else {
+        if (n == 0) {
+            put(2, 1, "No trophies for this game yet.", gameinfo::ATTR_TEXT);
+            put(4, 1, "C makes one: a score to reach,", gameinfo::ATTR_DIM);
+            put(5, 1, "beating the top score, a place", gameinfo::ATTR_DIM);
+            put(6, 1, "in its high score table, or a", gameinfo::ATTR_DIM);
+            put(7, 1, "value in its memory.", gameinfo::ATTR_DIM);
+            put(9, 1, "Or write them in", gameinfo::ATTR_DIM);
+            snprintf(t, sizeof(t), "/Trophies/%.20s.txt", g);
+            put(10, 1, t, gameinfo::ATTR_DIM);
+        }
+        for (int i = 0; i < n; i++) {
+            const int row = 2 + i;
+            const uint32_t h = trophies::name_hash(defs[i].name);
+            const bool on = tr_won(p, h);
+            for (int y = 0; y < 8; y++) screen[zx_line(row * 8 + y) + 1] = trophies::CUP[y];
+            screen[6144 + row * 32 + 1] = ui_attr(on ? gameinfo::ATTR_HEADING : gameinfo::ATTR_DIM);
+            if (i == tr.sel) put(row, 0, ">", gameinfo::ATTR_HEADING);
+            put(row, 3, defs[i].name, i == tr.sel ? gameinfo::ATTR_HEADING : on ? gameinfo::ATTR_TEXT : gameinfo::ATTR_DIM);
+            if (h == tr.trial) put(row, 26, "Try", gameinfo::ATTR_KEYS);
+            else if (on) put(row, 27, "Won", gameinfo::ATTR_HEADING);
+        }
+        if (n > 0) {
+            const trophies::Def& d = defs[tr.sel];
+            {
+                // what it means, on one line or two (two: what wins it isn't shown under it)
+                const int a1 = trophies::wrap_first(d.about, trophies::ABOUT_LINE);
+                snprintf(t, sizeof(t), "%.*s", a1, d.about);
+                put(18, 1, t, gameinfo::ATTR_TEXT);
+                const char* rest = trophies::wrap_rest(d.about, trophies::ABOUT_LINE);
+                if (*rest != '\0') {
+                    snprintf(t, sizeof(t), "%.30s", rest);
+                    put(19, 1, t, gameinfo::ATTR_TEXT);
+                }
+            }
+            const bool about2 = *trophies::wrap_rest(d.about, trophies::ABOUT_LINE) != '\0';
+            if (d.kind == trophies::K_MEM) {
+                // what its memory had when last looked at
+                trophies::describe(d, t, sizeof(t));
+                if (strcmp(t, d.about) != 0 && !about2) put(19, 1, t, gameinfo::ATTR_DIM);
+                const uint32_t h = trophies::name_hash(d.name);
+                for (int k = 0; k < trw.nrule; k++) {
+                    const TrRule& r = trw.rule[k];
+                    if (r.hash != h) continue;
+                    if (trw.checks == 0) snprintf(t, sizeof(t), "Not looked at: checks are off");
+                    else if (!trw.slot[r.first].have) snprintf(t, sizeof(t), "Not read yet (back to the game)");
+                    else if (r.suspect) snprintf(t, sizeof(t), "True at the start: check it");
+                    else snprintf(t, sizeof(t), "Last read: %lu", (unsigned long) trw.slot[r.first].prev);
+                    if (tr.msg == nullptr) put(20, 1, t, r.suspect ? gameinfo::ATTR_KEYS : gameinfo::ATTR_DIM);
+                }
+            } else if (d.kind == trophies::K_NEEDS) {
+                trophies::describe(d, t, sizeof(t));
+                if (strcmp(t, d.about) != 0 && !about2) put(19, 1, t, gameinfo::ATTR_DIM);
+                int got = 0, gone = 0;
+                for (int i = 0; i < d.nneed; i++) {
+                    bool there = false;
+                    for (int j = 0; j < n && !there; j++) there = trophies::name_hash(defs[j].name) == d.need[i];
+                    got += tr_won(p, d.need[i]) ? 1 : 0;
+                    gone += there ? 0 : 1;
+                }
+                if (gone > 0) snprintf(t, sizeof(t), "%d of %d won (%d not found)", got, d.nneed, gone);
+                else snprintf(t, sizeof(t), "%d of %d won so far", got, d.nneed);
+                if (tr.msg == nullptr) put(20, 1, t, gameinfo::ATTR_DIM);
+            } else if (d.kind == trophies::K_NONE) {
+                trophies::describe(d, t, sizeof(t));
+                if (!about2) put(19, 1, t, gameinfo::ATTR_DIM);
+            } else if (!table) {
+                put(about2 ? 20 : 19, 1, "Find its table: T on A", gameinfo::ATTR_DIM);
+            }
+            if (tr.state == 4) {
+                snprintf(t, sizeof(t), "Delete %s?", d.name);
+                put(21, 1, t, gameinfo::ATTR_HEADING);
+                put_keys(screen, 23, 1, "Y|-Yes  |N|-No");
+            } else if (maker) {
+                put_keys(screen, 21, 1, "QA |Choose |C|-Make |D|-Del |F|-Find");
+                put_keys(screen, 22, 1, "T|-Try |P|-Peek |M|-Match |W|-Within");
+            } else {
+                put(22, 1, "Made in Tools: Trophy creator", gameinfo::ATTR_DIM);
+            }
+        } else if (maker) {
+            put_keys(screen, 22, 1, "C|-Make one  |F|-Find an address");
+        } else {
+            put(21, 1, "None yet. Make them with the", gameinfo::ATTR_DIM);
+            put(22, 1, "Trophy creator (Tools, Y)", gameinfo::ATTR_DIM);
+        }
+        if (tr.state != 4 && maker) {
+            if (n > 0) put_keys(screen, 23, 1, "ENTER|-Edit |R|-Checks |X|-Back");
+            else put_keys(screen, 23, 1, "R|-Checks  |X|-Back");
+            snprintf(t, sizeof(t), "Checks %u/s", (unsigned) trw.checks);
+            put(1, 1, t, gameinfo::ATTR_DIM);
+            if (tr.skind != 0) put(1, 24, "Finding", gameinfo::ATTR_KEYS);
+        } else if (tr.state != 4) {
+            put_keys(screen, 23, 1, n > 0 ? "QA |Choose  |X|-Back" : "X|-Back");
+        }
+    }
+    if (tr.msg != nullptr) put(20, 1, tr.msg, gameinfo::ATTR_HEADING);
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+// The V screen's line: "Trophies: won of all" for a game (none if it has none)
+static void tr_summary(const char* game, char* out, size_t size) {
+    out[0] = '\0';
+    if (!sd_card_mounted || game[0] == '\0') return;
+    TrProg p;
+    tr_prog_read(game, p);
+    struct C { const TrProg& p; int n, won; } c = { p, 0, 0 };
+    tr_defs_each(game, [](const trophies::Def& d, void* x) {
+        C& c = *static_cast<C*>(x);
+        c.n++;
+        c.won += tr_won(c.p, trophies::name_hash(d.name)) ? 1 : 0;
+        return c.n < trophies::MAX;
+    }, &c);
+    if (c.n > 0) snprintf(out, size, "Trophies %d/%d", c.won, c.n);
+}
+#endif
+
+static const int CP_BIG_COL = 8, CP_BIG_ROW = 1;            // 16 x 12 cells
+static const int CP_STRIP_ROW = 15, CP_STRIP_COL0 = 1, CP_STRIP_STEP = 5;  // 4 x 3 cells each
+// Reads autosave entry i's screen (find_preview: into snap_load_buffer) and shrinks it into
+// cp_pics. False if it has no picture (that place stays black).
+static bool cp_picture(int i, int cx0, int cy0, int shift) {
+    if (!cp_folder(grab_path, sizeof(grab_path))) return false;
+    size_t dl = strlen(grab_path);
+    snprintf(grab_path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", i + 1, rw_ext(i));
+    preview_screen = nullptr;
+    if (find_preview(1, grab_path, rw_ext(i)) != 0 || preview_screen == nullptr) return false;
+    pic_shrink(preview_screen, cp_pics(), cx0, cy0, shift);
+    return true;
+}
+
+
+
+// ACTION_CHECKPOINTS: A on the menu. BYTE param1 = the key (0: opened). Status 0 stays, 1 closed,
+// 2 the autosave chosen is ready (loaded into snap_load_buffer)
 __attribute__((noinline)) static void nmi_action_checkpoints() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t key = nmi_rom_data[2];
@@ -5835,9 +9457,14 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     int count = rw_order(order);
     const int n = key >= '1' && key <= '9' ? key - '0' : 0;
     const bool back = is_key_break(key) || key == 'x' || key == 'X';
-    if (key == 0) cp_state = 0;
+    if (key == 0) {
+        cp_state = 0;
+        cp_sel = 0;
+        cp_pics_ok = false;
+    }
 #if PICOMENU_HISCORE
-    // T: the high score table's screens (cp_state 10); the hotkey T opens them straight away
+    // T: the high score table's screens (cp_state 10); the hotkey T opens them straight away.
+    // They use list_pool too: the pictures are made again afterwards
     if (key == 0 && hs_open_direct) {
         hs_open_direct = false;
         cp_state = 10;
@@ -5847,9 +9474,11 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     } else if (cp_state == 10) {
         if (hs_action(nmi_rom_data, key)) return;
         cp_state = 0;
+        cp_pics_ok = false;
         key = 0;                // (back on the autosaves' screen: drawn as it is)
     } else if (cp_state == 0 && (key == 't' || key == 'T')) {
         cp_state = 10;
+        cp_pics_ok = false;
         hs.state = 0;
         hs.direct = false;
         if (hs_action(nmi_rom_data, 0)) return;
@@ -5858,29 +9487,48 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     slot_msg = nullptr;
     switch (key == 0 ? 255 : cp_state) {
     case 0:
-        if (n > 0 && n <= count) {
-            // carry on from it: the newer ones go, and the game's time goes back to it
-            int i = order[n - 1];
+        if ((key == notes::KEY_ENTER || key == 13 || key == '0') && count > 0) {
+            // carry on from the chosen one: the newer ones go, and the game's time goes back to it
+            const int c = cp_sel < count ? cp_sel : count - 1;
+            int i = order[c];
             uint16_t ago = (uint16_t) (rw_ticks(rw.menu_ms) - rw.at_t[i]);
             if (!cp_folder(erase_path, sizeof(erase_path))) break;
             int len = snprintf(erase_scratch, sizeof(erase_scratch), "Autosave %d", i + 1);
             snprintf(erase_scratch + len + 1, sizeof(erase_scratch) - (size_t) len - 1, "%s", rw_ext(i));
             load_snapshot_file(1, erase_path, erase_scratch, false);
             snap_prepared = true;
-            for (int k = 0; k < n - 1; k++) rw.used &= (uint8_t) ~(1 << order[k]);
+            for (int k = 0; k < c; k++) rw.used &= (uint8_t) ~(1 << order[k]);
             for (int k = 0; k < CP_COUNT; k++) rw.at_t[k] = (uint16_t) (rw.at_t[k] + ago);
             rw.next = (uint8_t) ((i + 1) % CP_COUNT);
             rw.loading = true;
+            cp_pics_ok = false;
             nmi_rom_data[0] = 2;
             return;
+        } else if (key == '5' || key == 'o' || key == 'O' || key == notes::KEY_LEFT) {
+            if (cp_sel > 0) cp_sel--;
+        } else if (key == '8' || key == 'p' || key == 'P' || key == notes::KEY_RIGHT) {
+            if (cp_sel + 1 < count) cp_sel++;
         } else if ((key == 'v' || key == 'V') && count > 0) {
-            cp_state = 1;
+            // the chosen one full size, until a key is pressed
+            if (cp_folder(grab_path, sizeof(grab_path))) {
+                const int i = order[cp_sel];
+                size_t dl = strlen(grab_path);
+                snprintf(grab_path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", i + 1, rw_ext(i));
+                preview_screen = nullptr;
+                if (find_preview(1, grab_path, rw_ext(i)) == 0 && preview_screen != nullptr) {
+                    cp_state = 2;
+                    nmi_rom_data[0] = 0;
+                    return;
+                }
+            }
+            slot_msg = "No picture in that autosave";
         } else if ((key == 'm' || key == 'M') && count > 0) {
-            cp_state = 3;
+            cp_pick = (uint8_t) order[cp_sel];
+            cp_state = 4;
         } else if ((key == 'c' || key == 'C') && sd_card_mounted) {
             cp_state = 6;
-        } else if (key == 'o' || key == 'O') {
-            // O: autosave on (or off) for this game, whatever was answered when it was loaded
+        } else if (key == 'a' || key == 'A') {
+            // A: autosave on (or off) for this game, whatever was answered when it was loaded
             char g[screengrab::NAME_MAX + 1];
             if (rw.on) {
                 rw.on = false;
@@ -5897,31 +9545,7 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
             return;
         }
         break;
-    case 1:             // V, then a checkpoint: its screen
-    case 3:             // M, then a checkpoint
-        if (n > 0 && n <= count) {
-            cp_pick = (uint8_t) order[n - 1];
-            if (cp_state == 3) {
-                cp_state = 4;
-                break;
-            }
-            cp_state = 0;
-            if (cp_folder(grab_path, sizeof(grab_path))) {
-                size_t dl = strlen(grab_path);
-                snprintf(grab_path + dl, sizeof(grab_path) - dl, "/Autosave %d.%s", cp_pick + 1, rw_ext(cp_pick));
-                preview_screen = nullptr;
-                if (find_preview(1, grab_path, rw_ext(cp_pick)) == 0 && preview_screen != nullptr) {
-                    cp_state = 2;
-                    nmi_rom_data[0] = 0;        // its own screen until a key is pressed
-                    return;
-                }
-            }
-            slot_msg = "No picture in that autosave";
-        } else if (back) {
-            cp_state = 0;
-        }
-        break;
-    case 2:             // its screen: any key goes back to the list
+    case 2:             // its screen: any key goes back
         cp_state = 0;
         break;
     case 4: {           // the slot it goes to
@@ -5937,6 +9561,7 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
             } else {
                 cp_state = 0;
                 slot_msg = checkpoint_to_slot(cp_pick, n);
+                cp_pics_ok = false;     // (a folder made: list_pool lent to FatFs)
             }
         }
         break;
@@ -5944,34 +9569,61 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
     case 5:             // "Save over slot n?"
         cp_state = 0;
         if (key == 'y' || key == 'Y') slot_msg = checkpoint_to_slot(cp_pick, slot_pick);
+        cp_pics_ok = false;
         break;
-    case 6:             // "Clear the checkpoints?"
+    case 6:             // "Clear the autosaves?"
         cp_state = 0;
         if (key == 'y' || key == 'Y') slot_msg = checkpoints_erase_files() ? "Autosaves cleared" : "Could not erase them all";
+        cp_pics_ok = false;
         break;
     default:
         break;
     }
     count = rw_order(order);
+    if (cp_sel >= count) cp_sel = (uint8_t) (count > 0 ? count - 1 : 0);
+    // the pictures (each read into snap_load_buffer, so before the screen is drawn there)
+    if (count > 0) {
+        if (!cp_pics_ok) {
+            walk_stop();                // the list cache's memory holds the pictures
+            big_valid = false;
+            cp_pics_clear(0, 0, 32, 24);
+            for (int k = 0; k < count; k++) cp_picture(order[k], CP_STRIP_COL0 + k * CP_STRIP_STEP, CP_STRIP_ROW, 3);
+            cp_big = -1;
+            cp_pics_ok = true;
+            sp_ok = false;
+        }
+        if (cp_big != order[cp_sel]) {
+            cp_pics_clear(CP_BIG_COL, CP_BIG_ROW, 16, 12);
+            cp_picture(order[cp_sel], CP_BIG_COL, CP_BIG_ROW, 1);
+            cp_big = (int8_t) order[cp_sel];
+        }
+    }
     char game[screengrab::NAME_MAX + 1];
     slot_game_now(game);
     slots_banner(screen, "Autosave: ", game[0] != '\0' ? game : "no game");
     char t[40];
     if (count > 0) {
+        // the large picture, rows 1-12, and the row of small ones, rows 15-17
+        pic_rows(screen, CP_BIG_ROW, CP_BIG_ROW + 11);
+        pic_rows(screen, CP_STRIP_ROW, CP_STRIP_ROW + 2);
         for (int k = 0; k < count; k++) {
             unsigned age = ((uint16_t) (rw_ticks(rw.menu_ms) - rw.at_t[order[k]]) + 4u) / 8u;
-            snprintf(t, sizeof(t), "%d", k + 1);
-            help_put_text(screen, 2 + k, 1, t, 1, gameinfo::ATTR_HEADING);
-            snprintf(t, sizeof(t), "%u seconds ago", age);
-            help_put_text(screen, 2 + k, 3, t, (int) strlen(t), gameinfo::ATTR_TEXT);
+            snprintf(t, sizeof(t), "%u:%02u", age / 60, age % 60);
+            help_put_text(screen, CP_STRIP_ROW + 4, CP_STRIP_COL0 + k * CP_STRIP_STEP, t, (int) strlen(t),
+                k == cp_sel ? gameinfo::ATTR_HEADING : gameinfo::ATTR_TEXT);
+            if (k == cp_sel) {
+                snprintf(t, sizeof(t), "Autosave from %u seconds ago", age);
+                int len = (int) strlen(t);
+                help_put_text(screen, 13, (32 - len) / 2, t, len, gameinfo::ATTR_HEADING);
+            }
         }
-        if (!rw.on) help_put_text(screen, 9, 1, "Autosave is off for this game.", 30, gameinfo::ATTR_DIM);
+        pic_frame(screen, CP_STRIP_COL0 + cp_sel * CP_STRIP_STEP, CP_STRIP_ROW, 4, 3);
     } else if (!rw.on) {
         help_put_text(screen, 2, 1, "Autosave is off for this game.", 30, gameinfo::ATTR_TEXT);
         if (cfg.checkpoint_s == 0) {
             help_put_text(screen, 4, 1, "Set it in O - Options (20, 40", 29, gameinfo::ATTR_DIM);
             help_put_text(screen, 5, 1, "or 60 s): each game loaded", 26, gameinfo::ATTR_DIM);
-            help_put_text(screen, 6, 1, "then asks. O here turns it on", 29, gameinfo::ATTR_DIM);
+            help_put_text(screen, 6, 1, "then asks. A here turns it on", 29, gameinfo::ATTR_DIM);
             help_put_text(screen, 7, 1, "for this game (every 20 s).", 27, gameinfo::ATTR_DIM);
         }
     } else {
@@ -5979,41 +9631,38 @@ __attribute__((noinline)) static void nmi_action_checkpoints() {
         snprintf(t, sizeof(t), "One is saved every %u seconds.", (unsigned) rw.secs);
         help_put_text(screen, 4, 1, t, (int) strlen(t), gameinfo::ATTR_DIM);
     }
-    if (count > 0) {
-        snprintf(t, sizeof(t), "1-%d", count);
-        help_put_text(screen, 11, 1, t, (int) strlen(t), gameinfo::ATTR_KEYS);
-        help_put_text(screen, 11, 5, "Select autosave", 15, gameinfo::ATTR_TEXT);
-        help_put_text(screen, 12, 1, "V", 1, gameinfo::ATTR_KEYS);
-        help_put_text(screen, 12, 5, "View an autosave's screen", 25, gameinfo::ATTR_TEXT);
-        help_put_text(screen, 13, 1, "M", 1, gameinfo::ATTR_KEYS);
-        help_put_text(screen, 13, 5, "Move one to a save slot", 23, gameinfo::ATTR_TEXT);
-    }
-    if (sd_card_mounted) {
-        help_put_text(screen, 14, 1, "C", 1, gameinfo::ATTR_KEYS);
-        help_put_text(screen, 14, 5, "Clear the game's autosaves", 26, gameinfo::ATTR_TEXT);
-    }
-    help_put_text(screen, 15, 1, "O", 1, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 15, 5, rw.on ? "Turn autosave off" : "Turn autosave on", rw.on ? 17 : 16, gameinfo::ATTR_TEXT);
-#if PICOMENU_HISCORE
-    help_put_text(screen, 16, 1, "T", 1, gameinfo::ATTR_KEYS);
-    help_put_text(screen, 16, 5, "High score table", 16, gameinfo::ATTR_TEXT);
-#endif
-    help_put_text(screen, 18, 1, "X-Back", 6, gameinfo::ATTR_KEYS);
     const char* ask = nullptr;
-    const char* keys = "X-Back";
+    const char* keys = "1-9  X-Back";
     switch (cp_state) {
-    case 1: snprintf(t, sizeof(t), "View which? 1-%d", count); ask = t; break;
-    case 3: snprintf(t, sizeof(t), "Move which? 1-%d", count); ask = t; break;
-    case 4: ask = "To which save slot? 1-9"; break;
+    case 4: ask = "Move it to which save slot?"; break;
     case 5: snprintf(t, sizeof(t), "Save over slot %d?", slot_pick); ask = t; keys = "Y-Yes  N-No"; break;
     case 6: ask = "Erase all of its autosaves?"; keys = "Y-Yes  N-No"; break;
     default: break;
     }
     if (ask != nullptr) {
-        help_put_text(screen, 19, 1, ask, (int) strlen(ask), gameinfo::ATTR_HEADING);
-        help_put_text(screen, 20, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
+        help_put_text(screen, 21, 1, ask, (int) strlen(ask), gameinfo::ATTR_HEADING);
+        help_put_text(screen, 22, 1, keys, (int) strlen(keys), gameinfo::ATTR_KEYS);
+    } else {
+        if (slot_msg != nullptr) {
+            help_put_text(screen, 20, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
+        } else if (count > 0) {
+            put_keys(screen, 20, 1, rw.on ? "A |Turn autosave off" : "A |Turn autosave on (it is off)");
+        }
+        if (count > 0) {
+            put_keys(screen, 21, 1, "O P |Choose  |ENTER |Go back to it");
+            put_keys(screen, 22, 1, "V |Full size |M |Move");
+        } else {
+            put_keys(screen, 21, 1, rw.on ? "A |Turn autosave off" : "A |Turn autosave on");
+        }
+        if (sd_card_mounted) {
+            put_keys(screen, 22, 21, "C |Clear");
+        }
+#if PICOMENU_HISCORE
+        put_keys(screen, 23, 1, "X-Back  T |High score table");
+#else
+        put_keys(screen, 23, 1, "X-Back");
+#endif
     }
-    if (slot_msg != nullptr) help_put_text(screen, 22, 1, slot_msg, (int) strlen(slot_msg), gameinfo::ATTR_TEXT);
     preview_screen = screen;
     nmi_rom_data[0] = 0;
 }
@@ -6163,7 +9812,7 @@ static void help_draw_page(uint8_t* screen, int page) {
     // the pages, packed in the firmware, unpacked into a part of the buffer nothing keeps
     // anything in while Help is open
     char* all = snap_load_buffer + HELP_TEXT_OFFSET;
-    lzss_unpack(help_packed, reinterpret_cast<uint8_t*>(all), HELP_TEXT_SIZE);
+    blob_unpack(help_packed, reinterpret_cast<uint8_t*>(all), HELP_TEXT_SIZE);
     struct { const char* title; const char* text; } hp;
     const char* at = all;
     for (int i = 0; i < page; i++) {
@@ -6209,7 +9858,9 @@ static void help_draw_page(uint8_t* screen, int page) {
 // read again whenever the poke list is opened.
 alignas(8) static extras::PokFile pok_file;
 
-static const char POKE_LIST_DIR[] = "/Poke List";     // in the root of the SD card
+extern const char POKE_LIST_DIR[];
+const char POKE_LIST_DIR[] = "/Poke List";     // in the root of the SD card
+static uint16_t pok_page_start = 0;         // (ACTION_POKE_LIST's last page: V's and D's cheats)
 
 // Looks for <name>.pok (.POK too) in the Poke List folder, for the game last loaded (or its name
 // without " Save Game"). True if there is one: its path in path.
@@ -6234,11 +9885,26 @@ static bool pok_find(char* path, size_t size) {
     return false;
 }
 
+// The .pok pok_file was read from: the cheats' names are read from it when they are shown
+static char pok_path[BROWSE_PATH_MAX];
+
+// A cheat's name, from f (pok_path, open): out (max letters), its length
+static size_t pok_name(FileHandle& f, bool open, int i, char* out, size_t max) {
+    char raw[extras::POK_NAME_MAX + 8];
+    int got = 0;
+    if (open && i >= 0 && i < pok_file.ncheats && f.seek(pok_file.cheats[i].at)) {
+        got = f.read(raw, sizeof(raw));
+    }
+    return extras::pok_name_clean(raw, got > 0 ? (size_t) got : 0, out, max);
+}
+
 // Reads the game's .pok (pok_find). Returns the number of cheats.
 static int pok_load_for_last_game() {
     pok_file.clear();
-    static char path[BROWSE_PATH_MAX];
-    if (!pok_find(path, sizeof(path))) {
+    char* path = pok_path;
+    const size_t size_path = sizeof(pok_path);
+    if (!pok_find(path, size_path)) {
+        path[0] = '\0';
         return 0;
     }
     FileHandle f;
@@ -6261,13 +9927,115 @@ static void nmi_action_poke_list() {
     if (start == 0) {
         pok_load_for_last_game();
     }
+    pok_page_start = start;
     if (pok_file.ncheats == 0) {
         nmi_rom_data[0] = 1;
         return;
     }
-    extras::poke_list_page(pok_file, start, nmi_rom_data, dest);
+    FileHandle f;
+    const bool open = f.open(Drive::EXTERNAL_SD_CARD, pok_path, true);
+    extras::poke_list_page(pok_file, start, nmi_rom_data, dest,
+        [&](int i, char* out, size_t max) { return pok_name(f, open, i, out, max); });
+    if (open) f.close();
     nmi_rom_data[0] = 0;
 }
+
+#if PICOMENU_TROPHIES
+// Deletes cheat i from the game's .pok (pok_path): its N line and the lines after it, to the
+// next N or Y line; the file read into snap_load_buffer (after the screen's share), cut and
+// written again. The list is read again. Null when done, else why not.
+static const char* pok_delete(int i) {
+    if (i < 0 || i >= pok_file.ncheats || pok_path[0] == '\0') return "No such cheat";
+    char* text = snap_load_buffer + 16384;
+    const UINT room = 16384;                // (the search's state is after it)
+    UINT got = 0, put = 0;
+    if (f_open(&save_fil, pok_path, FA_READ) != FR_OK) return "Could not read its .pok";
+    bool ok = f_read(&save_fil, text, room, &got) == FR_OK && got < room;
+    f_close(&save_fil);
+    if (!ok) return "Its .pok is too big";
+    const UINT from = pok_file.cheats[i].at - 1;
+    if (from >= got || text[from] != 'N') return "Its .pok has changed";
+    // the end: the next line that starts with N or Y (or the end of the file)
+    UINT to = from + 1;
+    for (; to < got; to++) {
+        if ((text[to - 1] == '\n' || text[to - 1] == '\r') && (text[to] == 'N' || text[to] == 'Y')) break;
+    }
+    memmove(text + from, text + to, got - to);
+    got -= to - from;
+    if (f_open(&save_fil, pok_path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return "Could not write its .pok";
+    ok = f_write(&save_fil, text, got, &put) == FR_OK && put == got;
+    f_close(&save_fil);
+    pok_load_for_last_game();
+    return ok ? nullptr : "Could not write its .pok";
+}
+
+// D on the poke list (ACTION_POKE_DELETE): which cheat (1-0 on the page the list showed), then
+// Y to delete it. Its state in snap_load_buffer (PD_AT), the screen at its start.
+struct PokeDelete {
+    uint8_t state;          // 0 which cheat, 1 sure?, 2 done (a key closes it)
+    uint16_t cheat;
+    const char* msg;
+};
+static const uint32_t PD_AT = 7680;
+__attribute__((noinline)) static void nmi_action_poke_delete() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    const uint8_t key = nmi_rom_data[2];
+    PokeDelete& pd = *reinterpret_cast<PokeDelete*>(snap_load_buffer + PD_AT);
+    if (key == 0) memset(&pd, 0, sizeof(pd));
+    const bool back = key == 'x' || key == 'X' || key == notes::KEY_BREAK;
+    if (pd.state == 0 && back) {
+        nmi_rom_data[0] = 1;
+        return;
+    } else if (pd.state == 0 && key >= '0' && key <= '9') {
+        const int at = pok_page_start + (key == '0' ? 9 : key - '1');
+        if (at < pok_file.ncheats) {
+            pd.cheat = (uint16_t) at;
+            pd.state = 1;
+        }
+    } else if (pd.state == 1 && (key == 'y' || key == 'Y')) {
+        pd.msg = pok_delete(pd.cheat);
+        pd.state = 2;
+    } else if (pd.state == 1 && (back || key == 'n' || key == 'N')) {
+        pd.state = 0;
+    } else if (pd.state == 2 && key != 0) {
+        nmi_rom_data[0] = 1;
+        return;
+    }
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    memset(screen, 0, 6144);
+    memset(screen + 6144, gameinfo::ATTR_TEXT, 768);
+    char t[40];
+    char nm[extras::POK_NAME_MAX + 1];
+    auto put = [&](int row, int col, const char* text, uint8_t attr) {
+        help_put_text(screen, row, col, text, (int) strlen(text), attr);
+    };
+    FileHandle f;
+    const bool open = pd.state < 2 && pok_path[0] != '\0' && f.open(Drive::EXTERNAL_SD_CARD, pok_path, true);
+    slots_banner(screen, "Poke list", "");
+    if (pd.state == 0) {
+        put(2, 1, "Delete which cheat? 1-0", gameinfo::ATTR_HEADING);
+        for (int i = 0; i < 10 && pok_page_start + i < pok_file.ncheats; i++) {
+            pok_name(f, open, pok_page_start + i, nm, 27);
+            snprintf(t, sizeof(t), "%d |%s", (i + 1) % 10, nm);
+            put_keys(screen, 4 + i, 1, t);
+        }
+        put_keys(screen, 23, 1, "X|-Back");
+    } else if (pd.state == 1) {
+        put(2, 1, "Delete this cheat?", gameinfo::ATTR_HEADING);
+        pok_name(f, open, pd.cheat, nm, 30);
+        put(4, 1, nm, gameinfo::ATTR_TEXT);
+        put(6, 1, "It goes from the game's .pok.", gameinfo::ATTR_TEXT);
+        put_keys(screen, 23, 1, "Y|-Delete it  |N|-No");
+    } else {
+        put(2, 1, pd.msg == nullptr ? "Deleted." : pd.msg, gameinfo::ATTR_HEADING);
+        put_keys(screen, 23, 1, "Any key|-Back to the list");
+    }
+    if (open) f.close();
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+
+#endif
 
 // ACTION_POKE_GET: WORD param1 = the cheat, WORD param2 = where to put its pokes
 // (see extras::poke_get).  Status 1 if there is no such cheat.
@@ -6277,6 +10045,210 @@ static void nmi_action_poke_get() {
     uint16_t dest = nmi_rom_data[4] | (nmi_rom_data[5] << 8);
     nmi_rom_data[0] = extras::poke_get(pok_file, cheat, nmi_rom_data, dest) ? 0 : 1;
 }
+
+#if PICOMENU_TROPHIES
+// V on the poke list (ACTION_POKE_VIEW, a Pico W): which cheat (1-0 on the page the list showed
+// last), then its pokes: the address, the bank, the value poked, what the .pok says was there and
+// what is there now (read from the game, PICO_RUN). ENTER makes them (asking for a value if one
+// is the player's), T and a line's number opens the Trophy creator with that address (the keys
+// then go to it until it closes). Its state is kept in snap_load_buffer, between the screen and
+// the Trophy creator's list.
+
+// The poke's address can be read and poked now: as the menu's .pokeallowed (the ROM never; 0x4000
+// to 0xBFFF in their own banks 5 and 2; 0xC000 up only with a 48K program, in bank 0)
+static bool pv_allowed(const extras::PokPoke& k, bool m48) {
+    if (k.address < 0x4000) return false;
+    if (k.bank >= 8) return true;
+    if (k.address < 0x8000) return k.bank == 5;
+    if (k.address < 0xC000) return k.bank == 2;
+    return m48 && k.bank == 0;
+}
+
+// ACTION_POKE_FIND (F on the Poke screen): closed with status 2, so that the menu opens the Trophy
+// creator (as NMI+Y does), which then is the Poke Finder
+static void nmi_action_poke_find() {
+    PokeFind& pf = pf_state();
+    if (pf.magic != PF_MAGIC) {
+        memset(&pf, 0, sizeof(pf));
+        pf.magic = PF_MAGIC;
+    }
+    pf.pending = 1;
+    tr_hotkey_maker = true;
+    (rom_data + 16384)[0] = 2;
+}
+
+__attribute__((noinline)) static void nmi_action_poke_view() {
+    uint8_t* nmi_rom_data = rom_data + 16384;
+    const uint8_t key = nmi_rom_data[2];
+    PokeView& pv = *reinterpret_cast<PokeView*>(snap_load_buffer + PV_AT);
+    if (key == 0) {
+        memset(&pv, 0, sizeof(pv));
+        pv.start = pok_page_start;
+    }
+    const bool m48 = nmi_rom_data[STARTUP_SDCARD_PRESENT + 1] != 0;     // start_up_machine48
+    const extras::PokCheat* c = pv.cheat < pok_file.ncheats ? &pok_file.cheats[pv.cheat] : nullptr;
+    auto ask_run = [&](uint8_t what, uint8_t value) {
+        // the code: each poke that can be, read (what 1) or made (what 2: value for the player's)
+        uint8_t* p = nmi_rom_data + PICO_CODE_AT;
+        auto word = [&](uint16_t w) { *p++ = (uint8_t) (w & 0xFF); *p++ = (uint8_t) (w >> 8); };
+        pv.poked = pv.skipped = 0;
+        for (int i = 0; c != nullptr && i < c->count; i++) {
+            const extras::PokPoke& k = pok_file.pokes[c->first + i];
+            if (!pv_allowed(k, m48)) {
+                pv.skipped++;
+                continue;
+            }
+            if (what == 1) {
+                *p++ = 0x3A; word(k.address);                       // LD A,(address)
+                *p++ = 0x32; word((uint16_t) (PV_READ + i));        // LD (read+i),A
+            } else {
+                *p++ = 0x3E; *p++ = k.value == 256 ? value : (uint8_t) k.value;     // LD A,value
+                *p++ = 0x32; word(k.address);                       // LD (address),A
+                pv.poked++;
+            }
+        }
+        *p = 0xC9;                                                  // RET
+        pv.run = what;
+        nmi_rom_data[0] = PICO_RUN;
+    };
+    auto open_cheat = [&](uint16_t which) {
+        pv.cheat = which;
+        c = &pok_file.cheats[which];
+        for (int i = 0; i < c->count; i++) pv.can[i] = pv_allowed(pok_file.pokes[c->first + i], m48) ? 1 : 0;
+        pv.state = 1;
+        ask_run(1, 0);
+    };
+    if (key == 254 && pv.run != 0) {
+        // the code has run
+        if (pv.run == 1 && c != nullptr) {
+            for (int i = 0; i < c->count; i++) pv.now[i] = nmi_rom_data[PV_READ + i];
+            pv.nok = 1;
+        } else if (pv.run == 2) {
+            if (pv.skipped > 0) snprintf(pv.text, sizeof(pv.text), "Poked %u (%u need a bank)", (unsigned) pv.poked, (unsigned) pv.skipped);
+            else snprintf(pv.text, sizeof(pv.text), "Poked %u: X goes back", (unsigned) pv.poked);
+            pv.msg = pv.text;
+            pv.run = 0;
+            ask_run(1, 0);                  // what is there now, again
+            return;
+        }
+        pv.run = 0;
+    } else if (key != 0) {
+        pv.msg = nullptr;
+        const int k = key - '1';
+        const int line = key == '0' ? 9 : k;
+        if (pv.state == 0) {
+            if (is_key_back(key)) {
+                nmi_rom_data[0] = 1;
+                return;
+            }
+            if (key >= '0' && key <= '9' && pv.start + line < pok_file.ncheats) {
+                open_cheat((uint16_t) (pv.start + line));
+                return;
+            }
+        } else if (pv.state == 1) {
+            if (is_key_back(key)) {
+                pv.state = 0;
+            } else if ((key == notes::KEY_ENTER || key == 13) && c != nullptr) {
+                if (c->ask) {
+                    pv.num = 0;
+                    pv.ndig = 0;
+                    pv.state = 3;
+                } else {
+                    ask_run(2, 0);
+                    return;
+                }
+            } else if (key == 't' || key == 'T') {
+                if (hs.game[0] == '\0') pv.msg = "No game is running";
+                else pv.state = 2;
+            }
+        } else if (pv.state == 2) {
+            pv.state = 1;
+            const int n = c != nullptr ? c->count : 0;
+            const int l = key >= '1' && key <= '9' ? key - '1' : -1;
+            if (l >= 0 && l < n) {
+                if (!pv.can[l]) {
+                    pv.msg = "Not readable here: its bank";
+                } else {
+                    // closed with status 2: the menu opens the Trophy creator (as NMI+Y does), which
+                    // takes the address from here and starts a new memory trophy there
+                    pv.taddr = pok_file.pokes[c->first + l].address;
+                    pv.trophy = 2;
+                    pv.magic = PV_MAGIC;
+                    tr_hotkey_maker = true;
+                    nmi_rom_data[0] = 2;
+                    return;
+                }
+            }
+        } else if (pv.state == 3) {
+            if (key == notes::KEY_BREAK) {
+                pv.state = 1;
+            } else if (key == notes::KEY_DELETE) {
+                pv.num /= 10;
+                if (pv.ndig > 0) pv.ndig--;
+            } else if (key >= '0' && key <= '9' && pv.num * 10 + (key - '0') <= 255) {
+                pv.num = (uint16_t) (pv.num * 10 + (key - '0'));
+                pv.ndig++;
+            } else if ((key == notes::KEY_ENTER || key == 13) && pv.ndig > 0) {
+                pv.state = 1;
+                ask_run(2, (uint8_t) pv.num);
+                return;
+            }
+        }
+    }
+    // the screen
+    uint8_t* screen = reinterpret_cast<uint8_t*>(snap_load_buffer);
+    char t[48];
+    auto put = [&](int row, int col, const char* text, uint8_t attr) {
+        help_put_text(screen, row, col, text, (int) strlen(text), attr);
+    };
+    nmi_rom_data[START_KEYREPEAT] = pv.state == 3 ? 1 : 0;
+    FileHandle pf;
+    const bool pfopen = pok_path[0] != '\0' && pf.open(Drive::EXTERNAL_SD_CARD, pok_path, true);
+    char nm[extras::POK_NAME_MAX + 1];
+    if (pv.state == 0 || c == nullptr) {
+        pv.state = 0;
+        slots_banner(screen, "Poke list", "");
+        put(2, 1, "View which cheat? 1-0", gameinfo::ATTR_HEADING);
+        for (int i = 0; i < 10 && pv.start + i < pok_file.ncheats; i++) {
+            pok_name(pf, pfopen, pv.start + i, nm, 27);
+            snprintf(t, sizeof(t), "%d |%.27s", (i + 1) % 10, nm);
+            put_keys(screen, 4 + i, 1, t);
+        }
+        put_keys(screen, 23, 1, "1-0 |View  |X|-Back");
+    } else {
+        pok_name(pf, pfopen, (int) (c - pok_file.cheats), nm, extras::POK_NAME_MAX);
+        slots_banner(screen, "Poke: ", nm);
+        put(2, 1, " # Address Bank Poke Was  Now", gameinfo::ATTR_HEADING);
+        for (int i = 0; i < c->count && i < 16; i++) {
+            const extras::PokPoke& k = pok_file.pokes[c->first + i];
+            char bank[4], val[5], now[5];
+            if (k.bank >= 8) snprintf(bank, sizeof(bank), "-");
+            else snprintf(bank, sizeof(bank), "%u", (unsigned) k.bank);
+            if (k.value == 256) snprintf(val, sizeof(val), "ask");
+            else snprintf(val, sizeof(val), "%u", (unsigned) k.value);
+            if (pv.nok && pv.can[i]) snprintf(now, sizeof(now), "%u", (unsigned) pv.now[i]);
+            else snprintf(now, sizeof(now), "-");
+            snprintf(t, sizeof(t), "%2d %-7u %-4s %-4s %-4u %s", i + 1, (unsigned) k.address, bank, val, (unsigned) k.orig, now);
+            put(3 + i, 1, t, gameinfo::ATTR_TEXT);
+        }
+        if (pv.state == 2) {
+            put(20, 1, "Trophy from which line? 1-9", gameinfo::ATTR_HEADING);
+        } else if (pv.state == 3) {
+            put(20, 1, "Its value (0-255):", gameinfo::ATTR_HEADING);
+            if (pv.ndig > 0) snprintf(t, sizeof(t), "%u_", (unsigned) pv.num);
+            else snprintf(t, sizeof(t), "_");
+            put(20, 20, t, gameinfo::ATTR_HEADING);
+        } else if (pv.msg != nullptr) {
+            put(20, 1, pv.msg, gameinfo::ATTR_HEADING);
+        }
+        put_keys(screen, 22, 1, "ENTER|-Make it  |T|-Make a trophy");
+        put_keys(screen, 23, 1, "X|-Back");
+    }
+    if (pfopen) pf.close();
+    preview_screen = screen;
+    nmi_rom_data[0] = 0;
+}
+#endif
 
 // ACTION_GAME_INFO: the controls and instructions of a game (the file Instructions.txt in the
 // folder Scraper of the SD card, or in its root, see gameinfo.h) with a small copy of its screen, as a screen in
@@ -7729,6 +11701,29 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
         }
     }
     info_paint_text(screen, *info, page);
+#if PICOMENU_TROPHIES
+    if (page == 0) {
+        // the game's trophies, at the right of the Instructions heading
+        char game[screengrab::NAME_MAX + 1], line[24];
+        game[0] = '\0';
+        if (mode == 1) {
+            snprintf(game, sizeof(game), "%s", hs.game);
+        } else if (name[0] != '\0') {
+            const char* slash = strrchr(info_path, '/');
+            char dir[sizeof(sd_cwd)];
+            snprintf(dir, sizeof(dir), "%.*s", (int) (slash != nullptr ? slash - info_path : 0), info_path);
+            game_base(dir, name, game);
+        }
+        tr_summary(game, line, sizeof(line));
+        const int ln = (int) strlen(line);
+        if (ln > 0) {
+            const int col = 31 - ln;
+            for (int y = 0; y < 8; y++) screen[zx_line(gameinfo::TEXT_HEAD_ROW * 8 + y) + col - 2] = trophies::CUP[y];
+            screen[6144 + gameinfo::TEXT_HEAD_ROW * 32 + col - 2] = ui_attr(gameinfo::ATTR_HEADING);
+            help_put_text(screen, gameinfo::TEXT_HEAD_ROW, col, line, ln, gameinfo::ATTR_HEADING);
+        }
+    }
+#endif
     char keys[40];
     gameinfo::key_help(mode == 1, pages, keys, grab_shown, stash_picture || pictures > 0);
     if (asking) {
@@ -7750,7 +11745,7 @@ NOTES_FUNC static void nmi_game_info_show(bool ended) {
 static const char* setup_texts() {
     static_assert(HELP_TEXT_OFFSET + SETUP_INI_SIZE + SETUP_EXAMPLE_SIZE <= SNAP_LOAD_BUFFER_SIZE, "they fit");
     char* t = snap_load_buffer + HELP_TEXT_OFFSET;
-    lzss_unpack(SETUP_TEXTS_LZ, reinterpret_cast<uint8_t*>(t), SETUP_INI_SIZE + SETUP_EXAMPLE_SIZE);
+    blob_unpack(SETUP_TEXTS_Z, reinterpret_cast<uint8_t*>(t), SETUP_INI_SIZE + SETUP_EXAMPLE_SIZE);
     return t;
 }
 
@@ -9438,7 +13433,10 @@ static void fw_draw(uint8_t* screen, uint8_t status, fwupdate::Error error) {
         fw_put(screen, 8, 1, "In the file", gameinfo::ATTR_HEADING);
         snprintf(line, sizeof(line), "%s (%u KB)", fw_checker.version(), (unsigned) ((fw_checker.size() + 1023) / 1024));
         fw_put_wrapped(screen, 9, line, gameinfo::ATTR_TEXT);
-        int row = fw_put_wrapped(screen, 12, "Do not switch off while it runs. When it has finished, switch the Spectrum off and on again.", gameinfo::ATTR_TEXT);
+        int row = fw_put_wrapped(screen, 12, cfg.reset_pin != 0
+            ? "Do not switch off while it runs. When it has finished, PicoMenu resets the Spectrum itself (the reset mod)."
+            : "Do not switch off while it runs. When it has finished, press the picoFace's Spectrum reset button, the reset button on the Spectrum, or power cycle the Spectrum.",
+            gameinfo::ATTR_TEXT);
         fw_put_wrapped(screen, row + 1, "If it fails, hold BOOTSEL while plugging in USB and copy the .uf2 to RPI-RP2.", gameinfo::ATTR_DIM);
         keys = "Y-Update  N-Cancel";
     } else {
@@ -9564,6 +13562,7 @@ static uint8_t fw_replace_program(volatile uint8_t* mailbox) {
 static void __no_inline_not_in_flash_func(fw_flash_erase)(uint32_t off, uint32_t n) { flash_range_erase(off, n); }
 static void __no_inline_not_in_flash_func(fw_flash_program)(uint32_t off, const uint8_t* d, uint32_t n) { flash_range_program(off, d, n); }
 
+static const uint32_t FW_UPDATED = 0x50494355;     // watchdog scratch 0 after an update ("PICU")
 // Runs with interrupts off, nothing here may call into the flash. The other core is left running
 // (it serves the Spectrum from RAM) so the Spectrum can show the bar: it reads byte 3 of the
 // mailbox and waits for byte 0 to stop being 255.
@@ -9588,7 +13587,9 @@ static bool __no_inline_not_in_flash_func(fw_run)(const fwupdate::Map* map, uint
         to_bootsel(0, 0);       // the program is damaged: the USB drive RPI-RP2 for a new copy
         for (;;) {}
     }
-    // restart the whole chip (what watchdog_reboot does, without calling into the flash)
+    // restart the whole chip (what watchdog_reboot does, without calling into the flash), with a
+    // note for the new firmware: it resets the Spectrum, if it can (main, the reset mod)
+    watchdog_hw->scratch[0] = FW_UPDATED;
     watchdog_hw->scratch[4] = 0;
     psm_hw->wdsel = PSM_WDSEL_BITS & ~(PSM_WDSEL_XOSC_BITS | PSM_WDSEL_ROSC_BITS);
     hw_set_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_TRIGGER_BITS);
@@ -9630,6 +13631,15 @@ static void nmi_action_update() {
         if (fw_staged) {
             LOG("Replacing the firmware\n");
             nmi_rom_data[3] = 0;
+            // the done screen's four lines (the ROM's .updatedone): put in spare_space now, while
+            // the firmware can still read its own texts
+            static const char* const DONE[2][4] = {
+                { "Press picoFace's Spectrum", "reset button, the reset button", "on the Spectrum, or power", "cycle the Spectrum." },
+                { "Wait for automatic restart.", "", "", "" },
+            };
+            for (int i = 0; i < 4; i++) {
+                snprintf(reinterpret_cast<char*>(nmi_rom_data + SPARE_AT + 32 * i), 32, "%s", DONE[cfg.reset_pin != 0 ? 1 : 0][i]);
+            }
             status = fw_replace_program(nmi_rom_data);
             if (status != FWU_OK && status != FWU_WRITE_FAILED) {
                 fw_draw(screen, status, error);
@@ -9687,6 +13697,8 @@ static uint16_t save_hash1 = 0, save_hash2 = 0;
 // saves the menu's screen (as a double press does with the original button). There is no long
 // press reset (1 and 4 are hotkeys) and no hold or double press.
 static bool hotkey_nmi = false;         // the next NMI is the button's: hotkeys goes in
+#if PICOMENU_TROPHIES
+#endif
 bool button_press_action(bool held);
 
 // ACTION_HOTKEY: the key (from the ROM's key table) and what it opens
@@ -9698,6 +13710,15 @@ __attribute__((noinline)) static void nmi_action_hotkey(uint8_t* nmi_rom_data) {
     uint8_t k = nmi_rom_data[2];
     if (k >= 'A' && k <= 'Z') k = (uint8_t) (k + 32);
     uint8_t status = k == 'h' ? 2 : k == ' ' ? 3 : 0;
+#if PICOMENU_TROPHIES
+    if (k == 'y') {
+        // Y: the Trophy creator (Y in Tools)
+        status = 1;
+        nmi_rom_data[3] = (uint8_t) (HK_TROPHIES & 0xFF);
+        nmi_rom_data[4] = (uint8_t) (HK_TROPHIES >> 8);
+        tr_hotkey_maker = true;
+    }
+#endif
 #if PICOMENU_HISCORE
     if (k == 't') {
         // T: the high score table (A - Autosave's T)
@@ -9886,6 +13907,7 @@ void processNmiRequest() {
     uint8_t* nmi_rom_data = rom_data + 16384;
     uint8_t action = nmi_rom_data[1];
     LOG("Action to process: %d\n", action);
+    TLOG("act %d\n", action);
 #if PICOMENU_BT
     if (bt_on && !bt_keeps(action)) bt_off();      // its memory is the end of snap_load_buffer
 #endif
@@ -9991,8 +14013,23 @@ void processNmiRequest() {
         nmi_action_text_file();
         return;
     }  else if (action == ACTION_ASSETS) {
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+        (rom_data + 16384)[0] = 1;      // (the log test build: no room for Erase all assets)
+#else
         nmi_action_assets();
+#endif
         return;
+#if PICOMENU_TROPHIES
+    }  else if (action == ACTION_TROPHIES) {
+        // (the Trophy creator from Tools, or the hotkey Y; else Your trophies)
+        static bool maker = false;
+        if (nmi_rom_data[2] == 0) {
+            maker = nmi_rom_data[TOOLS_FLAG] != 0 || tr_hotkey_maker;
+            tr_hotkey_maker = false;
+        }
+        nmi_action_trophies(maker);
+        return;
+#endif
     }  else if (action == ACTION_SNAP_HIDE) {
         nmi_action_snap_hide();
         return;
@@ -10037,6 +14074,27 @@ void processNmiRequest() {
         return;
     }  else if (action == ACTION_POKE_LIST) {
         nmi_action_poke_list();
+        return;
+    }  else if (action == ACTION_POKE_FIND) {
+#if PICOMENU_TROPHIES
+        nmi_action_poke_find();
+#else
+        nmi_rom_data[0] = 1;            // (the Pico W firmware's)
+#endif
+        return;
+    }  else if (action == ACTION_POKE_DELETE) {
+#if PICOMENU_TROPHIES
+        nmi_action_poke_delete();
+#else
+        nmi_rom_data[0] = 1;            // (the Pico W firmware's)
+#endif
+        return;
+    }  else if (action == ACTION_POKE_VIEW) {
+#if PICOMENU_TROPHIES
+        nmi_action_poke_view();
+#else
+        nmi_rom_data[0] = 1;            // (the Pico W firmware's)
+#endif
         return;
     }  else if (action == ACTION_POKE_GET) {
         nmi_action_poke_get();
@@ -10111,8 +14169,10 @@ inline bool sendNmiAndWaitForCompletion(uint8_t command, uint16_t param1, uint16
             host_step();
 #endif
         }
+        TLOG("nmi %u done\n", command);
         return true;
     }
+    TLOG("nmi %u not sent (flags %lx active %lx)\n", command, (unsigned long) rom_state.flags, (unsigned long) rom_state.nmi_active);
     return false;
 }
 
@@ -10273,15 +14333,26 @@ static uint8_t tape_drive = 0;
 static char tape_name[BROWSE_PATH_MAX];
 static TzxState tape_tz;      // where the tape being served is (a preview of another .tzx has its own)
 static uint32_t tape_done = 0;  // data blocks the tape has gone past since its start
-#if PICOMENU_HISCORE
+// The tape is giving the game blocks (one in the last 5 s, or the Bluetooth playing): no autosave
+// is taken then, nor the memory read for level loaders (an NMI in the middle of a 128K game's
+// loader, its memory paged by its own OUTs, can leave it in pieces)
+static bool tape_loading() {
+#if PICOMENU_BT
+    if (bt_playing) return true;
+#endif
+    return tape_service_active && !tape_ejected && tape_served_ms != 0 &&
+        to_ms_since_boot(get_absolute_time()) - tape_served_ms < 5000;
+}
+
 // a tape is being loaded: the high score table is not put back until it has stopped (no block
 // for 5 s, after one at least), as the game sets up its own table once it is in
 static bool tape_busy() {
+#if PICOMENU_BT
     if (bt_playing) return true;
+#endif
     if (!tape_service_active || tape_ejected) return false;
     return (tape_done == 0 && !hs_bt_played) || to_ms_since_boot(get_absolute_time()) - tape_block_ms < 5000;
 }
-#endif
 static bool tape_goto(uint32_t block);
 // Tape in (T in Browse Games): see tape_in_start()
 static const uint32_t TAPE_IN_ENTRY = TAPE_HOOK_ADDR;   // as in piohandler.S
@@ -10330,6 +14401,7 @@ static bool tape_open_file() {
     }
     tape_tz = tz;
     tape_done = 0;
+    TLOG("tape: from the start (%s)\n", tape_file_open ? "open" : "not open");
     return tape_file_open;
 }
 
@@ -10427,12 +14499,51 @@ static bool tape_serve_block(uint8_t flag, uint16_t dest, uint16_t length, bool 
     return ok;
 }
 
+
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+// (the log build) A block just copied into the Spectrum is read back twice and compared with what
+// was sent, 512 bytes at a time (a sum of each): a byte the Spectrum got wrong shows as a
+// difference. Sent != both reads, the reads the same: the copy into the Spectrum went wrong. The
+// two reads different: the reading back went wrong (or the memory changed in between).
+static void tape_verify(uint16_t d, uint32_t keep) {
+    static const uint32_t CH = 512, MAXCH = 128;
+    static uint16_t sums[3][MAXCH];
+    uint8_t* t = reinterpret_cast<uint8_t*>(snap_load_buffer) + SNA_HEADER_SIZE + (d - 16384);
+    uint32_t n = (keep + CH - 1) / CH;
+    if (n > MAXCH) n = MAXCH;
+    for (int pass = 0; pass < 3; pass++) {
+        if (pass > 0 && !sendNmiAndWaitForCompletion(STARTUP_ACTION_SAVE_MEMORY, d, (uint16_t) keep)) {
+            TLOG("verify: read back %d not sent\n", pass);
+            return;
+        }
+        for (uint32_t c = 0; c < n; c++) {
+            uint16_t s1 = 0, s2 = 0;
+            uint32_t e = (c + 1) * CH < keep ? (c + 1) * CH : keep;
+            for (uint32_t i = c * CH; i < e; i++) {
+                s1 = (uint16_t) (s1 + t[i]);
+                s2 = (uint16_t) (s2 + s1);
+            }
+            sums[pass][c] = (uint16_t) (s1 ^ (s2 << 3) ^ (s2 >> 13));
+        }
+    }
+    int bad = 0;
+    for (uint32_t c = 0; c < n; c++) {
+        if (sums[0][c] != sums[1][c] || sums[1][c] != sums[2][c]) {
+            bad++;
+            TLOG("verify: DIFFERENT at %04x: sent %04x, read %04x then %04x\n", (unsigned) (d + c * CH),
+                sums[0][c], sums[1][c], sums[2][c]);
+        }
+    }
+    TLOG("verify: %04x len %u, %d of %u parts different\n", d, (unsigned) keep, bad, (unsigned) n);
+}
+#endif
+
 static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bool load) {
     const bool tzx = tape_is_tzx(tape_name);
     uint32_t blen;
     bool more = tape_next_block(tape_file, tzx, blen);
     if (more) tape_done++;
-    tape_block_ms = to_ms_since_boot(get_absolute_time());
+    tape_block_ms = tape_served_ms = to_ms_since_boot(get_absolute_time());
     if (!more) {
         // The end of the tape: the load fails (as it would wait for ever on a real tape) and
         // the tape is rewound, so the next load starts from the first block again.
@@ -10479,6 +14590,9 @@ static bool tape_serve_block_at(uint8_t flag, uint16_t dest, uint16_t length, bo
         bool sent = sendNmiAndWaitForCompletion(STARTUP_ACTION_LOAD_MEMORY, d, keep);
         enable_logging = loggingWasEnabled;
         if (!sent) return false;
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+        tape_verify(d, keep);
+#endif
     }
     return ok;
 }
@@ -10509,7 +14623,9 @@ static void tape_service_poll() {
     }
 #endif
     bool load = mbox[6] != 0;
+    TLOG("tape: flag %02x to %04x len %u load %d (block %lu)\n", flag, dest, length, load, (unsigned long) tape_done);
     bool ok = tape_serve_block(flag, dest, length, load);
+    TLOG("tape: %s\n", ok ? "ok" : "failed");
     mbox[0] = ok ? 2 : 3;
 }
 
@@ -10712,6 +14828,7 @@ static int level_loaders_patch(uint8_t* mem, uint32_t n, uint32_t base, uint16_t
 // menu has gone) and its level loaders patched. Called from the main loop.
 static void level_loaders_poll() {
     if (!level_loaders_scan_pending || rom_state.nmi_active || (rom_state.flags & 0x2) != 0) return;
+    if (tape_loading()) return;         // (once the tape has stopped)
     level_loaders_scan_pending = false;
     if (!cfg.level_loaders || !tape_service_active || tape_ejected || tape_rec || sna_in_buffer) return;
     if (loaded_paging.valid && (loaded_paging.port & 0x30) == 0) {
@@ -11358,8 +15475,11 @@ static void opt_draw(uint8_t* screen) {
     help_put_text(screen, 0, 1, title, (int) strlen(title), gameinfo::ATTR_BANNER);
     char v[40];
     if (opt_page == 0) {
-        for (int i = 0; i < options::MAIN_COUNT; i++) {
-            int row = 1 + i;
+        // (20 rows of them: the page moves down with the cursor past the 20th)
+        static const int ROWS = 20;
+        const int top = opt_cursor[0] >= ROWS ? opt_cursor[0] - ROWS + 1 : 0;
+        for (int i = top; i < options::MAIN_COUNT && i < top + ROWS; i++) {
+            int row = 1 + i - top;
             bool here = i == opt_cursor[0];
             uint8_t attr = here ? OPT_ATTR_CURSOR : gameinfo::ATTR_TEXT;
             if (here) memset(screen + 6144 + row * 32, OPT_ATTR_CURSOR, 32);
@@ -11378,7 +15498,6 @@ static void opt_draw(uint8_t* screen) {
             help_put_text(screen, row, 15, shown, (int) strlen(shown), here ? attr : gameinfo::ATTR_HEADING);
         }
         const char* hint = options::ITEMS[opt_cursor[0]].hint;
-        static_assert(1 + options::MAIN_COUNT <= 21, "the items above the hint");
         help_put_text(screen, 21, 1, hint, (int) strlen(hint), gameinfo::ATTR_DIM);
         help_put_text(screen, 22, 1, "Q/A-Up/Down  C-Change  X-Back", 29, gameinfo::ATTR_KEYS);
 #if PICOMENU_WIFI_UI
@@ -13801,6 +17920,9 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         // for them, the card is checked, and the game's time stops for the checkpoints
         const bool menuish = command == 0 || command == STARTUP_ACTION_SAVE_SCREEN || command == STARTUP_ACTION_GRAB_SCREEN;
         if (menuish) sd_check();             // is the card still well?
+#if PICOMENU_TROPHIES
+        if (trw.wait) tr_peek_harvest();     // (what the last look at the memory read, before it goes)
+#endif
         nmi_rom_unpack(nmi_rom_data);        // (kept packed in the firmware)
         nmi_menu_open = menuish;
         if (menuish) checkpoint_menu_opens();
@@ -13857,13 +17979,36 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
         }
         if (hotkey_nmi && command == 0) {
             // the button with hotkeys: hotkeys called in place of startmenu (see there)
-            lzss_unpack(HOTKEYS_LZ, nmi_rom_data + HOTKEYS_AT, HOTKEYS_SIZE);
+            blob_unpack(HOTKEYS_Z, nmi_rom_data + HOTKEYS_AT, HOTKEYS_SIZE);
             nmi_rom_data[HK_CALLMENU + 1] = (uint8_t) (HOTKEYS_AT & 0xFF);
             nmi_rom_data[HK_CALLMENU + 2] = (uint8_t) (HOTKEYS_AT >> 8);
         }
         hotkey_nmi = false;
 #if PICOMENU_HISCORE
         if (command == 0) hs_menu_nmi(nmi_rom_data);       // (after hotkeys: it goes on to them)
+#endif
+#if !PICOMENU_TROPHIES
+        if (command == 0) {
+            nmi_rom_data[TROPHY_ITEM] |= 0x80;          // (no trophies: Y is not on the menu,
+            nmi_rom_data[TROPHY_MAKER_ITEM] |= 0x80;    // nor in Tools)
+        }
+#endif
+#if PICOMENU_TROPHIES
+        if (command == STARTUP_ACTION_CHECKPOINT && tr.nmi) {
+            // not an autosave: a trophy's banner (tr_poll)
+            tr.nmi = false;
+            tr_code(nmi_rom_data);
+        } else
+        if (command == STARTUP_ACTION_CHECKPOINT && tr.peek) {
+            tr.peek = false;
+            tr.peeking = true;
+            tr_peek_code(nmi_rom_data);         // a look at the memory (tr_poll)
+        } else
+#endif
+#if PICOMENU_RESET_PIN
+        if (command == STARTUP_ACTION_CHECKPOINT && reset_pin_check_code(nmi_rom_data)) {
+            // not an autosave: the paging tested after a reset by the reset pin
+        } else
 #endif
 #if PICOMENU_HISCORE
         if (command == STARTUP_ACTION_CHECKPOINT && hs_auto_nmi) {
@@ -13881,30 +18026,44 @@ bool sendNmiRequest(uint8_t command, uint16_t param1, uint16_t param2) {
 #if PICOMENU_CP_OLD
             memcpy(nmi_rom_data + CP_AT, CP_OLD_BIN, CP_OLD_SIZE);      // (a test build: Rev 2.5.0's way)
 #else
-            lzss_unpack(CP_SAVE_LZ, nmi_rom_data + CP_AT, CP_SIZE);
+            blob_unpack(CP_SAVE_Z, nmi_rom_data + CP_AT, CP_SIZE);
             save_stream_start();
 #endif
             cp_nmi_at = time_us_64();
         }
+        TLOG("nmi %u %04x %04x flags %lx exit %lx\n", command, param1, param2, (unsigned long) rom_state.flags,
+            (unsigned long) rom_state.flags_on_nmi_exit);
         rom_state.flags |= 2;
         gpio_put(PIN_NMI, false);
 #ifdef PICOFACE_HOST
         sleep_ms(3);
+        if (rom_state.nmi_active) {
+            nmi_rom_data[0x66] = 0xED;
+            nmi_rom_data[0x67] = 0x45;
+        }
 #else
-        // (Rev 2.6.1) A second NMI while the NMI ROM runs starts it again over itself: the game's
-        // registers are lost and it crashes on the way out. On a standard Pico the line held low
-        // for 3 ms sometimes gave one (a 128K tape's big blocks, loaded through the NMI ROM, then
-        // looped). So the line is held low only until the NMI is taken (the bus handler sets
-        // nmi_active at the fetch from 0x66, a few us; at most 3 ms as before), and once the Z80
-        // is past 0x66/0x67 they become RETN: a second NMI returns at once. (nmi_rom_unpack puts
-        // the NMI ROM back as it was for the next NMI.)
+        // (2.7.0 test 19) A second NMI while the NMI ROM runs starts it again over itself: the
+        // game's registers are lost and it crashes on the way out (a standard Pico's logs: the
+        // registers kept were the NMI ROM's own, SP 38B9, from its first wait for the Pico, so
+        // within the 3 ms the line used to be held low). So the line is held low only until
+        // the NMI is taken (the bus handler sets nmi_active at the fetch from 0x66, a few us),
+        // and once the Z80 is past 0x66/0x67 they become RETN: a second NMI returns at once.
+        // (nmi_rom_unpack puts the NMI ROM back as it was for the next NMI.)
         uint32_t nmi_t0 = time_us_32();
         while (!rom_state.nmi_active && time_us_32() - nmi_t0 < 3000) { }
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+        uint32_t nmi_us = time_us_32() - nmi_t0;
+#endif
         if (rom_state.nmi_active) {
             busy_wait_us(20);       // (some 70 T-states: the NOP and the next instruction)
             nmi_rom_data[0x66] = 0xED;
             nmi_rom_data[0x67] = 0x45;
         }
+        gpio_put(PIN_NMI, true);
+#if defined(PICOMENU_TLOG) && PICOMENU_TLOG
+        TLOG("nmi taken after %lu us%s\n", (unsigned long) nmi_us, rom_state.nmi_active ? "" : " (or ended)");
+#endif
+        return true;
 #endif
         gpio_put(PIN_NMI, true);
         return true;
@@ -14118,10 +18277,13 @@ static bool conv_start(bool as128) {
     return true;
 }
 
-struct ConvSink {
-    FileHandle* f;
-    bool write(const uint8_t* p, uint32_t n) { return f->write(p, n) == (int) n; }
-};
+using ConvSink = FileSink;
+__attribute__((noinline)) bool FileSink::write(const uint8_t* data, uint32_t size) {
+    if (fh != nullptr) return fh->write(data, size) == (int) size;
+    if (fat == nullptr) return pico_write(lfs, data, size) == (lfs_ssize_t) size;
+    UINT written = 0;
+    return f_write(fat, data, size, &written) == FR_OK && written == size;
+}
 
 // Saves the snapshot beside the tape. False if it could not.
 static bool conv_save(char* saved, size_t savedsize) {
@@ -14147,7 +18309,7 @@ static bool conv_save(char* saved, size_t savedsize) {
     uint16_t pc;
     pconv::sna_header(c.machine, h, pc);
     if (!c.file.open(drive, out, false)) return false;
-    ConvSink sink{ &c.file };
+    ConvSink sink = { nullptr, -1, &c.file };
     bool ok;
     if (conv_as128) {
         snapload::sna_to_z80_header(h, (uint8_t) pc, (uint8_t) (pc >> 8), buf);
@@ -14926,7 +19088,17 @@ bool button_act(extras::Press press) {
     case extras::Press::SHORT: return sendNmiRequest(0, 0, 0);
     case extras::Press::HOLD: return button_press_action(true);
     case extras::Press::DOUBLE: return button_press_action(false);
-    default: reset_spectrum_to_internal_rom(); return true;
+    default:
+#if PICOMENU_RESET_PIN
+        if (cfg.reset_pin != 0) {
+            // the reset pin: a real reset (the paging unlocked, the 128's own menu), as the
+            // picoFace's reset button
+            reset_pin_start(false);
+            return true;
+        }
+#endif
+        reset_spectrum_to_internal_rom();
+        return true;
     }
 }
 
@@ -15018,6 +19190,15 @@ int main() {
 
     sleep_ms(200);
     initFileSystem();
+#if PICOMENU_RESET_PIN && !defined(PICOFACE_HOST)
+    // just updated (fw_run's note): the Spectrum was left in the update's screen with no Pico
+    // under it, so it is reset through the reset mod's pin, if there is one
+    if (watchdog_hw->scratch[0] == FW_UPDATED) {
+        watchdog_hw->scratch[0] = 0;
+        settings_fresh();
+        if (cfg.reset_pin != 0) reset_pin_start(false);
+    }
+#endif
 
     uint8_t* nmi_rom_data = rom_data + 16384;
 
@@ -15055,12 +19236,21 @@ int main() {
         #if PICOMENU_HISCORE
         hs_auto_poll();         // (not snap_load_buffer: with the Bluetooth on too)
         #endif
+        #if PICOMENU_TROPHIES
+        tr_poll();              // (list_pool and spare_space: with the Bluetooth on too)
+        #endif
         #ifdef WIFI_ENABLE
         if (!bt_on) {           // (the Bluetooth's memory is in snap_load_buffer, which they use)
+            #if PICOMENU_RESET_PIN
+            reset_pin_poll();   // (the 128K memory locked: a reset, then the load)
+            #endif
             level_loaders_poll();
             checkpoint_poll();
         }
         #else
+        #if PICOMENU_RESET_PIN
+        reset_pin_poll();
+        #endif
         level_loaders_poll();
         checkpoint_poll();
         #endif

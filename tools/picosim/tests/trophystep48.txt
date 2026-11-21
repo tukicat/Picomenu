@@ -1,0 +1,213 @@
+# The "done once" search's L (Pico W): after the After rounds, only the addresses that went up or
+# down by exactly 1 kept (a counter's step): a day (0, then 1) and a flag (0, then 1) stay, a
+# street's layout (10, then 77) and a jump (5, then 9) go, without waiting for the next day. G the
+# next day then leaves only the day; the trophy suggested is "is at least" what it has got to.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23344 0
+poke 23345 10
+poke 23346 0
+poke 23347 5
+poke 23343 1
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key 3
+wait 20
+expect L  keep those changed by 1
+key l
+wait 20
+expect L comes after an After round
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 0
+poke 23345 10
+poke 23346 0
+poke 23347 5
+poke 23343 2
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key b
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 1
+poke 23347 9
+poke 23343 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 1
+poke 23347 9
+poke 23343 4
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 1
+poke 23347 9
+poke 23343 5
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key a
+wait 200
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 1
+poke 23345 77
+poke 23346 1
+poke 23347 9
+poke 23343 6
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key l
+wait 20
+expect 23344: 0 before, 1 after
+expect 23346: 0 before, 1 after
+expectnot 23345:
+expectnot 23347:
+shot {OUT}/step-list.scr
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30
+poke 23344 2
+poke 23345 3
+poke 23346 1
+poke 23347 9
+poke 23343 7
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+key f
+wait 20
+key n
+wait 20
+key g
+wait 200
+expect 23344: 1 before, 2 after
+expectnot 23346:
+key 1
+wait 20
+expect Recommended:
+expect Won when 23344 is at least 2
+key BREAK
+wait 20
+key BREAK
+wait 20
+key x
+wait 20
+key x
+wait 20
+key x
+wait 30
+key x
+wait 30

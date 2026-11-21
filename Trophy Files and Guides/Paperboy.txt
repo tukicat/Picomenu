@@ -1,0 +1,59 @@
+; PicoMenu's trophies for this game: made with Y on the menu, or written here.
+; Each one: [Trophy], name = (18 letters), about = (60 letters), and what wins it:
+;   score = 50000   a new score of 50000 or more in its high score table
+;   top = 1         a new score above the top one the table came with
+;   place = 3       a new score in the top 3 of the table
+;   peek = 23610 >= 3   its memory: an address (decimal, or $5C3A), w for a word,
+;                   & 127 for some of its bits only, then = <> >= <= > <
+;                   and a number, or changed, up, down; up by 1: up by exactly 1;
+;                   not down: it hasn't gone down (with held = 300: for 5 minutes)
+;                   65000d6: 6 bytes as a number's digits; rises 400: up by 400
+;   (up to 4 peeks, all true; match = any: one of them; held = 5: for 5 seconds;
+;   within = 2: each counts as true for 2 seconds after, and rises within them)
+;   need = Top 3: Swimming   won once that trophy of this game is won too: a need
+;                   line for each (or names with commas between); all of them
+; checks = 1 (at the top): its memory is looked at once a second (0 never, up to 10).
+
+checks = 4
+[Trophy]
+name = Top 10
+about = Into the top 10 of the high score table
+place = 10
+
+[Trophy]
+name = Top 5
+about = Into the top 5 of the high score table
+place = 5
+
+[Trophy]
+name = Top Paperboy
+about = First place in the high score table
+place = 1
+
+[Trophy]
+name = Straight in!
+about = Throw a newspaper into a mailbox
+peek = 52351d6 up by 250
+peek = 52367 up by 1
+within = 1
+
+[Trophy]
+name = Clean to wednesday
+about = Get to wednesday without losing a life
+peek = 52350 >= 2
+peek = 52349 = 5
+
+[Trophy]
+name = A weeks work
+about = Complete all 7 days of the week
+peek = 52350 >= 7
+
+[Trophy]
+name = Top Dog
+about = Win all 6 trophies to become the top dog
+need = Top 10
+need = Top 5
+need = Top Paperboy
+need = Straight in!
+need = Clean to wednesday
+need = A weeks work

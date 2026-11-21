@@ -1,0 +1,50 @@
+; PicoMenu's trophies for this game: made with Y on the menu, or written here.
+; Each one: [Trophy], name = (18 letters), about = (60 letters), and what wins it:
+;   score = 50000   a new score of 50000 or more in its high score table
+;   top = 1         a new score above the top one the table came with
+;   place = 3       a new score in the top 3 of the table
+;   peek = 23610 >= 3   its memory: an address (decimal, or $5C3A), w for a word,
+;                   & 127 for some of its bits only, then = <> >= <= > <
+;                   and a number, or changed, up, down; up by 1: up by exactly 1;
+;                   not down: it hasn't gone down (with held = 300: for 5 minutes)
+;                   65000d6: 6 bytes as a number's digits; rises 400: up by 400
+;   (up to 4 peeks, all true; match = any: one of them; held = 5: for 5 seconds;
+;   within = 2: each counts as true for 2 seconds after, and rises within them)
+;   need = Top 3: Swimming   won once that trophy of this game is won too: a need
+;                   line for each (or names with commas between); all of them
+; checks = 1 (at the top): its memory is looked at once a second (0 never, up to 10).
+
+[Trophy]
+name = Brrrrr it's cold
+about = Make it to the cold room
+peek = 33799 = 1
+
+[Trophy]
+name = Hello Eugene
+about = Reach Eugene's lair without losing a life
+peek = 33799 >= 4
+peek = 33879 >= 2
+
+[Trophy]
+name = Completed it mate
+about = Complete all levels and loop back to level 1
+peek = 33799 down
+
+[Trophy]
+name = Just in time
+about = Complete a level with your air in the red
+peek = 32956 < 41
+
+[Trophy]
+name = Score 10000
+about = Score 10000 and get an extra life
+peek = 33831d8 >= 10000
+
+[Trophy]
+name = Manic Master
+about = Win all five trophies to be crowned the Manic Master
+need = Brrrrr it's cold
+need = Hello Eugene
+need = Completed it mate
+need = Just in time
+need = Score 10000

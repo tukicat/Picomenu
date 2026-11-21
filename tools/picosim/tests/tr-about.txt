@@ -1,0 +1,10 @@
+checks = 4
+
+[Trophy]
+name = Light my Fire
+peek = 23300 = 1
+
+[Trophy]
+name = Door B
+about = Open door B
+peek = 23301 = 1

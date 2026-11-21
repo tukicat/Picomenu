@@ -1,0 +1,8 @@
+N Infinite lives
+M 8 23340 0 53
+Z 8 23341 0 39
+N Choose a value
+Z 8 23342 256 7
+N In bank 1
+Z 1 49152 9 0
+Y

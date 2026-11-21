@@ -1,0 +1,95 @@
+# "up by" (Pico W): a lives counter going up by exactly 1 (a life picked up) wins it; filled up
+# again for a new game (0 to 3) doesn't. Made in the Trophy creator: C, 4, the address, U, 1.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+poke 23360 3
+nmi
+wait 30
+key t
+wait 30
+key y
+wait 30
+expect Creator: Alpha
+key c
+wait 20
+key 4
+wait 20
+key 2
+wait 10
+key 3
+wait 10
+key 3
+wait 10
+key 6
+wait 10
+key 0
+wait 10
+key ENTER
+wait 20
+expect U  goes up by exactly a number
+key u
+wait 20
+expect When 23360 up by
+key 1
+wait 20
+key ENTER
+wait 20
+expect For how many seconds must it
+key ENTER
+wait 20
+expect Memory 23360_
+key ENTER
+wait 30
+expect Won when 23360 goes up by
+expect exactly 1.
+key ENTER
+wait 30
+expect Made: T tries it out
+expectfile sd /Trophies/Alpha.txt|peek = 23360 up by 1
+key x
+wait 30
+key x
+wait 30
+key x
+wait 30
+trophies on
+clock 3000
+wait 20
+clock 1000
+wait 20
+poke 23360 2
+clock 1000
+wait 20
+poke 23360 0
+clock 1000
+wait 20
+# a new game: 0 to 3
+poke 23360 3
+clock 1000
+wait 20
+clock 5000
+wait 60
+expectnot TROPHY UNLOCKED!
+# a life picked up: 3 to 4
+poke 23360 4
+clock 1000
+wait 20
+clock 5000
+wait 60
+expect TROPHY UNLOCKED!
+expect Memory 23360
+wait 400
+trophies off

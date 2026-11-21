@@ -1,0 +1,60 @@
+# A big .pok (210 cheats): its names are read from the file a page at a time, so 200 cheats
+# are kept (not 40), and the list's title says how many were left out. A cheat on page 5 is
+# made, and V shows a name read from the file.
+sd /48.rom {ROM48}
+sd /Picomenu.ini {HERE}/autosave-20.ini
+sd /Games/Alpha.z80 {TAPES}/Green_Beret_1986ImagineSpeedLock_2-48.z80
+sd /Poke List/Alpha.pok {HERE}/pokebig.pok
+boot
+nmi
+wait 30
+key b
+wait 50
+key 1
+wait 50
+key 1
+wait 50
+expect Autosave this game?
+key y
+wait 300
+nmi
+wait 30
+key p
+wait 30
+key l
+wait 30
+expect Poke list (10 not shown)
+expect Cheat 1
+expect Cheat 10
+key n
+wait 20
+key n
+wait 20
+key n
+wait 20
+key n
+wait 20
+expect Cheat 41
+expect Cheat 45 with a name
+key 5
+wait 30
+expect Pokes made: 1
+expectmem 23345 45
+key ENTER
+wait 20
+expect Cheat 45 with a name
+key v
+wait 30
+key 1
+wait 30
+expect Poke: Cheat 41
+expect 23341
+key x
+wait 20
+key x
+wait 20
+expect Cheat 41
+key x
+wait 20
+key x
+wait 20
